@@ -1,0 +1,17 @@
+[project]
+name = "bandsox"
+version = "0.1.0"
+description = "Fast Firecracker microVM manager"
+authors = [{name = "Antigravity", email = "antigravity@deepmind.com"}]
+    "requests",
+    "requests-unixsocket",
+    "fastapi",
+    "uvicorn",
+    "websockets",
+    "pydantic",
+]
+requires-python = ">=3.8"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

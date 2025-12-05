@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BandSox</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    },
+                    colors: {
+                        zinc: {
+                            850: '#202022',
+                            950: '#0c0c0e',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+
+        .glass {
+            background: rgba(255, 255, 255, 0.03);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .btn-icon {
+            transition: all 0.2s ease;
+        }
+
+        .btn-icon:hover {
+            transform: translateY(-1px);
+        }
+
+        .btn-icon:active {
+            transform: translateY(0);
+        }
+    </style>
+</head>
+
+<body class="bg-black text-zinc-200 min-h-screen p-6 md:p-12 selection:bg-white selection:text-black">
+    <div class="max-w-6xl mx-auto space-y-12">
+        <!-- Header -->
+        <header class="flex justify-between items-end border-b border-zinc-800 pb-6">
+            <div>
+                <h1 class="text-4xl font-light tracking-tight text-white mb-2">BandSox</h1>
+                <p class="text-zinc-500 text-sm">MicroVM Orchestration & Management</p>
+            </div>
+            <div class="flex items-center gap-4">
+                <span class="text-xs text-zinc-600 font-mono" id="last-updated"></span>
+                <button onclick="refreshData()"
+                    class="group flex items-center gap-2 px-4 py-2 bg-white text-black text-sm font-medium rounded hover:bg-zinc-200 transition-colors">
+                    <svg class="w-3.5 h-3.5 transition-transform group-hover:rotate-180" fill="none"
+                        stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
+                        </path>
+                    </svg>
+                    Refresh
+                </button>
+            </div>
+        </header>
+
+        <!-- VMs Section -->
+        <section class="space-y-6">
+            <div class="flex items-center gap-3">
+                <h2 class="text-xl font-medium text-white">Active Sandboxes</h2>
+                <span id="vm-count"
+                    class="px-2 py-0.5 rounded text-xs font-mono bg-zinc-900 text-zinc-400 border border-zinc-800">0</span>
+            </div>
+
+            <div class="w-full overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950/50">
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="border-b border-zinc-800 text-xs uppercase tracking-wider text-zinc-500 font-medium">
+                            <th class="px-6 py-4 font-mono">ID</th>
+                            <th class="px-6 py-4">Source</th>
+                            <th class="px-6 py-4">Resources</th>
+                            <th class="px-6 py-4">Status</th>
+                            <th class="px-6 py-4 text-right">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="vm-list" class="divide-y divide-zinc-800/50 text-sm">
+                        <!-- VM Rows -->
+                    </tbody>
+                </table>
+                <div id="no-vms" class="hidden p-12 text-center text-zinc-600 font-light">
+                    No active sandboxes found.
+                </div>
+            </div>
+        </section>
+
+        <!-- Snapshots Section -->
+        <section class="space-y-6">
+            <h2 class="text-xl font-medium text-white">Snapshots</h2>
+            <div class="w-full overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950/50">
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="border-b border-zinc-800 text-xs uppercase tracking-wider text-zinc-500 font-medium">
+                            <th class="px-6 py-4">Name</th>
+                            <th class="px-6 py-4">Path</th>
+                            <th class="px-6 py-4 text-right">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="snapshot-list" class="divide-y divide-zinc-800/50 text-sm">
+                        <!-- Snapshot Rows -->
+                    </tbody>
+                </table>
+                <div id="no-snapshots" class="hidden p-12 text-center text-zinc-600 font-light">
+                    No snapshots available.
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <!-- Snapshot Modal -->
+    <div id="snapshot-modal"
+        class="fixed inset-0 bg-black/90 hidden items-center justify-center z-50 backdrop-blur-sm transition-opacity">
+        <div
+            class="bg-zinc-900 p-8 rounded-xl border border-zinc-800 w-full max-w-md shadow-2xl transform transition-all scale-100">
+            <h3 class="text-xl font-medium text-white mb-2">Create Snapshot</h3>
+            <p class="text-zinc-500 text-sm mb-6">Enter a name for this snapshot to save the current state.</p>
+
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-xs uppercase text-zinc-500 font-medium mb-1.5">Name</label>
+                    <input type="text" id="snapshot-name" placeholder="e.g., pre-update-backup"
+                        class="w-full bg-black border border-zinc-800 rounded-lg px-4 py-3 text-white placeholder-zinc-700 focus:ring-1 focus:ring-white focus:border-white outline-none transition-all font-mono text-sm">
+                </div>
+
+                <div class="flex justify-end gap-3 pt-2">
+                    <button onclick="closeModal()"
+                        class="px-4 py-2 text-zinc-400 hover:text-white text-sm transition-colors">Cancel</button>
+                    <button onclick="confirmSnapshot()"
+                        class="bg-white hover:bg-zinc-200 text-black px-6 py-2 rounded-lg text-sm font-medium transition-colors">Save
+                        Snapshot</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirmation Modal -->
+    <div id="confirm-modal"
+        class="fixed inset-0 bg-black/90 hidden items-center justify-center z-50 backdrop-blur-sm transition-opacity">
+        <div
+            class="bg-zinc-900 p-8 rounded-xl border border-zinc-800 w-full max-w-md shadow-2xl transform transition-all scale-100">
+            <div class="flex items-center gap-3 mb-3">
+                <div class="w-10 h-10 rounded-full bg-red-950/30 flex items-center justify-center">
+                    <svg class="w-5 h-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z">
+                        </path>
+                    </svg>
+                </div>
+                <h3 class="text-xl font-medium text-white" id="confirm-title">Confirm Action</h3>
+            </div>
+            <p class="text-zinc-400 text-sm mb-6 ml-13" id="confirm-message">Are you sure you want to proceed?</p>
+
+            <div class="flex justify-end gap-3">
+                <button onclick="closeConfirmModal()"
+                    class="px-4 py-2 text-zinc-400 hover:text-white text-sm transition-colors">Cancel</button>
+                <button id="confirm-action-btn" onclick="confirmAction()"
+                    class="bg-red-600 hover:bg-red-700 text-white px-6 py-2 rounded-lg text-sm font-medium transition-colors">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentVmId = null;
+
+        async function refreshData() {
+            const now = new Date();
+            document.getElementById('last-updated').textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+            try {
+                const res = await fetch('/api/vms');
+                if (!res.ok) throw new Error(`API Error: ${res.status}`);
+                const vms = await res.json();
+                renderVMs(vms);
+            } catch (e) {
+                console.error("Failed to fetch VMs", e);
+                document.getElementById('last-updated').textContent = 'Connection Error';
+                document.getElementById('last-updated').classList.add('text-red-500');
+            }
+
+            try {
+                const res = await fetch('/api/snapshots');
+                if (!res.ok) throw new Error(`API Error: ${res.status}`);
+                const snaps = await res.json();
+                renderSnapshots(snaps);
+            } catch (e) {
+                console.error("Failed to fetch snapshots", e);
+            }
+        }
+
+        function renderVMs(vms) {
+            const tbody = document.getElementById('vm-list');
+            const noVms = document.getElementById('no-vms');
+            const count = document.getElementById('vm-count');
+
+            tbody.innerHTML = '';
+            count.textContent = vms.length;
+
+            if (vms.length === 0) {
+                noVms.classList.remove('hidden');
+            } else {
+                noVms.classList.add('hidden');
+                vms.forEach(vm => {
+                    const row = document.createElement('tr');
+                    row.className = 'group hover:bg-zinc-900/50 transition-colors';
+
+                    // Determine status display
+                    let statusColor = 'emerald';
+                    let statusText = 'Running';
+                    let statusDot = `<span class="relative flex h-2 w-2">
+                             <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                             <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                           </span>`;
+
+                    let actionButtons = '';
+
+                    if (vm.status === 'paused') {
+                        statusColor = 'amber';
+                        statusText = 'Paused';
+                        statusDot = `<span class="relative flex h-2 w-2">
+                             <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+                           </span>`;
+                        actionButtons = `<button id="btn-resume-${vm.id}" onclick="resumeVm('${vm.id}')" 
+                             class="btn-icon h-8 min-w-[70px] flex items-center justify-center rounded border border-zinc-700 hover:border-emerald-500 text-zinc-300 hover:text-emerald-400 text-xs font-medium transition-all bg-transparent">
+                             Resume
+                           </button>`;
+                    } else if (vm.status === 'stopped') {
+                        statusColor = 'red';
+                        statusText = 'Stopped';
+                        statusDot = `<span class="relative flex h-2 w-2">
+                             <span class="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                           </span>`;
+                        actionButtons = `<button id="btn-delete-${vm.id}" onclick="deleteVm('${vm.id}')" 
+                             class="btn-icon h-8 min-w-[70px] flex items-center justify-center rounded border border-zinc-800 hover:border-red-900/50 text-zinc-400 hover:text-red-400 text-xs font-medium transition-all bg-transparent hover:bg-red-950/10">
+                             Delete
+                           </button>`;
+                    } else {
+                        // Running
+                        actionButtons = `<button id="btn-pause-${vm.id}" onclick="pauseVm('${vm.id}')" 
+                             class="btn-icon h-8 min-w-[70px] flex items-center justify-center rounded border border-zinc-700 hover:border-zinc-500 text-zinc-300 hover:text-white text-xs font-medium transition-all bg-transparent">
+                             Pause
+                           </button>`;
+                    }
+
+                    // Stop button (only for running/paused)
+                    if (vm.status !== 'stopped') {
+                        actionButtons += `<button id="btn-stop-${vm.id}" onclick="stopVm('${vm.id}')" 
+                                    class="btn-icon h-8 min-w-[70px] flex items-center justify-center rounded border border-zinc-800 hover:border-red-900/50 text-zinc-400 hover:text-red-400 text-xs font-medium transition-all bg-transparent hover:bg-red-950/10 ml-2">
+                                    Stop
+                                </button>`;
+                    }
+
+                    row.innerHTML = `
+                        <td class="px-6 py-4 font-mono text-zinc-400 group-hover:text-zinc-300">
+                            <a href="/vm_details?id=${vm.id}" class="flex flex-col hover:opacity-80 transition-opacity">
+                                <span class="text-white font-medium mb-0.5 hover:underline">${vm.name || vm.image}</span>
+                                <span class="text-xs text-zinc-600">${vm.id.substring(0, 8)}</span>
+                            </a>
+                        </td>
+                        <td class="px-6 py-4">
+                            <span class="inline-flex items-center px-2.5 py-1 rounded border border-zinc-800 bg-zinc-900/50 text-zinc-300 text-xs font-mono">
+                                ${vm.image}
+                            </span>
+                        </td>
+                        <td class="px-6 py-4 text-zinc-400">${vm.vcpu} vCPU <span class="text-zinc-600 mx-1">/</span> ${vm.mem_mib} MiB</td>
+                        <td class="px-6 py-4">
+                            <div class="flex items-center gap-2">
+                                ${statusDot}
+                                <span class="text-${statusColor}-500 text-xs font-medium uppercase tracking-wide">${statusText}</span>
+                            </div>
+                        </td>
+                        <td class="px-6 py-4 text-right">
+                            <div class="flex justify-end items-center gap-2">
+                                ${actionButtons}
+                                <button onclick="openSnapshotModal('${vm.id}')" 
+                                    class="btn-icon h-8 px-3 flex items-center justify-center rounded border border-zinc-800 hover:border-zinc-600 text-zinc-400 hover:text-white text-xs font-medium transition-all bg-transparent ml-2">
+                                    Snapshot
+                                </button>
+                            </div>
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            }
+        }
+
+        function renderSnapshots(snaps) {
+            const tbody = document.getElementById('snapshot-list');
+            const noSnaps = document.getElementById('no-snapshots');
+
+            tbody.innerHTML = '';
+
+            if (snaps.length === 0) {
+                noSnaps.classList.remove('hidden');
+            } else {
+                noSnaps.classList.add('hidden');
+                snaps.forEach(snap => {
+                    const row = document.createElement('tr');
+                    row.className = 'group hover:bg-zinc-900/50 transition-colors';
+                    row.innerHTML = `
+                        <td class="px-6 py-4 font-medium text-white">${snap.id}</td>
+                        <td class="px-6 py-4 text-zinc-500 font-mono text-xs truncate max-w-xs">${snap.path}</td>
+                        <td class="px-6 py-4 text-right">
+                            <button id="btn-delete-snap-${snap.id}" onclick="deleteSnapshot('${snap.id}')" 
+                                class="h-8 px-4 rounded border border-zinc-800 hover:border-red-900/50 text-zinc-400 hover:text-red-400 text-xs font-medium transition-all bg-transparent hover:bg-red-950/10">
+                                Delete
+                            </button>
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            }
+        }
+
+        function setLoading(btnId, isLoading) {
+            const btn = document.getElementById(btnId);
+            if (!btn) return;
+
+            if (isLoading) {
+                if (!btn.dataset.originalText) btn.dataset.originalText = btn.innerText;
+                btn.disabled = true;
+                btn.classList.add('opacity-50', 'cursor-not-allowed');
+                btn.innerHTML = `<svg class="animate-spin h-3.5 w-3.5 text-current" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>`;
+            } else {
+                btn.disabled = false;
+                btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                btn.innerText = btn.dataset.originalText;
+            }
+        }
+
+        async function stopVm(id) {
+            showConfirmModal(
+                'Stop VM',
+                'Are you sure you want to stop this VM? You will lose any unsaved state.',
+                async () => {
+                    console.log('Stopping VM', id);
+                    setLoading(`btn-stop-${id}`, true);
+                    try {
+                        await fetch(`/api/vms/${id}/stop`, { method: 'POST' });
+                        refreshData();
+                    } catch (e) {
+                        console.error('Failed to stop VM', e);
+                        alert('Failed to stop VM: ' + e);
+                        setLoading(`btn-stop-${id}`, false);
+                    }
+                }
+            );
+        }
+
+        async function pauseVm(id) {
+            setLoading(`btn-pause-${id}`, true);
+            try {
+                await fetch(`/api/vms/${id}/pause`, { method: 'POST' });
+                refreshData();
+            } catch (e) {
+                alert('Failed to pause VM: ' + e);
+                setLoading(`btn-pause-${id}`, false);
+            }
+        }
+
+
+        async function resumeVm(id) {
+            console.log('Resuming VM', id);
+            setLoading(`btn-resume-${id}`, true);
+            try {
+                await fetch(`/api/vms/${id}/resume`, { method: 'POST' });
+                refreshData();
+            } catch (e) {
+                console.error('Failed to resume VM', e);
+                alert('Failed to resume VM: ' + e);
+                setLoading(`btn-resume-${id}`, false);
+            }
+        }
+
+        async function deleteVm(id) {
+            showConfirmModal(
+                'Delete VM',
+                'Are you sure you want to delete this VM? This action cannot be undone and all data will be lost.',
+                async () => {
+                    console.log('Deleting VM', id);
+                    setLoading(`btn-delete-${id}`, true);
+                    try {
+                        await fetch(`/api/vms/${id}`, { method: 'DELETE' });
+                        refreshData();
+                    } catch (e) {
+                        console.error('Failed to delete VM', e);
+                        alert('Failed to delete VM: ' + e);
+                        setLoading(`btn-delete-${id}`, false);
+                    }
+                }
+            );
+        }
+
+        async function deleteSnapshot(id) {
+            showConfirmModal(
+                'Delete Snapshot',
+                'Are you sure you want to delete this snapshot? This action cannot be undone.',
+                async () => {
+                    console.log('Deleting snapshot', id);
+                    setLoading(`btn-delete-snap-${id}`, true);
+                    try {
+                        await fetch(`/api/snapshots/${id}`, { method: 'DELETE' });
+                        refreshData();
+                    } catch (e) {
+                        console.error('Failed to delete snapshot', e);
+                        alert('Failed to delete snapshot: ' + e);
+                        setLoading(`btn-delete-snap-${id}`, false);
+                    }
+                }
+            );
+        }
+
+        // Confirmation Modal Functions
+        let confirmCallback = null;
+
+        function showConfirmModal(title, message, onConfirm) {
+            confirmCallback = onConfirm;
+            document.getElementById('confirm-title').textContent = title;
+            document.getElementById('confirm-message').textContent = message;
+            const modal = document.getElementById('confirm-modal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        }
+
+        function closeConfirmModal() {
+            const modal = document.getElementById('confirm-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            confirmCallback = null;
+        }
+
+        async function confirmAction() {
+            if (confirmCallback) {
+                const callback = confirmCallback;
+                closeConfirmModal();
+                try {
+                    await callback();
+                } catch (e) {
+                    console.error("Error in confirm callback:", e);
+                }
+            }
+        }
+
+        function openSnapshotModal(id) {
+            currentVmId = id;
+            const modal = document.getElementById('snapshot-modal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            setTimeout(() => document.getElementById('snapshot-name').focus(), 50);
+        }
+
+        function closeModal() {
+            const modal = document.getElementById('snapshot-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            currentVmId = null;
+            document.getElementById('snapshot-name').value = '';
+        }
+
+        async function confirmSnapshot() {
+            const name = document.getElementById('snapshot-name').value;
+            if (!name) return;
+
+            const btn = document.querySelector('#snapshot-modal button:last-child');
+            const originalText = btn.innerText;
+            btn.innerText = 'Saving...';
+            btn.disabled = true;
+
+            try {
+                await fetch(`/api/vms/${currentVmId}/snapshot`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name })
+                });
+                closeModal();
+                refreshData();
+            } catch (e) {
+                alert('Snapshot failed: ' + e);
+            } finally {
+                btn.innerText = originalText;
+                btn.disabled = false;
+            }
+        }
+
+        // Close modal on escape
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeModal();
+                closeConfirmModal();
+            }
+        });
+
+        // Initial load
+        refreshData();
+        // Auto refresh every 5s
+        setInterval(refreshData, 5000);
+    </script>
+</body>
+
+</html>
