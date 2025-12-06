@@ -30,6 +30,10 @@ async def read_index():
 async def read_vm_details():
     return FileResponse(os.path.join(static_dir, "vm_details.html"))
 
+@app.get("/terminal")
+async def read_terminal():
+    return FileResponse(os.path.join(static_dir, "terminal.html"))
+
 @app.get("/api/vms")
 def list_vms():
     return bs.list_vms()
