@@ -1,0 +1,4 @@
+
+    FROM python:alpine
+    RUN echo "Built from Dockerfile" > /root/built.txt
+    
