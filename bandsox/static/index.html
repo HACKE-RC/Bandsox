@@ -268,6 +268,12 @@
                                     class="btn-icon h-8 min-w-[70px] flex items-center justify-center rounded border border-zinc-800 hover:border-red-900/50 text-zinc-400 hover:text-red-400 text-xs font-medium transition-all bg-transparent hover:bg-red-950/10 ml-2">
                                     Stop
                                 </button>`;
+
+                        // Add Terminal Button
+                        actionButtons += `<a href="/terminal?id=${vm.id}" target="_blank"
+                                    class="btn-icon h-8 min-w-[70px] flex items-center justify-center rounded border border-zinc-700 hover:border-blue-500 text-zinc-300 hover:text-blue-400 text-xs font-medium transition-all bg-transparent ml-2">
+                                    Terminal
+                                </a>`;
                     }
 
                     row.innerHTML = `

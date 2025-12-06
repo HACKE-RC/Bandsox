@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BandSox Terminal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <style>
+        body,
+        html {
+            height: 100%;
+            margin: 0;
+            background-color: #0c0c0e;
+            overflow: hidden;
+        }
+
+        #terminal-container {
+            height: 100%;
+            width: 100%;
+            padding: 12px;
+            box-sizing: border-box;
+        }
+
+        /* Custom scrollbar for terminal */
+        .xterm-viewport::-webkit-scrollbar {
+            width: 10px;
+        }
+
+        .xterm-viewport::-webkit-scrollbar-track {
+            background: #0c0c0e;
+        }
+
+        .xterm-viewport::-webkit-scrollbar-thumb {
+            background: #333;
+            border-radius: 5px;
+        }
+
+        .xterm-viewport::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="terminal-container"></div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const vmId = urlParams.get('id');
+
+        if (!vmId) {
+            document.body.innerHTML = '<div class="text-white p-4">Error: No VM ID provided.</div>';
+            throw new Error("No VM ID");
+        }
+
+        const term = new Terminal({
+            theme: {
+                background: '#0c0c0e',
+                foreground: '#f0f0f0',
+                cursor: '#ffffff',
+                selectionBackground: 'rgba(255, 255, 255, 0.3)',
+                black: '#000000',
+                red: '#ef4444',
+                green: '#22c55e',
+                yellow: '#eab308',
+                blue: '#3b82f6',
+                magenta: '#d946ef',
+                cyan: '#06b6d4',
+                white: '#ffffff',
+                brightBlack: '#737373',
+                brightRed: '#f87171',
+                brightGreen: '#4ade80',
+                brightYellow: '#facc15',
+                brightBlue: '#60a5fa',
+                brightMagenta: '#e879f9',
+                brightCyan: '#22d3ee',
+                brightWhite: '#ffffff'
+            },
+            fontFamily: '"JetBrains Mono", monospace',
+            fontSize: 14,
+            cursorBlink: true,
+            cursorStyle: 'block'
+        });
+
+        const fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+
+        term.open(document.getElementById('terminal-container'));
+        fitAddon.fit();
+
+        // Initial connection
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/api/vms/${vmId}/terminal?cols=${term.cols}&rows=${term.rows}`;
+
+        let ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+            term.write('\r\n\x1b[32mConnected to BandSox VM Terminal\x1b[0m\r\n\r\n');
+            fitAddon.fit();
+            sendResize();
+        };
+
+        ws.onmessage = (event) => {
+            // Server sends base64 encoded data
+            const data = atob(event.data);
+            term.write(data);
+        };
+
+        ws.onclose = (event) => {
+            term.write(`\r\n\x1b[31mConnection closed (Code: ${event.code})\x1b[0m\r\n`);
+        };
+
+        ws.onerror = (error) => {
+            term.write('\r\n\x1b[31mConnection error\x1b[0m\r\n');
+            console.error('WebSocket error:', error);
+        };
+
+        term.onData(data => {
+            if (ws.readyState === WebSocket.OPEN) {
+                // Send input as base64
+                const encoded = btoa(data);
+                ws.send(JSON.stringify({
+                    type: 'input',
+                    data: encoded
+                }));
+            }
+        });
+
+        // Handle resizing
+        function sendResize() {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'resize',
+                    cols: term.cols,
+                    rows: term.rows
+                }));
+            }
+        }
+
+        window.addEventListener('resize', () => {
+            fitAddon.fit();
+            sendResize();
+        });
+
+        // Initial fit
+        setTimeout(() => {
+            fitAddon.fit();
+            sendResize();
+        }, 100);
+
+    </script>
+</body>
+
+</html>
