@@ -132,6 +132,8 @@ def main():
     create_parser.add_argument("--name", type=str, help="VM name")
     create_parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to connect to")
     create_parser.add_argument("--port", type=int, default=8000, help="Port to connect to")
+    create_parser.add_argument("--vcpu", type=int, default=1, help="Number of vCPUs")
+    create_parser.add_argument("--mem", type=int, default=128, help="Memory in MiB")
     
     init_parser = subparsers.add_parser("init", help="Initialize environment (download kernel)")
     init_parser.add_argument("--output", type=str, default="vmlinux", help="Output path for kernel")
@@ -150,6 +152,8 @@ def main():
             payload = {"image": args.image}
             if args.name:
                 payload["name"] = args.name
+            payload["vcpu"] = args.vcpu
+            payload["mem_mib"] = args.mem
             
             resp = requests.post(url, json=payload)
             if resp.status_code == 200:

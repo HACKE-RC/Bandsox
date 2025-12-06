@@ -95,7 +95,7 @@ class BandSox:
         self.active_vms[vm_id] = vm
         return vm
 
-    def create_vm_from_dockerfile(self, dockerfile_path: str, tag: str = None, name: str = None, **kwargs) -> MicroVM:
+    def create_vm_from_dockerfile(self, dockerfile_path: str, tag: str = None, name: str = None, vcpu: int = 1, mem_mib: int = 128, **kwargs) -> MicroVM:
         """Creates a VM from a Dockerfile."""
         if not tag:
             tag = f"bandsox-build-{uuid.uuid4()}"
@@ -103,9 +103,9 @@ class BandSox:
         from .image import build_image_from_dockerfile
         build_image_from_dockerfile(dockerfile_path, tag)
         
-        return self.create_vm(tag, name=name, **kwargs)
+        return self.create_vm(tag, name=name, vcpu=vcpu, mem_mib=mem_mib, **kwargs)
 
-    def restore_vm(self, snapshot_id: str, enable_networking: bool = True) -> MicroVM:
+    def restore_vm(self, snapshot_id: str, name: str = None, enable_networking: bool = True) -> MicroVM:
         """Restores a VM from a snapshot."""
         # Snapshot ID should point to a folder containing snapshot file and mem file
         snap_dir = self.snapshots_dir / snapshot_id
@@ -196,7 +196,7 @@ class BandSox:
         # Save metadata (inherit from snapshot if possible, or create new)
         self._save_metadata(new_vm_id, {
             "id": new_vm_id,
-            "name": f"from-{snapshot_id}",  # Descriptive name for restored VMs
+            "name": name if name else f"from-{snapshot_id}",  # Descriptive name for restored VMs
             "image": snapshot_meta.get("image", "snapshot:" + snapshot_id),
             "vcpu": snapshot_meta.get("vcpu", 1),
             "mem_mib": snapshot_meta.get("mem_mib", 128),
@@ -204,7 +204,8 @@ class BandSox:
             "status": "running",
             "restored_from": snapshot_id,
             "rootfs_path": str(instance_rootfs),
-            "pid": vm.process.pid
+            "pid": vm.process.pid,
+            "agent_ready": True
         })
         
         self.active_vms[new_vm_id] = vm

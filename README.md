@@ -5,7 +5,7 @@ BandSox is a fast, lightweight Python library and CLI for managing Firecracker m
 ## Features
 
 - **Fast Boot Times**: Leverages Firecracker's speed to start VMs in milliseconds.
-- **Docker Image Support**: Create VMs directly from Docker images.
+- **Docker Image Support**: Create VMs directly from Docker images (requires Python 3 installed in the image).
 - **Snapshotting**: Pause, resume, and snapshot VMs for instant restoration.
 - **Web Dashboard**: Visual interface to manage VMs, snapshots, and view terminal sessions.
 - **CLI Tool**: Comprehensive command-line interface for all operations.

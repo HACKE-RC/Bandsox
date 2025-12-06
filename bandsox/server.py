@@ -59,6 +59,22 @@ def create_vm(req: CreateVMRequest):
         logger.error(f"Failed to create VM: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+class RestoreVMRequest(BaseModel):
+    name: str = None
+    enable_networking: bool = True
+
+@app.post("/api/snapshots/{snapshot_id}/restore")
+def restore_snapshot(snapshot_id: str, req: RestoreVMRequest):
+    logger.info(f"Received restore request for snapshot {snapshot_id}")
+    try:
+        vm = bs.restore_vm(snapshot_id, name=req.name, enable_networking=req.enable_networking)
+        return {"id": vm.vm_id, "status": "restored"}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    except Exception as e:
+        logger.error(f"Failed to restore VM: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.delete("/api/snapshots/{snapshot_id}")
 def delete_snapshot(snapshot_id: str):
     logger.info(f"Received delete request for snapshot {snapshot_id}")
