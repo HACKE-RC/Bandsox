@@ -265,7 +265,9 @@ async def terminal_endpoint(websocket: WebSocket, vm_id: str, cols: int = 80, ro
         asyncio.run_coroutine_threadsafe(queue.put(None), loop)
 
     try:
-        session_id = vm.start_pty_session("/bin/sh", cols, rows, on_stdout=on_stdout, on_exit=on_exit)
+        # Run blocking start_pty_session in a thread to avoid blocking the event loop
+        # and causing WebSocket timeout (1006)
+        session_id = await asyncio.to_thread(vm.start_pty_session, "/bin/sh", cols, rows, on_stdout=on_stdout, on_exit=on_exit)
     except Exception as e:
         logger.error(f"Failed to start PTY session: {e}")
         await websocket.close(code=4000, reason=f"Failed to start session: {str(e)}")

@@ -23,7 +23,8 @@ def terminal_client(vm_id, host, port):
     url = f"ws://{host}:{port}/api/vms/{vm_id}/terminal?cols={cols}&rows={rows}"
     
     try:
-        with connect(url) as websocket:
+        # Increase open_timeout to allow time for server to wait for agent readiness
+        with connect(url, open_timeout=30) as websocket:
             fd = sys.stdin.fileno()
             old_settings = termios.tcgetattr(fd)
             
@@ -88,6 +89,31 @@ def terminal_client(vm_id, host, port):
         if hasattr(e, 'reason'):
             print(f"Close reason: {e.reason}")
 
+def download_kernel(output_path="vmlinux"):
+    url = "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin"
+    import requests
+    print(f"Downloading kernel from {url}...")
+    try:
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        total_size = int(response.headers.get('content-length', 0))
+        block_size = 8192
+        downloaded = 0
+        
+        with open(output_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=block_size):
+                downloaded += len(chunk)
+                f.write(chunk)
+                # Simple progress
+                if total_size > 0:
+                    percent = int(downloaded / total_size * 100)
+                    print(f"Downloading: {percent}%", end="\r")
+        print("\nKernel downloaded successfully.")
+        return True
+    except Exception as e:
+        print(f"\nFailed to download kernel: {e}")
+        return False
+
 def main():
     parser = argparse.ArgumentParser(description="BandSox CLI")
     subparsers = parser.add_subparsers(dest="command")
@@ -106,6 +132,9 @@ def main():
     create_parser.add_argument("--name", type=str, help="VM name")
     create_parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to connect to")
     create_parser.add_argument("--port", type=int, default=8000, help="Port to connect to")
+    
+    init_parser = subparsers.add_parser("init", help="Initialize environment (download kernel)")
+    init_parser.add_argument("--output", type=str, default="vmlinux", help="Output path for kernel")
     
     args = parser.parse_args()
     
@@ -129,6 +158,8 @@ def main():
                 print(f"Failed to create VM: {resp.text}")
         except Exception as e:
             print(f"Error: {e}")
+    elif args.command == "init":
+        download_kernel(args.output)
     else:
         parser.print_help()
 

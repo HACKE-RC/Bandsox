@@ -385,6 +385,35 @@ class ManagedMicroVM(MicroVM):
         super().__init__(vm_id, socket_path)
         self.bandsox = bandsox
 
+
+    def _handle_stdout_line(self, line):
+        """Override to intercept status events."""
+        super()._handle_stdout_line(line)
+        
+        # Check if we are ready
+        # We can't rely just on super() setting self.agent_ready because that's in-memory only
+        # and this instance might be ephemeral or the server might be looking at a different instance.
+        # But wait, super()._handle_stdout_line calls self.agent_ready = True.
+        
+        # We need to detect when it BECOMES ready to update metadata
+        if self.agent_ready:
+             # Check if metadata already says running/ready? 
+             # We just blindly update for now if it's not marked as ready?
+             # actually "status": "running" is general VM status.
+             # We might need a specific field "agent_ready": true
+             
+             # Optimization: don't write to disk on every line.
+             # super() parses the JSON. We should intercept the parsing result?
+             # But _handle_stdout_line does everything.
+             
+             # Let's just parse it again or check if agent_ready changed?
+             # No, easier to just check if the line was the ready event.
+             if '"status": "ready"' in line or '"status": "ready"' in line.replace(" ", ""):
+                 meta = self.bandsox._get_metadata(self.vm_id)
+                 if not meta.get("agent_ready"):
+                     meta["agent_ready"] = True
+                     self.bandsox._save_metadata(self.vm_id, meta)
+
     def pause(self):
         # Check if already paused
         meta = self.bandsox._get_metadata(self.vm_id)
@@ -432,7 +461,57 @@ class ManagedMicroVM(MicroVM):
 
         super().stop()
         self.bandsox.update_vm_status(self.vm_id, "stopped")
+        
+        # Also clear agent_ready in metadata
+        meta = self.bandsox._get_metadata(self.vm_id)
+        if meta.get("agent_ready"):
+            meta["agent_ready"] = False
+            self.bandsox._save_metadata(self.vm_id, meta)
+
+    def wait_for_agent(self, timeout=30):
+        """Waits for the agent to be ready and connected."""
+        start = time.time()
+        while time.time() - start < timeout:
+            # 1. Ensure connection
+            if not self.process and not self.console_conn:
+                 try:
+                     self.connect_to_console()
+                 except Exception:
+                     pass # connection might fail if socket not ready yet
+            
+            # 2. Check if process died (if we own it)
+            if self.process and self.process.poll() is not None:
+                raise Exception(f"VM process exited unexpectedly with code {self.process.returncode}")
+
+            # 3. Check readiness
+            # If we don't have a connection yet, we are not ready to return, 
+            # even if metadata says ready (because we need to send data).
+            if self.process or self.console_conn:
+                if self.agent_ready:
+                    return True
+                
+                # Check metadata as fallback
+                meta = self.bandsox._get_metadata(self.vm_id)
+                if meta.get("agent_ready"):
+                    self.agent_ready = True 
+                    return True
+            
+            time.sleep(0.5)
+            
+        return False
+
+    def start_pty_session(self, *args, **kwargs):
+        if not self.wait_for_agent():
+            raise Exception("Agent not ready")
+        return super().start_pty_session(*args, **kwargs)
+
+    def exec_command(self, *args, **kwargs):
+        if not self.wait_for_agent():
+            raise Exception("Agent not ready")
+        return super().exec_command(*args, **kwargs)
 
     def delete(self):
         self.bandsox.delete_vm(self.vm_id)
+
+
 

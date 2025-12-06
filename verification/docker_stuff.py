@@ -10,6 +10,7 @@ vm.exec_command("ip route", on_stdout=print_out, on_stderr=print_out)
 exit_code = vm.exec_command("ping -c 3 8.8.8.8", on_stdout=print_out, on_stderr=print_out)
 exit_code = vm.exec_command("ping -c 3 google.com", on_stdout=print_out, on_stderr=print_out)
 print(vm.vm_id)
+input()
 vm.stop()
 vm.delete()
 import sys

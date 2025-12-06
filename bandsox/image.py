@@ -95,8 +95,35 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mkdir -p /dev/pts
 mount -t devpts devpts /dev/pts
-if [ -x /usr/local/bin/python3 ]; then P=/usr/local/bin/python3; else P=/usr/bin/python3; fi
-exec \$P /usr/local/bin/agent.py 2>&1
+# Search for python3 in common locations
+P=""
+for path in /usr/local/bin/python3 /usr/bin/python3 /usr/local/bin/python /usr/bin/python; do
+  if [ -x "$path" ]; then
+    P="$path"
+    break
+  fi
+done
+
+if [ -z "$P" ]; then
+  # Try to find via command/which as fallback
+  P=$(which python3 2>/dev/null || which python 2>/dev/null)
+fi
+
+# Fallback: check for existence if executable check failed (e.g. some filesystems)
+if [ -z "$P" ]; then
+  if [ -f "/usr/bin/python3" ]; then
+    P="/usr/bin/python3"
+  elif [ -f "/usr/bin/python" ]; then
+    P="/usr/bin/python"
+  fi
+fi
+
+if [ -z "$P" ]; then
+  echo "Warning: Python 3 not detected. Attempting to run agent directly (relying on shebang)..."
+  exec /usr/local/bin/agent.py 2>&1
+else
+  exec $P /usr/local/bin/agent.py 2>&1
+fi
 EOF
             chmod +x {extract_dir}/init
 

@@ -53,7 +53,12 @@ def read_pty_master(master_fd, cmd_id):
                     "data": encoded,
                     "encoding": "base64"
                 })
-            except OSError:
+            except OSError as e:
+                # EIO means PTY closed
+                if e.errno == 5: # EIO
+                    break
+                # Other errors might be transient or fatal
+                send_event("error", {"cmd_id": cmd_id, "error": f"PTY Read blocked: {e}"})
                 break
     except Exception as e:
         send_event("error", {"cmd_id": cmd_id, "error": str(e)})

@@ -168,6 +168,19 @@ class MicroVM:
         if not self.client.wait_for_socket():
             raise Exception("Timed out waiting for Firecracker socket")
 
+        # Start thread to read stderr
+        t_err = threading.Thread(target=self._read_stderr_loop, daemon=True)
+        t_err.start()
+
+    def _read_stderr_loop(self):
+        """Reads stderr from the Firecracker process and logs it."""
+        while self.process and self.process.poll() is None:
+            line = self.process.stderr.readline()
+            if line:
+                logger.warning(f"VM Stderr: {line.strip()}")
+            else:
+                break
+
     def connect_to_console(self):
         """Connects to the console socket if not the owner."""
         if self.process:
@@ -191,9 +204,8 @@ class MicroVM:
         t.start()
         
         # Check if agent is ready (we might have missed the event)
-        # We can try to ping? Or just assume ready if socket exists?
-        # Let's assume ready for now, or send a status check?
-        self.agent_ready = True 
+        # Do NOT optimistically set ready. Use metadata check in wait_for_agent or send_request.
+        # self.agent_ready = True  <-- REMOVED
 
     def _socket_read_loop(self):
         """Reads from console socket and parses events."""
@@ -229,7 +241,10 @@ class MicroVM:
                 if cmd_id in self.event_callbacks:
                     cb = self.event_callbacks[cmd_id].get(f"on_{stream}")
                     if cb:
-                        cb(data)
+                        try:
+                             cb(data)
+                        except Exception:
+                             pass # Don't let callback crash the loop
                         
             elif evt_type == "file_content":
                 cmd_id = payload.get("cmd_id")
