@@ -34,7 +34,10 @@ def setup_tap_device(tap_name: str, host_ip: str, cidr: int = 24):
     logger.info(f"Setting up TAP device {tap_name} with IP {host_ip}/{cidr}")
     
     # Create TAP device
-    run_command(["sudo", "ip", "tuntap", "add", "dev", tap_name, "mode", "tap"])
+    # We need to set the user to the current user so Firecracker (running as user) can open it
+    import os
+    user = os.environ.get("SUDO_USER", os.environ.get("USER", "rc"))
+    run_command(["sudo", "ip", "tuntap", "add", "dev", tap_name, "mode", "tap", "user", user, "group", user])
     
     # Set IP
     run_command(["sudo", "ip", "addr", "add", f"{host_ip}/{cidr}", "dev", tap_name])

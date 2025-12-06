@@ -101,7 +101,7 @@ EOF
             chmod +x {extract_dir}/init
 
             # Populate the filesystem
-            mkfs.ext4 -F -d {extract_dir} {output_path}
+            mkfs.ext4 -O ^metadata_csum,^64bit -F -d {extract_dir} {output_path}
             """
             
             # We need to copy agent.py into the rootfs BEFORE mkfs

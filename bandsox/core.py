@@ -4,6 +4,8 @@ import logging
 from pathlib import Path
 from .vm import MicroVM, DEFAULT_KERNEL_PATH
 from .image import build_rootfs
+from .network import setup_tap_device, cleanup_tap_device
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +86,10 @@ class BandSox:
             "vcpu": vcpu,
             "mem_mib": mem_mib,
             "rootfs_path": str(instance_rootfs),  # Save rootfs path for file operations
+            "network_config": getattr(vm, "network_config", None),
             "created_at": time.time(),
-            "status": "running"
+            "status": "running",
+            "pid": vm.process.pid
         })
         
         self.active_vms[vm_id] = vm
@@ -129,7 +133,61 @@ class BandSox:
         # So we instantiate manually
         vm = ManagedMicroVM(new_vm_id, socket_path, self)
         vm.start_process()
-        vm.load_snapshot(str(snapshot_path), str(mem_path), enable_networking=enable_networking)
+        
+        # Copy snapshot rootfs if available
+        import shutil
+        snap_rootfs = snapshot_meta.get("rootfs_path")
+        instance_rootfs = self.images_dir / f"{new_vm_id}.ext4"
+        
+        if snap_rootfs and os.path.exists(snap_rootfs):
+            shutil.copy2(snap_rootfs, instance_rootfs)
+            # We need to tell Firecracker to use this new rootfs
+            # We do this AFTER load_snapshot but BEFORE resume
+        else:
+            # Fallback to image if snapshot rootfs missing (legacy snapshots)
+            # This might fail if the original image is gone, but it's the best we can do
+            logger.warning(f"Snapshot {snapshot_id} missing rootfs_path, trying to recover...")
+            # We can't easily recover if we don't know what the backing file was.
+            # But if we assume the snapshot points to a file that exists, we are fine.
+            # If not, we fail.
+            pass
+
+        if enable_networking:
+            # Restore network configuration from snapshot metadata
+            net_config = snapshot_meta.get("network_config")
+            
+            if net_config:
+                try:
+                    # We MUST use the same TAP name as the snapshot
+                    vm.tap_name = net_config.get("tap_name")
+                    host_ip = net_config.get("host_ip")
+                    
+                    # Setup TAP device on host
+                    setup_tap_device(vm.tap_name, host_ip)
+                    
+                    logger.info(f"Restored network interface {vm.tap_name}")
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to restore network: {e}")
+                    # If we failed to setup TAP, load_snapshot will likely fail if it expects it.
+                    # But we can't do much else.
+                    # We don't set enable_networking=False here because we want to try loading anyway?
+                    # No, if TAP is missing, load_snapshot fails.
+                    pass
+            else:
+                logger.warning("Snapshot missing network_config. Cannot restore networking for MMIO VM.")
+
+
+        try:
+            vm.load_snapshot(str(snapshot_path), str(mem_path), enable_networking=False) # Load without net first
+        except Exception as e:
+            # If load fails, we might need to cleanup
+            raise e
+        
+        if snap_rootfs and os.path.exists(snap_rootfs):
+            # Update rootfs path to the new instance copy
+            vm.update_drive("rootfs", str(instance_rootfs))
+        
         
         vm.resume()
         # Agent is already running in the restored VM
@@ -145,7 +203,8 @@ class BandSox:
             "created_at": time.time(),
             "status": "running",
             "restored_from": snapshot_id,
-            "rootfs_path": str(self.images_dir / f"{new_vm_id}.ext4")
+            "rootfs_path": str(instance_rootfs),
+            "pid": vm.process.pid
         })
         
         self.active_vms[new_vm_id] = vm
@@ -168,13 +227,23 @@ class BandSox:
         
         # Save snapshot metadata including VM configuration
         import json
+        import shutil
+        
+        # Copy rootfs to snapshot directory
         vm_meta = self._get_metadata(vm.vm_id)
+        source_rootfs = Path(vm_meta.get("rootfs_path"))
+        snap_rootfs = snap_dir / "rootfs.ext4"
+        if source_rootfs.exists():
+            shutil.copy2(source_rootfs, snap_rootfs)
+        
         snapshot_meta = {
             "snapshot_name": snapshot_name,
             "source_vm_id": vm.vm_id,
             "vcpu": vm_meta.get("vcpu", 1),
             "mem_mib": vm_meta.get("mem_mib", 128),
             "image": vm_meta.get("image", "unknown"),
+            "rootfs_path": str(snap_rootfs), # Point to the snapshot copy
+            "network_config": vm_meta.get("network_config"),
             "created_at": os.path.getmtime(str(snapshot_path)) if os.path.exists(str(snapshot_path)) else None
         }
         with open(snap_dir / "metadata.json", "w") as f:
@@ -344,6 +413,23 @@ class ManagedMicroVM(MicroVM):
             raise e
 
     def stop(self):
+        # Try to kill by PID if available
+        meta = self.bandsox._get_metadata(self.vm_id)
+        pid = meta.get("pid")
+        
+        if pid:
+            import signal
+            try:
+                os.kill(pid, signal.SIGTERM)
+                # Wait a bit? We can't waitpid on non-child easily without loop
+                # Just send kill if it doesn't die
+                time.sleep(0.5)
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass # Already dead
+            except PermissionError:
+                logger.error(f"Permission denied killing PID {pid}")
+
         super().stop()
         self.bandsox.update_vm_status(self.vm_id, "stopped")
 

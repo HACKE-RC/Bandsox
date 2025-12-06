@@ -177,7 +177,14 @@ class MicroVM:
             return # Console socket not ready
             
         self.console_conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.console_conn.connect(self.console_socket_path)
+        try:
+            self.console_conn.connect(self.console_socket_path)
+        except (ConnectionRefusedError, FileNotFoundError):
+            # This happens if the server restarted and the multiplexer is gone.
+            # The VM process might still be running but we can't talk to it.
+            logger.error(f"Failed to connect to console socket for {self.vm_id}")
+            self.console_conn = None
+            raise Exception("VM Agent connection lost. Please restart the VM.")
         
         # Start read thread
         t = threading.Thread(target=self._socket_read_loop, daemon=True)
@@ -269,7 +276,7 @@ class MicroVM:
                 
         except json.JSONDecodeError:
             # Log raw output that isn't JSON (kernel logs etc)
-            # logger.debug(f"VM Output: {line.strip()}")
+            logger.info(f"VM Output: {line.strip()}")
             pass
 
     def _read_loop(self):
@@ -457,6 +464,13 @@ class MicroVM:
             guest_ip = f"172.16.{subnet_idx}.2"
             guest_mac = f"AA:FC:00:00:{subnet_idx:02x}:02"
             
+            self.network_config = {
+                "host_ip": host_ip,
+                "guest_ip": guest_ip,
+                "guest_mac": guest_mac,
+                "tap_name": self.tap_name
+            }
+            
             setup_tap_device(self.tap_name, host_ip)
             self.network_setup = True
             
@@ -472,6 +486,16 @@ class MicroVM:
             self.client.put_boot_source(kernel_path, full_boot_args)
         else:
             self.client.put_boot_source(kernel_path, boot_args)
+
+    def update_drive(self, drive_id: str, path_on_host: str):
+        """Updates a drive's backing file path."""
+        self.client.patch_drive(drive_id, path_on_host)
+        if drive_id == "rootfs":
+            self.rootfs_path = path_on_host
+
+    def update_network_interface(self, iface_id: str, host_dev_name: str):
+        """Updates a network interface's host device."""
+        self.client.patch_network_interface(iface_id, host_dev_name)
 
     def start(self):
         """Starts the VM execution."""

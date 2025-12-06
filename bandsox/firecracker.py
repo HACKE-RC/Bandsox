@@ -63,6 +63,13 @@ class FirecrackerClient:
         }
         return self._request("PUT", f"/drives/{drive_id}", data)
 
+    def patch_drive(self, drive_id: str, path_on_host: str):
+        data = {
+            "drive_id": drive_id,
+            "path_on_host": path_on_host
+        }
+        return self._request("PATCH", f"/drives/{drive_id}", data)
+
     def put_network_interface(self, iface_id: str, host_dev_name: str, guest_mac: str = None):
         data = {
             "iface_id": iface_id,
@@ -72,6 +79,13 @@ class FirecrackerClient:
             data["guest_mac"] = guest_mac
             
         return self._request("PUT", f"/network-interfaces/{iface_id}", data)
+
+    def patch_network_interface(self, iface_id: str, host_dev_name: str):
+        data = {
+            "iface_id": iface_id,
+            "host_dev_name": host_dev_name
+        }
+        return self._request("PATCH", f"/network-interfaces/{iface_id}", data)
 
     def put_machine_config(self, vcpu_count: int, mem_size_mib: int):
         data = {
