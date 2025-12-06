@@ -22,21 +22,25 @@ BandSox is a fast, lightweight Python library and CLI for managing Firecracker m
 
 ## Installation
 
-1.  Clone the repository:
+1. Clone the repository:
+
     ```bash
     git clone https://github.com/yourusername/bandsox.git
     cd bandsox
     ```
 
-2.  Install dependencies:
+2. Install dependencies:
+
     ```bash
     pip install -e .
     ```
 
-3.  Download the Linux kernel (required for Firecracker):
+3. Download the Linux kernel (required for Firecracker):
+
     ```bash
     ./scripts/download_kernel.sh
     ```
+
     (Note: Ensure `download_kernel.sh` is executable and run it to fetch `vmlinux`).
 
 ## Usage
@@ -46,17 +50,21 @@ BandSox is a fast, lightweight Python library and CLI for managing Firecracker m
 BandSox includes a CLI tool `bandsox` (or `python -m bandsox.cli`).
 
 **Start the Web Dashboard:**
+
 ```bash
 sudo python3 -m bandsox.cli serve --host 0.0.0.0 --port 8000
 ```
+
 Visit `http://localhost:8000` to access the dashboard.
 
 **Create a VM:**
+
 ```bash
 sudo python3 -m bandsox.cli create ubuntu:latest --name my-vm
 ```
 
 **Open a Terminal:**
+
 ```bash
 sudo python3 -m bandsox.cli terminal <vm_id>
 ```
@@ -64,7 +72,7 @@ sudo python3 -m bandsox.cli terminal <vm_id>
 ### Python API
 
 ```python
-from bandsox import BandSox
+from bandsox.core import BandSox
 
 # Initialize
 bs = BandSox()
@@ -87,6 +95,7 @@ vm.stop()
 ## Architecture
 
 BandSox consists of several components:
+
 - **Core (`bandsox.core`)**: High-level manager for VMs and snapshots.
 - **VM (`bandsox.vm`)**: Wrapper around the Firecracker process, handling configuration, network, and interaction.
 - **Agent (`bandsox.agent`)**: A lightweight Python agent injected into the VM to handle command execution and file operations.
@@ -95,11 +104,13 @@ BandSox consists of several components:
 ## Verification & Testing
 
 The `verification/` directory contains scripts to verify various functionalities:
+
 - `verify_bandsox.py`: General smoke test.
 - `verify_file_ops.py`: Tests file upload/download.
 - `verify_internet.py`: Tests network connectivity inside the VM.
 
 To run a verification script:
+
 ```bash
 sudo python3 verification/verify_bandsox.py
 ```

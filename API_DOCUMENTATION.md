@@ -18,7 +18,7 @@ BandSox is a Python library for managing Firecracker microVMs. It allows you to 
 ## Quick Start
 
 ```python
-from bandsox import BandSox
+from bandsox.core import BandSox
 
 # 1. Initialize the manager
 #    (Default storage at /var/lib/bandsox, requires write permissions)
@@ -53,7 +53,7 @@ vm.delete()
 The `BandSox` class is your entry point.
 
 ```python
-from bandsox import BandSox
+from bandsox.core import BandSox
 
 manager = BandSox(storage_dir="/path/to/storage")
 ```
