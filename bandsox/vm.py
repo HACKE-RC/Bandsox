@@ -10,6 +10,7 @@ import socket
 from pathlib import Path
 from .firecracker import FirecrackerClient
 from .network import setup_tap_device, cleanup_tap_device
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -359,7 +360,7 @@ class MicroVM:
         """Executes a command in the VM via the agent (blocking)."""
         return self.send_request("exec", {"command": command, "background": False}, on_stdout=on_stdout, on_stderr=on_stderr, timeout=timeout)
 
-    def start_session(self, command: str, on_stdout=None, on_stderr=None, on_exit=None):
+    def start_session(self, command: str, on_stdout=None, on_stderr=None, on_exit=None) -> str:
         """Starts a background session in the VM."""
         if not self.agent_ready:
              if not self.process and not self.console_conn:
@@ -439,6 +440,37 @@ class MicroVM:
         req = json.dumps({"type": "kill", "id": session_id})
         self._write_to_agent(req + "\n")
 
+    def get_guest_ip(self):
+        """Returns the guest IP address."""
+        if hasattr(self, "network_config") and self.network_config:
+            return self.network_config.get("guest_ip")
+        
+        # Fallback to deterministic calculation
+        try:
+             subnet_idx = int(self.vm_id[-2:], 16)
+             return f"172.16.{subnet_idx}.2"
+        except Exception:
+             return None
+
+    def send_http_request(self, port: int, path: str = "/", method: str = "GET", **kwargs):
+        """
+        Sends an HTTP request to the VM.
+        args:
+            port: Port number
+            path: URL path (default: /)
+            method: HTTP method (default: GET)
+            **kwargs: Arguments passed to requests.request (json, data, headers, timeout, etc.)
+        """
+        ip = self.get_guest_ip()
+        if not ip:
+            raise Exception("Could not determine Guest IP (networking might be disabled)")
+            
+        if not path.startswith("/"):
+            path = "/" + path
+            
+        url = f"http://{ip}:{port}{path}"
+        return requests.request(method, url, **kwargs)
+
     def configure(self, kernel_path: str, rootfs_path: str, vcpu: int, mem_mib: int, boot_args: str = None, enable_networking: bool = True):
         """Configures the VM resources."""
         self.rootfs_path = rootfs_path # Store for file operations
@@ -472,22 +504,32 @@ class MicroVM:
             # We'll setup the TAP here.
             
             # Generate a semi-unique subnet based on last byte of VM ID (very naive collision avoidance)
-            # Better: Use a counter or database.
-            # For this task, let's just use a fixed one for the demo or random.
-            subnet_idx = int(self.vm_id[-2:], 16) # 0-255
-            host_ip = f"172.16.{subnet_idx}.1"
-            guest_ip = f"172.16.{subnet_idx}.2"
-            guest_mac = f"AA:FC:00:00:{subnet_idx:02x}:02"
+            # Try to allocate a free subnet loop
+            base_idx = int(self.vm_id[-2:], 16)
+            for i in range(50):
+                subnet_idx = (base_idx + i) % 253 + 1 # 1-253
+                host_ip = f"172.16.{subnet_idx}.1"
+                guest_ip = f"172.16.{subnet_idx}.2"
+                guest_mac = f"AA:FC:00:00:{subnet_idx:02x}:02"
+                
+                try:
+                    setup_tap_device(self.tap_name, host_ip)
+                    self.network_config = {
+                        "host_ip": host_ip,
+                        "guest_ip": guest_ip,
+                        "guest_mac": guest_mac,
+                        "tap_name": self.tap_name
+                    }
+                    self.network_setup = True
+                    logger.info(f"Allocated network {host_ip} for {self.vm_id}")
+                    break
+                except Exception:
+                    # Retry with next subnet
+                    continue
+            else:
+                raise Exception("Failed to allocate free network subnet after retries")
             
-            self.network_config = {
-                "host_ip": host_ip,
-                "guest_ip": guest_ip,
-                "guest_mac": guest_mac,
-                "tap_name": self.tap_name
-            }
-            
-            setup_tap_device(self.tap_name, host_ip)
-            self.network_setup = True
+            self.client.put_network_interface("eth0", self.tap_name, guest_mac)
             
             self.client.put_network_interface("eth0", self.tap_name, guest_mac)
             
@@ -525,26 +567,50 @@ class MicroVM:
     def snapshot(self, snapshot_path: str, mem_file_path: str):
         self.client.create_snapshot(snapshot_path, mem_file_path)
 
-    def load_snapshot(self, snapshot_path: str, mem_file_path: str, enable_networking: bool = True):
+    def load_snapshot(self, snapshot_path: str, mem_file_path: str, enable_networking: bool = True, guest_mac: str = None):
         # To load a snapshot, we must start a NEW Firecracker process
-        # but NOT configure it (no boot source, no machine config).
-        # We just call load_snapshot.
-        # However, we DO need to setup network devices if they were present?
-        # Firecracker docs say: "The resumed VM will be in the Paused state."
-        # And we need to restore the TAP device on the host if it's a new host process/session.
+        # We also need to configure the network backend BEFORE loading the snapshot
+        # if the snapshot had a network device.
         
-        # If we are just restoring into a fresh process:
-        # 1. Start process
-        # 2. Setup TAP (if not already)
-        # 3. Load snapshot
-        # 4. Resume
-        
-        if enable_networking and not self.network_setup:
-             # Re-derive IP from ID (assuming same ID)
-             subnet_idx = int(self.vm_id[-2:], 16)
-             host_ip = f"172.16.{subnet_idx}.1"
-             setup_tap_device(self.tap_name, host_ip)
-             self.network_setup = True
+        if enable_networking:
+             if not getattr(self, "network_config", None):
+                 # Try to allocate a free subnet loop
+                 base_idx = int(self.vm_id[-2:], 16)
+                 for i in range(50):
+                     subnet_idx = (base_idx + i) % 253 + 1
+                     host_ip = f"172.16.{subnet_idx}.1"
+                     guest_ip = f"172.16.{subnet_idx}.2"
+                     current_mac = guest_mac if guest_mac else f"AA:FC:00:00:{subnet_idx:02x}:02"
+                     
+                     try:
+                         setup_tap_device(self.tap_name, host_ip)
+                         self.network_config = {
+                            "host_ip": host_ip,
+                            "guest_ip": guest_ip,
+                            "guest_mac": current_mac,
+                            "tap_name": self.tap_name
+                         }
+                         self.network_setup = True
+                         break
+                     except Exception:
+                         continue
+                 else:
+                     raise Exception("Failed to allocate free network subnet")
+                 
+             else:
+                 # Ensure TAP name is consistent
+                 self.network_config["tap_name"] = self.tap_name
+                 host_ip = self.network_config["host_ip"]
+                 if guest_mac:
+                     self.network_config["guest_mac"] = guest_mac
+                 
+                 if not self.network_setup:
+                     setup_tap_device(self.tap_name, host_ip)
+                     self.network_setup = True
+             
+             # IMPORTANT: configure the network interface backend for Firecracker
+             mac = self.network_config.get("guest_mac")
+             self.client.put_network_interface("eth0", self.tap_name, mac)
 
         self.client.load_snapshot(snapshot_path, mem_file_path)
 
@@ -618,16 +684,19 @@ class MicroVM:
 
     def get_file_contents(self, path: str) -> str:
         """Reads the contents of a file inside the VM."""
-        # debugfs 'cat' command
-        # We need to handle binary data? The interface returns str.
-        # If the file is binary, this might be an issue.
-        # Let's assume text for get_file_contents as per docstring.
-        
-        # We use subprocess directly here to handle bytes output if needed, 
-        # but _run_debugfs handles the pause/resume logic.
-        # Let's modify _run_debugfs to return bytes?
-        # Or just implement specific logic here.
-        
+        if self.agent_ready:
+            result = {}
+            def on_file_content(c):
+                result["content"] = c
+            
+            self.send_request("read_file", {"path": path}, on_file_content=on_file_content)
+            
+            if "content" in result:
+                import base64
+                return base64.b64decode(result["content"]).decode('utf-8')
+            raise Exception(f"Failed to read {path} via agent")
+
+        # debugfs fallback
         if not hasattr(self, 'rootfs_path'):
              raise Exception("VM not configured")
 
@@ -656,8 +725,119 @@ class MicroVM:
                 except Exception:
                     pass
 
+    def list_dir(self, path: str) -> list:
+        """Lists directory contents."""
+        # Try agent first
+        if hasattr(self, 'wait_for_agent'):
+            try:
+                if self.wait_for_agent(timeout=1):
+                    result = {}
+                    def on_dir_list(files):
+                        result["files"] = files
+                    
+                    self.send_request("list_dir", {"path": path}, on_dir_list=on_dir_list)
+                    return result.get("files", [])
+            except Exception:
+                 pass # Fallback to debugfs
+
+        # Fallback to debugfs
+        if not hasattr(self, 'rootfs_path'):
+             raise Exception("VM not configured")
+             
+        # Need to pause for debugfs safety if running
+        was_running = False
+        if self.process and self.process.poll() is None:
+            try:
+                self.pause()
+                was_running = True
+            except Exception:
+                pass
+                
+        try:
+            # list directory with debugfs
+            cmd = ["debugfs", "-R", f"ls -l {path}", self.rootfs_path]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                 try:
+                     # Retry without -l if it fails? No, simpler ls provides less info.
+                     pass
+                 except:
+                     pass
+                 
+            # Parse output
+            files = []
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if not line or line.startswith("/"): continue
+                
+                # Format: inode mode (links) uid gid size date time name
+                # Example:   2  40755 (2)      0      0    4096  6-Dec-2025 14:26 .
+                parts = line.split()
+                if len(parts) >= 8:
+                    try:
+                        # Depending on debugfs version/output, fields might vary slightly.
+                        # Assuming: inode, mode, (links), uid, gid, size, date, time, name
+                        # mode is octal usually
+                        
+                        # Find indices
+                        # Mode is 2nd usually
+                        mode_oct = parts[1]
+                        mode = int(mode_oct, 8)
+                        
+                        # Size is usually 6th (index 5) if links is split? 
+                        # (2) might be one token or split. line.split() handles spaces.
+                        # (2) -> "(2)" is one token
+                        # so: 0:inode, 1:mode, 2:(links), 3:uid, 4:gid, 5:size, 6:date, 7:time, 8:name
+                        
+                        size = int(parts[5])
+                        name = " ".join(parts[8:]) # Handle spaces in filename?
+                        
+                        is_dir = (mode & 0o40000) == 0o40000
+                        is_file = (mode & 0o100000) == 0o100000
+                        
+                        if name == '.' or name == '..':
+                            continue
+                            
+                        files.append({
+                            "name": name,
+                            "type": "directory" if is_dir else "file",
+                            "size": size,
+                            "mode": mode,
+                            "mtime": 0 # TODO: Parse date/time
+                        })
+                    except (ValueError, IndexError):
+                        pass
+                        
+            return files
+            
+        finally:
+            if was_running:
+                try:
+                    self.resume()
+                except Exception:
+                    pass
+
     def download_file(self, remote_path: str, local_path: str):
         """Downloads a file from the VM to the local filesystem."""
+        if self.agent_ready:
+            result = {}
+            def on_file_content(c):
+                result["content"] = c
+            
+            self.send_request("read_file", {"path": remote_path}, on_file_content=on_file_content)
+            
+            if "content" in result:
+                import base64
+                data = base64.b64decode(result["content"])
+                
+                local_path = os.path.abspath(local_path)
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                
+                with open(local_path, "wb") as f:
+                    f.write(data)
+                return
+            raise Exception(f"Failed to download {remote_path} via agent")
+
         if not hasattr(self, 'rootfs_path'):
              raise Exception("VM not configured")
 
@@ -700,12 +880,21 @@ class MicroVM:
 
     def upload_file(self, local_path: str, remote_path: str):
         """Uploads a file from local filesystem to the VM."""
-        if not hasattr(self, 'rootfs_path'):
-             raise Exception("VM not configured")
-             
         if not os.path.exists(local_path):
             raise FileNotFoundError(f"Local file not found: {local_path}")
 
+        if self.agent_ready:
+            with open(local_path, "rb") as f:
+                content = f.read()
+            import base64
+            encoded = base64.b64encode(content).decode('utf-8')
+            
+            self.send_request("write_file", {"path": remote_path, "content": encoded})
+            return
+
+        if not hasattr(self, 'rootfs_path'):
+             raise Exception("VM not configured")
+             
         was_running = False
         if self.process and self.process.poll() is None:
             try:
@@ -823,39 +1012,7 @@ class MicroVM:
                 except Exception:
                     pass
 
-    def list_dir(self, path: str) -> list[str]:
-        """Lists files in a directory inside the VM."""
-        output = self._run_debugfs([f"ls -l {path}"])
-        # Parse output
-        # debugfs 'ls -l' output format:
-        #   inode mode (links) uid gid size date time name
-        # Example:
-        #     101   40755 (2)      0      0    4096  5-Dec-2025 11:15 etc
-        #     534   40755 (2)      0      0    4096  3-Dec-2025 21:18 home
-        
-        files = []
-        import re
-        
-        # Parse line by line
-        for line in output.strip().split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-            
-            # Match format: whitespace, inode, whitespace, mode, whitespace, (links), ..., name at end
-            # The name is the last "word" after the time
-            # Pattern: skip everything until we get to the timestamp, then capture the rest
-            # Format: inode mode (links) uid gid size date time name
-            # We need to extract the name which is after the time (HH:MM format)
-            
-            # Split by whitespace and take the last field (name)
-            parts = line.split()
-            if len(parts) >= 9:  # Minimum fields: inode mode (links) uid gid size date time name
-                name = parts[-1]  # Last field is the filename
-                if name not in ['.', '..']:
-                    files.append(name)
-        
-        return files
+
 
 
     def get_file_info(self, path: str) -> dict:

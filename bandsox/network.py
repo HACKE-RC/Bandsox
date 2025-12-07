@@ -37,10 +37,31 @@ def setup_tap_device(tap_name: str, host_ip: str, cidr: int = 24):
     # We need to set the user to the current user so Firecracker (running as user) can open it
     import os
     user = os.environ.get("SUDO_USER", os.environ.get("USER", "rc"))
-    run_command(["sudo", "ip", "tuntap", "add", "dev", tap_name, "mode", "tap", "user", user, "group", user])
+    try:
+        run_command(["sudo", "ip", "tuntap", "add", "dev", tap_name, "mode", "tap", "user", user, "group", user])
+    except subprocess.CalledProcessError:
+        # Ignore if it fails (likely exists). We proceed to set IP/UP which might fix it or fail later.
+        logger.warning(f"Failed to create TAP {tap_name} (might already involve). Continuing...")
     
     # Set IP
-    run_command(["sudo", "ip", "addr", "add", f"{host_ip}/{cidr}", "dev", tap_name])
+    # Check for global IP collision
+    current_ips_out = subprocess.run(["ip", "-o", "-4", "addr", "list"], capture_output=True, text=True).stdout
+    for line in current_ips_out.splitlines():
+        if f" {host_ip}/" in line:
+            # Line format: 2: eth0    inet 172.16.x.1/24 ...
+            parts = line.split()
+            dev_name = parts[1]
+            if dev_name != tap_name:
+                raise Exception(f"IP {host_ip} already assigned to {dev_name}")
+            else:
+                # Already assigned to this device, skip add
+                break
+    else:
+        # Not found, add it
+        try:
+            run_command(["sudo", "ip", "addr", "add", f"{host_ip}/{cidr}", "dev", tap_name])
+        except subprocess.CalledProcessError as e:
+            raise Exception(f"Failed to assign IP {host_ip} to {tap_name}: {e}")
     
     # Bring up
     run_command(["sudo", "ip", "link", "set", tap_name, "up"])
