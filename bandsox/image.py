@@ -89,8 +89,10 @@ def build_rootfs(docker_image: str, output_path: str, size_mb: int = 4096):
             echo 'nameserver 8.8.8.8' > {extract_dir}/etc/resolv.conf
             
             # Create /init script
-            cat <<EOF > {extract_dir}/init
+            # Use 'EOF' to prevent variable expansion in the HEREDOC
+            cat <<'EOF' > {extract_dir}/init
 #!/bin/sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mkdir -p /dev/pts
@@ -158,7 +160,7 @@ EOF
     logger.info(f"Rootfs created at {output_path}")
     return str(output_path)
 
-def build_image_from_dockerfile(dockerfile_path: str, tag: str):
+def build_image_from_dockerfile(dockerfile_path: str, tag: str, nocache: bool = False):
     """Builds a Docker image from a Dockerfile using Docker SDK."""
     import docker
     client = docker.from_env()
@@ -174,9 +176,9 @@ def build_image_from_dockerfile(dockerfile_path: str, tag: str):
     if dockerfile_path.is_file():
         path = str(dockerfile_path.parent)
         dockerfile = dockerfile_path.name
-        client.images.build(path=path, dockerfile=dockerfile, tag=tag, rm=True)
+        client.images.build(path=path, dockerfile=dockerfile, tag=tag, rm=True, nocache=nocache)
     else:
         path = str(dockerfile_path)
-        client.images.build(path=path, tag=tag, rm=True)
+        client.images.build(path=path, tag=tag, rm=True, nocache=nocache)
         
     return tag

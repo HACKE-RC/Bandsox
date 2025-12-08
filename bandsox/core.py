@@ -49,7 +49,38 @@ class BandSox:
             self._save_metadata(vm_id, meta)
 
 
-    def create_vm(self, docker_image: str, name: str = None, vcpu: int = 1, mem_mib: int = 128, kernel_path: str = DEFAULT_KERNEL_PATH, enable_networking: bool = True) -> MicroVM:
+    def _inject_agent(self, rootfs_path: str):
+        """Injects the current agent.py into the rootfs."""
+        agent_path = Path(os.path.dirname(__file__)) / "agent.py"
+        if not agent_path.exists():
+            logger.warning("Agent script not found, cannot inject.")
+            return
+
+        import subprocess
+        try:
+            # Remove existing agent
+            # We don't check output as it might not exist
+            subprocess.run(["debugfs", "-w", "-R", "rm /usr/local/bin/agent.py", rootfs_path], capture_output=True)
+            
+            # Write new agent
+            cmd = ["debugfs", "-w", "-R", f"write {agent_path} /usr/local/bin/agent.py", rootfs_path]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                logger.error(f"Failed to inject agent: {result.stderr}")
+            else:
+                # Set permissions? debugfs write creates with root owner 0644 or similar?
+                # We need it executable 0755
+                # debugfs doesn't support chmod easily? 
+                # It copies mode from source? No.
+                # debugfs 'sif' set inode field? 'sif /usr/local/bin/agent.py mode 0100755'
+                subprocess.run(["debugfs", "-w", "-R", "sif /usr/local/bin/agent.py mode 0100755", rootfs_path], capture_output=True)
+                
+                logger.debug(f"Injected agent into {rootfs_path}")
+        except Exception as e:
+            logger.error(f"Failed to inject agent: {e}")
+
+    def create_vm(self, docker_image: str, name: str = None, vcpu: int = 1, mem_mib: int = 128, kernel_path: str = DEFAULT_KERNEL_PATH, enable_networking: bool = True, force_rebuild: bool = False) -> MicroVM:
         """Creates and starts a new VM from a Docker image."""
         vm_id = str(uuid.uuid4())
         logger.info(f"Creating VM {vm_id} from {docker_image}")
@@ -58,13 +89,16 @@ class BandSox:
         sanitized_name = docker_image.replace(":", "_").replace("/", "_")
         base_rootfs = self.images_dir / f"{sanitized_name}.ext4"
         
-        if not base_rootfs.exists():
+        if force_rebuild or not base_rootfs.exists():
             build_rootfs(docker_image, str(base_rootfs))
             
         # Copy to instance specific path
         instance_rootfs = self.images_dir / f"{vm_id}.ext4"
         import shutil
         shutil.copy2(base_rootfs, instance_rootfs)
+        
+        # Inject latest agent
+        self._inject_agent(str(instance_rootfs))
         
         # 2. Create VM instance
         socket_path = str(self.sockets_dir / f"{vm_id}.sock")
@@ -101,7 +135,12 @@ class BandSox:
             tag = f"bandsox-build-{uuid.uuid4()}"
             
         from .image import build_image_from_dockerfile
-        build_image_from_dockerfile(dockerfile_path, tag)
+        # Pass force_rebuild to docker build as explicit nocache? 
+        # Actually kwargs here are for create_vm. 'force_rebuild' in kwargs will be passed to create_vm.
+        # But for docker build, we should handle it too.
+        nocache = kwargs.get('force_rebuild', False)
+        
+        build_image_from_dockerfile(dockerfile_path, tag, nocache=nocache)
         
         return self.create_vm(tag, name=name, vcpu=vcpu, mem_mib=mem_mib, **kwargs)
 
@@ -131,65 +170,147 @@ class BandSox:
         # Use ManagedMicroVM.create_from_snapshot but we need to inject 'bandsox' instance
         # Since create_from_snapshot is a class method on MicroVM, we can't easily override it to return ManagedMicroVM with extra args
         # So we instantiate manually
-        vm = ManagedMicroVM(new_vm_id, socket_path, self)
-        vm.start_process()
+        # Prepare network args
+        guest_mac = None
+        netns_name = None
         
-        # Copy snapshot rootfs if available
+        if enable_networking:
+            net_config = snapshot_meta.get("network_config", {})
+            guest_mac = net_config.get("guest_mac")
+            old_tap_name = net_config.get("tap_name")
+            
+            if net_config and old_tap_name:
+                 # To robustly restore networking, we must provide the backend device 
+                 # that the snapshot expects (same TAP name).
+                 # To avoid collisions (Resource busy), we create this TAP device 
+                 # inside a new Network Namespace unique to this VM.
+                 # We use a rename workaround in setup_netns_networking to avoid "Busy" error.
+                 from .network import setup_netns_networking
+                 
+                 netns_name = f"netns{new_vm_id[:8]}"
+                 host_ip = net_config.get("host_ip", "172.16.100.1") 
+                 
+                 # Setup NetNS with the OLD tap name
+                 try:
+                     cni_ip = setup_netns_networking(netns_name, old_tap_name, host_ip, new_vm_id)
+                     
+                     # Add route on Host to Guest via CNI IP
+                     # We need the Guest IP. We can infer it from net_config or calculate it 
+                     # if it was standard. But snapshot config is best.
+                     guest_ip = net_config.get("guest_ip")
+                     if cni_ip and guest_ip:
+                         from .network import add_host_route
+                         add_host_route(guest_ip, cni_ip)
+                         
+                 except Exception as e:
+                     logger.error(f"Failed to setup netns: {e}")
+                     raise e
+                     
+            else:
+                 pass
+
+        # Instantiate VM
+        vm = ManagedMicroVM(new_vm_id, socket_path, self, netns=netns_name)
+        
+        if netns_name:
+            vm.tap_name = old_tap_name
+            vm.network_config = net_config
+            vm.netns = netns_name
+            
+        vm.start_process()
+        # Copy snapshot rootfs if available (must do this before starting process potentially?)
         import shutil
         snap_rootfs = snapshot_meta.get("rootfs_path")
         instance_rootfs = self.images_dir / f"{new_vm_id}.ext4"
         
         if snap_rootfs and os.path.exists(snap_rootfs):
             shutil.copy2(snap_rootfs, instance_rootfs)
-            # We need to tell Firecracker to use this new rootfs
-            # We do this AFTER load_snapshot but BEFORE resume
-        else:
-            # Fallback to image if snapshot rootfs missing (legacy snapshots)
-            # This might fail if the original image is gone, but it's the best we can do
-            logger.warning(f"Snapshot {snapshot_id} missing rootfs_path, trying to recover...")
-            # We can't easily recover if we don't know what the backing file was.
-            # But if we assume the snapshot points to a file that exists, we are fine.
-            # If not, we fail.
-            pass
-
-        if enable_networking:
-            # Restore network configuration from snapshot metadata
-            net_config = snapshot_meta.get("network_config")
-            
-            if net_config:
-                try:
-                    # We MUST use the same TAP name as the snapshot
-                    vm.tap_name = net_config.get("tap_name")
-                    host_ip = net_config.get("host_ip")
-                    
-                    # Setup TAP device on host
-                    setup_tap_device(vm.tap_name, host_ip)
-                    
-                    logger.info(f"Restored network interface {vm.tap_name}")
-                    
-                except Exception as e:
-                    logger.warning(f"Failed to restore network: {e}")
-                    # If we failed to setup TAP, load_snapshot will likely fail if it expects it.
-                    # But we can't do much else.
-                    # We don't set enable_networking=False here because we want to try loading anyway?
-                    # No, if TAP is missing, load_snapshot fails.
-                    pass
-            else:
-                logger.warning("Snapshot missing network_config. Cannot restore networking for MMIO VM.")
-
-
+            self._inject_agent(str(instance_rootfs))
+        
+        # Try to load snapshot
+        created_symlink = None
+        
         try:
-            vm.load_snapshot(str(snapshot_path), str(mem_path), enable_networking=False) # Load without net first
+            vm.load_snapshot(str(snapshot_path), str(mem_path), enable_networking=enable_networking, guest_mac=guest_mac)
         except Exception as e:
-            # If load fails, we might need to cleanup
-            raise e
-        
+            import re
+            msg = str(e)
+            # The error format might be slightly different depending on version/context, catching the path at the end
+            # "Error manipulating the backing file: No such file or directory (os error 2) /path/to/file"
+            # Or "Permission denied (os error 13) /path/to/file"
+            
+            # Simple regex to catch path at end of string
+            # We assume path starts with / and goes to end or "}"
+            match = re.search(r"(?:No such file or directory|os error 2).*? (/[\w\-/.]+\.ext4)", msg)
+            if not match:
+                 # Try matching permission denied too? The user saw os error 2.
+                 match = re.search(r"(/[\w\-/.]+\.ext4)[^}]*$", msg)
+
+            if match:
+                missing_path = Path(match.group(1))
+                logger.warning(f"Snapshot expects missing file: {missing_path}. Creating fallback symlink.")
+                
+                # Double check we are not overwriting something important
+                if not missing_path.exists():
+                    try:
+                        missing_path.parent.mkdir(parents=True, exist_ok=True)
+                        missing_path.symlink_to(instance_rootfs)
+                        created_symlink = missing_path
+                        
+                        # Restart process to ensure clean state
+                        logger.info("Restarting Firecracker process for retry...")
+                        vm.stop()
+                        vm.start_process()
+                        
+                        # Retry load
+                        vm.load_snapshot(str(snapshot_path), str(mem_path), enable_networking=enable_networking, guest_mac=guest_mac)
+                        
+                        # If success, we MUST update the drive to the new path immediately
+                        # to ensure Firecracker uses our new file and we can delete the symlink safely
+                        vm.update_drive("rootfs", str(instance_rootfs))
+                        
+                    except Exception as retry_e:
+                        logger.error(f"Failed to recover from missing backing file: {retry_e}")
+                        raise retry_e
+                    finally:
+                        if created_symlink and created_symlink.is_symlink():
+                             created_symlink.unlink()
+                else:
+                    # File exists but maybe permissions? Or we misidentified.
+                    logger.warning(f"File {missing_path} exists, cannot use symlink trick. Error was: {e}")
+                    raise e
+            else:
+                raise e
         if snap_rootfs and os.path.exists(snap_rootfs):
-            # Update rootfs path to the new instance copy
+            # Update rootfs path to the new instance copy (this also frees us from the symlink)
             vm.update_drive("rootfs", str(instance_rootfs))
-        
-        
+
+        # Configure offloading NOW that the VM is attached (fd open)
+        if netns_name and old_tap_name:
+             from .network import configure_tap_offloading
+             configure_tap_offloading(netns_name, old_tap_name, vm.vm_id)
+
         vm.resume()
+        
+        if enable_networking and vm.agent_ready: 
+             # Check if we need to update IP
+             current_guest_ip = vm.network_config.get("guest_ip")
+             old_guest_ip = snapshot_meta.get("network_config", {}).get("guest_ip")
+             
+             if current_guest_ip and old_guest_ip and current_guest_ip != old_guest_ip:
+                 logger.info(f"Reconfiguring Guest IP from {old_guest_ip} to {current_guest_ip}")
+                 host_ip = vm.network_config.get("host_ip")
+                 
+                 # Wait for agent to be responsive
+                 try:
+                     vm.wait_for_agent(timeout=10)
+                     # Flusing ip and adding new one
+                     # Note: This might break connectivity temporarily so we chain commands
+                     cmd = f"ip addr flush dev eth0; ip addr add {current_guest_ip}/24 dev eth0; ip route add default via {host_ip}"
+                     vm.exec_command(cmd)
+                 except Exception as e:
+                     logger.warning(f"Failed to update Guest IP: {e}")
+        
         # Agent is already running in the restored VM
         vm.agent_ready = True
         
@@ -204,6 +325,7 @@ class BandSox:
             "status": "running",
             "restored_from": snapshot_id,
             "rootfs_path": str(instance_rootfs),
+            "network_config": vm.network_config if hasattr(vm, "network_config") else None,
             "pid": vm.process.pid,
             "agent_ready": True
         })
@@ -244,6 +366,7 @@ class BandSox:
             "mem_mib": vm_meta.get("mem_mib", 128),
             "image": vm_meta.get("image", "unknown"),
             "rootfs_path": str(snap_rootfs), # Point to the snapshot copy
+            "backend_rootfs_path": str(source_rootfs), # Original path for reference/symlink matching
             "network_config": vm_meta.get("network_config"),
             "created_at": os.path.getmtime(str(snapshot_path)) if os.path.exists(str(snapshot_path)) else None
         }
@@ -379,11 +502,21 @@ class BandSox:
         # This happens if the server restarted or if another process started the VM.
         # We can create a ManagedMicroVM, but it won't have the process handle.
         # This limits functionality (no stdin/stdout access).
-        return ManagedMicroVM(vm_id, str(socket_path), self)
+        vm = ManagedMicroVM(vm_id, str(socket_path), self)
+        
+        # Populate rootfs_path from metadata if available
+        meta = self._get_metadata(vm_id)
+        if meta and "rootfs_path" in meta:
+            vm.rootfs_path = meta["rootfs_path"]
+        
+        if meta and "network_config" in meta:
+            vm.network_config = meta["network_config"]
+            
+        return vm
 
 class ManagedMicroVM(MicroVM):
-    def __init__(self, vm_id: str, socket_path: str, bandsox: 'BandSox'):
-        super().__init__(vm_id, socket_path)
+    def __init__(self, vm_id: str, socket_path: str, bandsox: 'BandSox', netns: str = None):
+        super().__init__(vm_id, socket_path, netns=netns)
         self.bandsox = bandsox
 
 

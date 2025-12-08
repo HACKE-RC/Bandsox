@@ -275,6 +275,49 @@ def handle_write_file(cmd_id, path, content, mode='wb', append=False):
         send_event("error", {"cmd_id": cmd_id, "error": str(e)})
         send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
 
+def handle_list_dir(cmd_id, path):
+    try:
+        if not os.path.exists(path):
+            send_event("error", {"cmd_id": cmd_id, "error": f"Path not found: {path}"})
+            send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
+            return
+
+        files = []
+        try:
+            with os.scandir(path) as it:
+                for entry in it:
+                    try:
+                        stat = entry.stat()
+                        files.append({
+                            "name": entry.name,
+                            "type": "directory" if entry.is_dir() else "file", 
+                            "size": stat.st_size,
+                            "mode": stat.st_mode,
+                            "mtime": stat.st_mtime
+                        })
+                    except OSError:
+                         # Handle cases where stat fails (broken links etc)
+                         files.append({
+                            "name": entry.name,
+                            "type": "unknown",
+                            "size": 0
+                         })
+        except NotADirectoryError:
+             send_event("error", {"cmd_id": cmd_id, "error": f"Not a directory: {path}"})
+             send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
+             return
+
+        send_event("dir_list", {
+            "cmd_id": cmd_id,
+            "path": path,
+            "files": files
+        })
+        send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
+        
+    except Exception as e:
+        send_event("error", {"cmd_id": cmd_id, "error": str(e)})
+        send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
+
 def main():
     # Ensure stdout is line buffered or unbuffered
     # sys.stdout.reconfigure(line_buffering=True) # Python 3.7+
@@ -332,6 +375,11 @@ def main():
                     content = req.get("content")
                     append = req.get("append", False)
                     t = threading.Thread(target=handle_write_file, args=(cmd_id, path, content, 'wb', append), daemon=True)
+                    t.start()
+
+                elif req_type == "list_dir":
+                    path = req.get("path")
+                    t = threading.Thread(target=handle_list_dir, args=(cmd_id, path), daemon=True)
                     t.start()
                     
             except json.JSONDecodeError:

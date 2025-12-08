@@ -121,6 +121,7 @@ def main():
     serve_parser = subparsers.add_parser("serve", help="Start the web dashboard")
     serve_parser.add_argument("--port", type=int, default=8000, help="Port to listen on")
     serve_parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to listen on")
+    serve_parser.add_argument("--storage", type=str, help="Path to storage directory")
     
     term_parser = subparsers.add_parser("terminal", help="Open a terminal session in a VM")
     term_parser.add_argument("vm_id", type=str, help="VM ID")
@@ -141,6 +142,10 @@ def main():
     args = parser.parse_args()
     
     if args.command == "serve":
+        if args.storage:
+            print(f"Setting storage path to {args.storage}")
+            os.environ["BANDSOX_STORAGE"] = os.path.abspath(args.storage)
+            
         print(f"Starting dashboard at http://{args.host}:{args.port}")
         uvicorn.run("bandsox.server:app", host=args.host, port=args.port, reload=True)
     elif args.command == "terminal":
