@@ -89,8 +89,10 @@ def build_rootfs(docker_image: str, output_path: str, size_mb: int = 4096):
             echo 'nameserver 8.8.8.8' > {extract_dir}/etc/resolv.conf
             
             # Create /init script
-            cat <<EOF > {extract_dir}/init
+            # Use 'EOF' to prevent variable expansion in the HEREDOC
+            cat <<'EOF' > {extract_dir}/init
 #!/bin/sh
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mkdir -p /dev/pts

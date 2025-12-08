@@ -128,11 +128,12 @@ class ConsoleMultiplexer:
 
 
 class MicroVM:
-    def __init__(self, vm_id: str, socket_path: str, firecracker_bin: str = FIRECRACKER_BIN):
+    def __init__(self, vm_id: str, socket_path: str, firecracker_bin: str = FIRECRACKER_BIN, netns: str = None):
         self.vm_id = vm_id
         self.socket_path = socket_path
         self.console_socket_path = str(Path(socket_path).parent / f"{vm_id}.console.sock")
         self.firecracker_bin = firecracker_bin
+        self.netns = netns
         self.process = None
         self.multiplexer = None
         self.client = FirecrackerClient(socket_path)
@@ -148,6 +149,21 @@ class MicroVM:
             os.unlink(self.socket_path)
             
         cmd = [self.firecracker_bin, "--api-sock", self.socket_path]
+        
+        # If running in NetNS, wrap command
+        if self.netns:
+            # We must run as root to enter NetNS, but then drop back to user for Firecracker?
+            # Firecracker needs to access KVM (usually group kvm).
+            # If we run as root inside NetNS, Firecracker creates socket as root.
+            # Client (running as user) cannot connect to root socket easily if permissions derived from umask?
+            # Better to run: sudo ip netns exec <ns> sudo -u <user> firecracker ...
+            
+            # Get current user to switch back to
+            user = os.environ.get("SUDO_USER", os.environ.get("USER", "rc"))
+            
+            # Note: We need full path for sudo if environment is weird, but usually okay.
+            cmd = ["sudo", "-n", "ip", "netns", "exec", self.netns, "sudo", "-n", "-u", user] + cmd
+            
         logger.info(f"Starting Firecracker: {' '.join(cmd)}")
         # We need pipes for serial console interaction
         self.process = subprocess.Popen(
@@ -534,9 +550,9 @@ class MicroVM:
             self.client.put_network_interface("eth0", self.tap_name, guest_mac)
             
             # Update boot args to include IP config
-            # ip=<client-ip>:<server-ip>:<gw-ip>:<netmask>:<hostname>:<device>:<autoconf>
-            # ip=172.16.X.2::172.16.X.1:255.255.255.0::eth0:off
-            network_boot_args = f"ip={guest_ip}::{host_ip}:255.255.255.0::eth0:off"
+            # ip=<client-ip>:<server-ip>:<gw-ip>:<netmask>:<hostname>:<device>:<autoconf>:<dns0-ip>
+            # ip=172.16.X.2::172.16.X.1:255.255.255.0::eth0:off:8.8.8.8
+            network_boot_args = f"ip={guest_ip}::{host_ip}:255.255.255.0::eth0:off:8.8.8.8"
             full_boot_args = f"{boot_args} {network_boot_args}"
             
             # Update boot source with new args
@@ -601,17 +617,17 @@ class MicroVM:
                  # Ensure TAP name is consistent
                  self.network_config["tap_name"] = self.tap_name
                  host_ip = self.network_config["host_ip"]
-                 if guest_mac:
-                     self.network_config["guest_mac"] = guest_mac
-                 
-                 if not self.network_setup:
-                     setup_tap_device(self.tap_name, host_ip)
-                     self.network_setup = True
-             
-             # IMPORTANT: configure the network interface backend for Firecracker
-             mac = self.network_config.get("guest_mac")
-             self.client.put_network_interface("eth0", self.tap_name, mac)
-
+                 # NOTE: Firecracker restores network config from snapshot if it was configured.
+        # We must ensure the TAP device exists with the SAME name as before (handled by core.restore_vm).
+        # We do NOT call put_network_interface here because it forbids loading snapshot after config.
+        # if enable_networking:
+        #    ...
+            
+        if enable_networking:
+            # We rely on the snapshot configuration (pointing to old TAP name).
+            # We ensure the device exists in the NetNS via the rename workaround in network.py.
+            pass
+            
         self.client.load_snapshot(snapshot_path, mem_file_path)
 
     def stop(self):
@@ -621,9 +637,14 @@ class MicroVM:
                 self.process.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 self.process.kill()
-        
         if self.network_setup:
-            cleanup_tap_device(self.tap_name)
+            cleanup_tap_device(self.tap_name, netns_name=getattr(self, 'netns', None), vm_id=self.vm_id)
+            
+            # Cleanup host route if present
+            if hasattr(self, 'network_config') and self.network_config and "guest_ip" in self.network_config:
+                 from .network import delete_host_route
+                 delete_host_route(self.network_config["guest_ip"])
+                 
             self.network_setup = False
             
         if os.path.exists(self.socket_path):

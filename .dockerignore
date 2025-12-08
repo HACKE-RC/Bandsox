@@ -1,8 +1,5 @@
-storage/
-.venv/
-.git/
-__pycache__/
+storage
+storage_verify_dockerfile
+__pycache__
 *.pyc
-*.pyo
-*.pyd
-.DS_Store
+*.ext4
