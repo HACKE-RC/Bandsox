@@ -39,7 +39,7 @@ class FirecrackerClient:
             # This happens if Firecracker isn't running yet or socket isn't ready
             raise
 
-    def wait_for_socket(self, timeout=5):
+    def wait_for_socket(self, timeout=20):
         start = time.time()
         while time.time() - start < timeout:
             if os.path.exists(self.socket_path):

@@ -111,6 +111,10 @@
                         -</p>
                 </div>
                 <div class="space-y-1">
+                    <p class="text-xs uppercase text-zinc-500 font-medium">IP Address</p>
+                    <p id="vm-ip" class="text-zinc-300 font-mono text-sm">-</p>
+                </div>
+                <div class="space-y-1">
                     <p class="text-xs uppercase text-zinc-500 font-medium">Root FS Path</p>
                     <p id="vm-rootfs" class="text-zinc-500 text-xs font-mono truncate">-</p>
                 </div>
@@ -263,6 +267,19 @@
             document.getElementById('vm-id').textContent = vmInfo.id.substring(0, 16);
             document.getElementById('vm-image').textContent = vmInfo.image || 'Unknown';
             document.getElementById('vm-resources').textContent = `${vmInfo.vcpu || 1} vCPU / ${vmInfo.mem_mib || 128} MiB`;
+
+            // IP Address
+            const ipEl = document.getElementById('vm-ip');
+            if (vmInfo.network_config && vmInfo.network_config.guest_ip) {
+                ipEl.textContent = vmInfo.network_config.guest_ip;
+                ipEl.classList.remove('text-zinc-600');
+                ipEl.classList.add('text-emerald-400');
+            } else {
+                ipEl.textContent = 'Disabled';
+                ipEl.classList.add('text-zinc-600');
+                ipEl.classList.remove('text-emerald-400');
+            }
+
             document.getElementById('vm-rootfs').textContent = vmInfo.rootfs_path || '-';
 
             // Status

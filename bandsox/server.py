@@ -13,7 +13,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bandsox-server")
 
 app = FastAPI()
-bs = BandSox(storage_dir=os.getcwd() + "/storage")
+storage_path = os.environ.get("BANDSOX_STORAGE", os.getcwd() + "/storage")
+logger.info(f"Initializing BandSox with storage path: {storage_path}")
+bs = BandSox(storage_dir=storage_path)
 
 # Serve static files
 static_dir = os.path.join(os.path.dirname(__file__), "static")
@@ -48,12 +50,13 @@ class CreateVMRequest(BaseModel):
     vcpu: int = 1
     mem_mib: int = 128
     enable_networking: bool = True
+    force_rebuild: bool = False
 
 @app.post("/api/vms")
 def create_vm(req: CreateVMRequest):
     logger.info(f"Received create request for {req.image}")
     try:
-        vm = bs.create_vm(req.image, name=req.name, vcpu=req.vcpu, mem_mib=req.mem_mib, enable_networking=req.enable_networking)
+        vm = bs.create_vm(req.image, name=req.name, vcpu=req.vcpu, mem_mib=req.mem_mib, enable_networking=req.enable_networking, force_rebuild=req.force_rebuild)
         return {"id": vm.vm_id, "status": "created"}
     except Exception as e:
         logger.error(f"Failed to create VM: {e}")
@@ -180,22 +183,26 @@ def list_directory(vm_id: str, path: str = "/"):
     
     try:
         files = vm.list_dir(path)
+        logger.info(f"Listed files for VM {vm_id} at {path}: {files}")
         file_info_list = []
         
-        for file_name in files:
-            file_path = f"{path.rstrip('/')}/{file_name}" if path != "/" else f"/{file_name}"
-            try:
-                info = vm.get_file_info(file_path)
+        for entry in files:
+            # list_dir (agent) returns dicts with {name, type, size, mtime}
+            if isinstance(entry, dict):
+                name = entry.get("name")
+                file_path = f"{path.rstrip('/')}/{name}" if path != "/" else f"/{name}"
                 file_info_list.append({
-                    "name": file_name,
+                    "name": name,
                     "path": file_path,
-                    "size": info.get("size", 0),
-                    "is_dir": info.get("is_dir", False),
-                    "is_file": info.get("is_file", False),
-                    "mtime": info.get("mtime", 0)
+                    "size": entry.get("size", 0),
+                    "is_dir": entry.get("type") == "directory",
+                    "is_file": entry.get("type") == "file",
+                    "mtime": entry.get("mtime", 0)
                 })
-            except Exception as e:
-                # If we can't get info, just add basic data
+            else:
+                # Handle string case if fallback implementation returns list of names
+                file_name = str(entry)
+                file_path = f"{path.rstrip('/')}/{file_name}" if path != "/" else f"/{file_name}"
                 file_info_list.append({
                     "name": file_name,
                     "path": file_path,
@@ -207,7 +214,9 @@ def list_directory(vm_id: str, path: str = "/"):
         
         return {"path": path, "files": file_info_list}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list directory: {str(e)}")
+        logger.error(f"Failed to list directory: {e}")
+        # If agent is not ready/vm stopped and we don't support it yet
+        raise HTTPException(status_code=500, detail=f"Failed to list directory. VM must be running. Error: {str(e)}")
 
 @app.get("/api/vms/{vm_id}/download")
 def download_file(vm_id: str, path: str):
