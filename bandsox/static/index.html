@@ -82,14 +82,21 @@
                 <h2 class="text-xl font-medium text-white">Active Sandboxes</h2>
                 <span id="vm-count"
                     class="px-2 py-0.5 rounded text-xs font-mono bg-zinc-900 text-zinc-400 border border-zinc-800">0</span>
+                <button id="btn-bulk-delete" onclick="deleteSelectedVms()" 
+                    class="hidden ml-auto flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded transition-all shadow-lg shadow-red-900/20 group">
+                    <svg class="w-4 h-4 text-red-100 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                    <span>Delete (<span id="selected-count" class="font-bold">0</span>)</span>
+                </button>
             </div>
 
-            <div class="w-full overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950/50">
+            <div class="w-full rounded-lg border border-zinc-800 bg-zinc-950/50">
                 <table class="w-full text-left border-collapse">
                     <thead>
                         <tr class="border-b border-zinc-800 text-xs uppercase tracking-wider text-zinc-500 font-medium">
+                            <th class="pl-6 py-4 w-10">
+                                <input type="checkbox" id="select-all-vms" onclick="toggleSelectAll()" class="rounded border-zinc-700 bg-zinc-900 text-white focus:ring-0 focus:ring-offset-0 accent-white">
+                            </th>
                             <th class="px-6 py-4 font-mono">ID</th>
-                            <th class="px-6 py-4">Source</th>
                             <th class="px-6 py-4">Resources</th>
                             <th class="px-6 py-4">Status</th>
                             <th class="px-6 py-4 text-right">Actions</th>
@@ -108,7 +115,7 @@
         <!-- Snapshots Section -->
         <section class="space-y-6">
             <h2 class="text-xl font-medium text-white">Snapshots</h2>
-            <div class="w-full overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950/50">
+            <div class="w-full rounded-lg border border-zinc-800 bg-zinc-950/50">
                 <table class="w-full text-left border-collapse">
                     <thead>
                         <tr class="border-b border-zinc-800 text-xs uppercase tracking-wider text-zinc-500 font-medium">
@@ -146,9 +153,33 @@
                 <div class="flex justify-end gap-3 pt-2">
                     <button onclick="closeModal()"
                         class="px-4 py-2 text-zinc-400 hover:text-white text-sm transition-colors">Cancel</button>
-                    <button onclick="confirmSnapshot()"
-                        class="bg-white hover:bg-zinc-200 text-black px-6 py-2 rounded-lg text-sm font-medium transition-colors">Save
-                        Snapshot</button>
+                    <button id="snapshot-save-btn" type="button" onclick="confirmSnapshot()"
+                        class="bg-white hover:bg-zinc-200 text-black px-6 py-2 rounded-lg text-sm font-medium transition-colors">Save Snapshot</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Restore Snapshot Modal -->
+    <div id="restore-modal"
+        class="fixed inset-0 bg-black/90 hidden items-center justify-center z-50 backdrop-blur-sm transition-opacity">
+        <div
+            class="bg-zinc-900 p-8 rounded-xl border border-zinc-800 w-full max-w-md shadow-2xl transform transition-all scale-100">
+            <h3 class="text-xl font-medium text-white mb-2">Restore Snapshot</h3>
+            <p class="text-zinc-500 text-sm mb-6">Create a new VM from this snapshot. Resources will match the snapshot state.</p>
+
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-xs uppercase text-zinc-500 font-medium mb-1.5">New VM Name</label>
+                    <input type="text" id="restore-vm-name" placeholder="e.g., restored-service-1"
+                        class="w-full bg-black border border-zinc-800 rounded-lg px-4 py-3 text-white placeholder-zinc-700 focus:ring-1 focus:ring-white focus:border-white outline-none transition-all font-mono text-sm">
+                </div>
+
+                <div class="flex justify-end gap-3 pt-2">
+                    <button onclick="closeRestoreModal()"
+                        class="px-4 py-2 text-zinc-400 hover:text-white text-sm transition-colors">Cancel</button>
+                    <button id="restore-save-btn" type="button" onclick="confirmRestore()"
+                        class="bg-white hover:bg-zinc-200 text-black px-6 py-2 rounded-lg text-sm font-medium transition-colors">Restore & Start</button>
                 </div>
             </div>
         </div>
@@ -183,6 +214,56 @@
     <script>
         let currentVmId = null;
 
+        let currentSnapshotId = null;
+
+        function openRestoreModal(id) {
+            currentSnapshotId = id;
+            const modal = document.getElementById('restore-modal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            document.getElementById('restore-vm-name').value = '';
+            setTimeout(() => document.getElementById('restore-vm-name').focus(), 50);
+        }
+
+        function closeRestoreModal() {
+            const modal = document.getElementById('restore-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            currentSnapshotId = null;
+        }
+
+        async function confirmRestore() {
+            const name = document.getElementById('restore-vm-name').value.trim();
+            
+            if (!currentSnapshotId) return;
+
+            setLoading('restore-save-btn', true);
+
+            try {
+                const res = await fetch(`/api/snapshots/${currentSnapshotId}/restore`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name || null, enable_networking: true })
+                });
+                
+                if (!res.ok) {
+                    const detail = await res.text().catch(() => '');
+                    throw new Error(detail || `Restore failed with status ${res.status}`);
+                }
+                
+                closeRestoreModal();
+                refreshData();
+                
+                // Show success feedback
+                // You could add a toast here, but for now refreshing data shows the new VM
+            } catch (e) {
+                const message = e?.message || e || 'Unknown error';
+                alert('Restore failed: ' + message);
+            } finally {
+                setLoading('restore-save-btn', false);
+            }
+        }
+
         async function refreshData() {
             const now = new Date();
             document.getElementById('last-updated').textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -208,19 +289,145 @@
             }
         }
 
+        // Bulk Action State & Functions
+        let selectedVmIds = new Set();
+
+        function toggleSelectAll() {
+            const masterCheckbox = document.getElementById('select-all-vms');
+            const checkboxes = document.querySelectorAll('.vm-checkbox');
+            const isChecked = masterCheckbox.checked;
+
+            checkboxes.forEach(cb => {
+                cb.checked = isChecked;
+                if (isChecked) {
+                    selectedVmIds.add(cb.value);
+                } else {
+                    selectedVmIds.delete(cb.value);
+                }
+            });
+            updateBulkDeleteUI();
+        }
+
+        function toggleVmSelection(checkbox) {
+            const id = checkbox.value;
+            if (checkbox.checked) {
+                selectedVmIds.add(id);
+            } else {
+                selectedVmIds.delete(id);
+            }
+            updateMasterCheckbox();
+            updateBulkDeleteUI();
+        }
+
+        function updateMasterCheckbox() {
+            const masterCheckbox = document.getElementById('select-all-vms');
+            const checkboxes = document.querySelectorAll('.vm-checkbox');
+            
+            if (!masterCheckbox) return;
+
+            if (checkboxes.length > 0 && Array.from(checkboxes).every(cb => cb.checked)) {
+                masterCheckbox.checked = true;
+                masterCheckbox.indeterminate = false;
+            } else if (checkboxes.length > 0 && Array.from(checkboxes).some(cb => cb.checked)) {
+                masterCheckbox.checked = false;
+                masterCheckbox.indeterminate = true;
+            } else {
+                masterCheckbox.checked = false;
+                masterCheckbox.indeterminate = false;
+            }
+        }
+
+        function updateBulkDeleteUI() {
+            const btn = document.getElementById('btn-bulk-delete');
+            const countSpan = document.getElementById('selected-count');
+            
+            if (!btn || !countSpan) return;
+
+            countSpan.textContent = selectedVmIds.size;
+            if (selectedVmIds.size > 0) {
+                btn.classList.remove('hidden');
+            } else {
+                btn.classList.add('hidden');
+            }
+        }
+
+        async function deleteSelectedVms() {
+            if (selectedVmIds.size === 0) return;
+            
+            showConfirmModal(
+                'Delete Selected VMs',
+                `Are you sure you want to delete ${selectedVmIds.size} selected VMs? This action cannot be undone.`,
+                async () => {
+                    const idsToDelete = Array.from(selectedVmIds);
+                    console.log('Deleting VMs', idsToDelete);
+                    setLoading('btn-bulk-delete', true);
+                    
+                    const promises = idsToDelete.map(id => 
+                        fetch(`/api/vms/${id}`, { method: 'DELETE' })
+                            .then(res => {
+                                if (!res.ok) console.error(`Failed to delete ${id}`);
+                                return res;
+                            })
+                            .catch(e => console.error(`Error deleting ${id}`, e))
+                    );
+                    
+                    try {
+                        await Promise.all(promises);
+                        selectedVmIds.clear();
+                        const masterCheckbox = document.getElementById('select-all-vms');
+                        if (masterCheckbox) {
+                            masterCheckbox.checked = false;
+                            masterCheckbox.indeterminate = false;
+                        }
+                        updateBulkDeleteUI();
+                        refreshData();
+                    } catch (e) {
+                         alert('Error during bulk deletion: ' + e);
+                    } finally {
+                         setLoading('btn-bulk-delete', false);
+                    }
+                }
+            );
+        }
+
         function renderVMs(vms) {
             const tbody = document.getElementById('vm-list');
             const noVms = document.getElementById('no-vms');
             const count = document.getElementById('vm-count');
+
+            // Sync selectedVmIds only if we have VMs (to avoid clearing on temp errors/empty list if that happens)
+            if (vms && vms.length > 0) {
+                const currentVmIds = new Set(vms.map(v => String(v.id)));
+                for (let id of selectedVmIds) {
+                    if (!currentVmIds.has(id)) {
+                        selectedVmIds.delete(id);
+                    }
+                }
+            } else if (vms && vms.length === 0) {
+                // If the list is explicitly empty, we should clear selection? 
+                // Yes, because the VMs are gone.
+                // But we need to distinguish between "empty list" and "failed fetch" (failed fetch doesn't call renderVMs)
+                selectedVmIds.clear();
+            }
+            updateBulkDeleteUI();
 
             tbody.innerHTML = '';
             count.textContent = vms.length;
 
             if (vms.length === 0) {
                 noVms.classList.remove('hidden');
+                const masterCheckbox = document.getElementById('select-all-vms');
+                if (masterCheckbox) {
+                    masterCheckbox.checked = false;
+                    masterCheckbox.indeterminate = false;
+                }
             } else {
                 noVms.classList.add('hidden');
                 vms.forEach(vm => {
+                    const vmIdStr = String(vm.id);
+                    const isSelected = selectedVmIds.has(vmIdStr);
+                    const displayName = vm.name || vm.image || '';
+                    const shortName = displayName.length > 20 ? `${displayName.slice(0, 17)}...` : displayName;
                     const row = document.createElement('tr');
                     row.className = 'group hover:bg-zinc-900/50 transition-colors';
 
@@ -241,8 +448,9 @@
                              <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
                            </span>`;
                         actionButtons = `<button id="btn-resume-${vm.id}" onclick="resumeVm('${vm.id}')" 
-                             class="btn-icon h-8 min-w-[70px] flex items-center justify-center rounded border border-zinc-700 hover:border-emerald-500 text-zinc-300 hover:text-emerald-400 text-xs font-medium transition-all bg-transparent">
-                             Resume
+                             class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-700 hover:border-emerald-500 text-zinc-300 hover:text-emerald-400 transition-all bg-transparent">
+                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                             <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Resume</span>
                            </button>`;
                     } else if (vm.status === 'stopped') {
                         statusColor = 'red';
@@ -251,42 +459,47 @@
                              <span class="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
                            </span>`;
                         actionButtons = `<button id="btn-delete-${vm.id}" onclick="deleteVm('${vm.id}')" 
-                             class="btn-icon h-8 min-w-[70px] flex items-center justify-center rounded border border-zinc-800 hover:border-red-900/50 text-zinc-400 hover:text-red-400 text-xs font-medium transition-all bg-transparent hover:bg-red-950/10">
-                             Delete
+                             class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-red-900/50 text-zinc-400 hover:text-red-400 transition-all bg-transparent hover:bg-red-950/10">
+                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                             <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Delete</span>
                            </button>`;
                     } else {
                         // Running
                         actionButtons = `<button id="btn-pause-${vm.id}" onclick="pauseVm('${vm.id}')" 
-                             class="btn-icon h-8 min-w-[70px] flex items-center justify-center rounded border border-zinc-700 hover:border-zinc-500 text-zinc-300 hover:text-white text-xs font-medium transition-all bg-transparent">
-                             Pause
+                             class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-700 hover:border-zinc-500 text-zinc-300 hover:text-white transition-all bg-transparent">
+                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                             <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Pause</span>
                            </button>`;
                     }
 
                     // Stop button (only for running/paused)
                     if (vm.status !== 'stopped') {
                         actionButtons += `<button id="btn-stop-${vm.id}" onclick="stopVm('${vm.id}')" 
-                                    class="btn-icon h-8 min-w-[70px] flex items-center justify-center rounded border border-zinc-800 hover:border-red-900/50 text-zinc-400 hover:text-red-400 text-xs font-medium transition-all bg-transparent hover:bg-red-950/10 ml-2">
-                                    Stop
+                                    class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-red-900/50 text-zinc-400 hover:text-red-400 transition-all bg-transparent hover:bg-red-950/10 ml-2">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"></path></svg>
+                                    <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Stop</span>
                                 </button>`;
 
                         // Add Terminal Button
                         actionButtons += `<a href="/terminal?id=${vm.id}" target="_blank"
-                                    class="btn-icon h-8 min-w-[70px] flex items-center justify-center rounded border border-zinc-700 hover:border-blue-500 text-zinc-300 hover:text-blue-400 text-xs font-medium transition-all bg-transparent ml-2">
-                                    Terminal
+                                    class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-700 hover:border-blue-500 text-zinc-300 hover:text-blue-400 transition-all bg-transparent ml-2">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                                    <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Terminal</span>
                                 </a>`;
                     }
 
                     row.innerHTML = `
+                        <td class="pl-6 py-4 w-10">
+                            <input type="checkbox" class="vm-checkbox rounded border-zinc-700 bg-zinc-900 text-white focus:ring-0 focus:ring-offset-0 accent-white" 
+                                value="${vmIdStr}" 
+                                ${isSelected ? 'checked' : ''} 
+                                onclick="toggleVmSelection(this)">
+                        </td>
                         <td class="px-6 py-4 font-mono text-zinc-400 group-hover:text-zinc-300">
                             <a href="/vm_details?id=${vm.id}" class="flex flex-col hover:opacity-80 transition-opacity">
-                                <span class="text-white font-medium mb-0.5 hover:underline">${vm.name || vm.image}</span>
+                                <span class="text-white font-medium mb-0.5 hover:underline">${shortName}</span>
                                 <span class="text-xs text-zinc-600">${vm.id.substring(0, 8)}</span>
                             </a>
-                        </td>
-                        <td class="px-6 py-4">
-                            <span class="inline-flex items-center px-2.5 py-1 rounded border border-zinc-800 bg-zinc-900/50 text-zinc-300 text-xs font-mono">
-                                ${vm.image}
-                            </span>
                         </td>
                         <td class="px-6 py-4 text-zinc-400">${vm.vcpu} vCPU <span class="text-zinc-600 mx-1">/</span> ${vm.mem_mib} MiB</td>
                         <td class="px-6 py-4">
@@ -299,14 +512,16 @@
                             <div class="flex justify-end items-center gap-2">
                                 ${actionButtons}
                                 <button onclick="openSnapshotModal('${vm.id}')" 
-                                    class="btn-icon h-8 px-3 flex items-center justify-center rounded border border-zinc-800 hover:border-zinc-600 text-zinc-400 hover:text-white text-xs font-medium transition-all bg-transparent ml-2">
-                                    Snapshot
+                                    class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-zinc-600 text-zinc-400 hover:text-white transition-all bg-transparent ml-2">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                                    <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Snapshot</span>
                                 </button>
                             </div>
                         </td>
                     `;
                     tbody.appendChild(row);
                 });
+                updateMasterCheckbox();
             }
         }
 
@@ -327,10 +542,18 @@
                         <td class="px-6 py-4 font-medium text-white">${snap.id}</td>
                         <td class="px-6 py-4 text-zinc-500 font-mono text-xs truncate max-w-xs">${snap.path}</td>
                         <td class="px-6 py-4 text-right">
-                            <button id="btn-delete-snap-${snap.id}" onclick="deleteSnapshot('${snap.id}')" 
-                                class="h-8 px-4 rounded border border-zinc-800 hover:border-red-900/50 text-zinc-400 hover:text-red-400 text-xs font-medium transition-all bg-transparent hover:bg-red-950/10">
-                                Delete
-                            </button>
+                            <div class="flex justify-end items-center gap-2">
+                                <button onclick="openRestoreModal('${snap.id}')" 
+                                    class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-emerald-500 text-zinc-400 hover:text-emerald-400 transition-all bg-transparent">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                                    <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Restore</span>
+                                </button>
+                                <button id="btn-delete-snap-${snap.id}" onclick="deleteSnapshot('${snap.id}')" 
+                                    class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-red-900/50 text-zinc-400 hover:text-red-400 transition-all bg-transparent hover:bg-red-950/10">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                    <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Delete</span>
+                                </button>
+                            </div>
                         </td>
                     `;
                     tbody.appendChild(row);
@@ -343,7 +566,7 @@
             if (!btn) return;
 
             if (isLoading) {
-                if (!btn.dataset.originalText) btn.dataset.originalText = btn.innerText;
+                if (!btn.dataset.originalHtml) btn.dataset.originalHtml = btn.innerHTML;
                 btn.disabled = true;
                 btn.classList.add('opacity-50', 'cursor-not-allowed');
                 btn.innerHTML = `<svg class="animate-spin h-3.5 w-3.5 text-current" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -353,7 +576,9 @@
             } else {
                 btn.disabled = false;
                 btn.classList.remove('opacity-50', 'cursor-not-allowed');
-                btn.innerText = btn.dataset.originalText;
+                if (btn.dataset.originalHtml) {
+                    btn.innerHTML = btn.dataset.originalHtml;
+                }
             }
         }
 
@@ -487,27 +712,35 @@
         }
 
         async function confirmSnapshot() {
-            const name = document.getElementById('snapshot-name').value;
-            if (!name) return;
+            const name = document.getElementById('snapshot-name').value.trim();
+            if (!name) {
+                alert('Please enter a snapshot name.');
+                return;
+            }
+            if (!currentVmId) {
+                alert('No VM selected for snapshot.');
+                return;
+            }
 
-            const btn = document.querySelector('#snapshot-modal button:last-child');
-            const originalText = btn.innerText;
-            btn.innerText = 'Saving...';
-            btn.disabled = true;
+            setLoading('snapshot-save-btn', true);
 
             try {
-                await fetch(`/api/vms/${currentVmId}/snapshot`, {
+                const res = await fetch(`/api/vms/${currentVmId}/snapshot`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ name })
                 });
+                if (!res.ok) {
+                    const detail = await res.text().catch(() => '');
+                    throw new Error(detail || `Snapshot failed with status ${res.status}`);
+                }
                 closeModal();
                 refreshData();
             } catch (e) {
-                alert('Snapshot failed: ' + e);
+                const message = e?.message || e || 'Unknown error';
+                alert('Snapshot failed: ' + message);
             } finally {
-                btn.innerText = originalText;
-                btn.disabled = false;
+                setLoading('snapshot-save-btn', false);
             }
         }
 
@@ -516,6 +749,7 @@
             if (e.key === 'Escape') {
                 closeModal();
                 closeConfirmModal();
+                closeRestoreModal();
             }
         });
 

@@ -220,6 +220,8 @@ class BandSox:
             
         snapshot_path = snap_dir / "snapshot_file"
         mem_path = snap_dir / "mem_file"
+        # Backwards-compatibility for any legacy references
+        mem_file_path = mem_path
         
         # Load snapshot metadata to get VM configuration
         import json
@@ -333,9 +335,6 @@ class BandSox:
         except Exception as e:
             import re
             msg = str(e)
-            # The error format might be slightly different depending on version/context, catching the path at the end
-            # "Error manipulating the backing file: No such file or directory (os error 2) /path/to/file"
-            # Or "Permission denied (os error 13) /path/to/file"
             
             # Simple regex to catch path at end of string
             # We assume path starts with / and goes to end or "}"
@@ -346,7 +345,8 @@ class BandSox:
 
             if match:
                 missing_path = Path(match.group(1))
-                logger.warning(f"Snapshot expects missing file: {missing_path}. Creating fallback symlink.")
+                # Suppress the warning if we are about to fix it, but keep debug log
+                logger.debug(f"Snapshot expects missing file: {missing_path}. Creating fallback symlink.")
                 
                 # Double check we are not overwriting something important
                 if not missing_path.exists():
@@ -442,7 +442,7 @@ class BandSox:
         return vm
 
     def snapshot_vm(self, vm: MicroVM, snapshot_name: str = None) -> str:
-        """Snapshots a running VM."""
+        """Snapshot a VM without changing its pre-snapshot running/paused state."""
         if not snapshot_name:
             snapshot_name = f"{vm.vm_id}_{int(os.path.getmtime(vm.socket_path))}" # timestampish
             
@@ -452,9 +452,19 @@ class BandSox:
         snapshot_path = snap_dir / "snapshot_file"
         mem_path = snap_dir / "mem_file"
         
-        vm.pause()
-        vm.snapshot(str(snapshot_path), str(mem_path))
-        vm.resume() 
+        meta = self._get_metadata(vm.vm_id) or {}
+        was_paused = meta.get("status") == "paused"
+
+        # Pause VM if it was running; keep paused VMs paused after snapshot
+        if not was_paused:
+            vm.pause()
+
+        try:
+            vm.snapshot(str(snapshot_path), str(mem_path))
+        finally:
+            if not was_paused:
+                # Only resume if we paused it
+                vm.resume() 
         
         # Save snapshot metadata including VM configuration
         import json

@@ -15,7 +15,7 @@ class CNIRuntime:
         
     def _run_cmd(self, cmd, check=True):
         # We assume 'ip' commands are allowed via sudo without password
-        full_cmd = ["sudo", "-n"] + cmd
+        full_cmd = ["sudo"] + cmd
         res = subprocess.run(full_cmd, capture_output=True, text=True)
         if check and res.returncode != 0:
             raise Exception(f"Command failed: {' '.join(full_cmd)}\nStderr: {res.stderr}")
