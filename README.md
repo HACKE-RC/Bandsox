@@ -210,3 +210,7 @@ sudo python3 verification/verify_bandsox.py
 ## License
 
 Apache License 2.0
+
+
+
+###### Note: This project wasn't supposed to be made public so it may have artifacts which make no sense. Please open issues so I can remove them.
