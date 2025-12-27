@@ -26,9 +26,12 @@ class BandSox:
         
         self.active_vms = {} # vm_id -> MicroVM instance
         
-        # Ensure kernel exists or warn
+        # Ensure kernel exists or warn with remediation steps
         if not os.path.exists(DEFAULT_KERNEL_PATH):
-            logger.warning(f"Kernel not found at {DEFAULT_KERNEL_PATH}. VMs may fail to start.")
+            logger.warning(
+                f"Kernel not found at {DEFAULT_KERNEL_PATH}. "
+                "Run 'bandsox init' (or copy a vmlinux file here) before creating VMs."
+            )
 
     def _save_metadata(self, vm_id: str, metadata: dict):
         import json
@@ -115,6 +118,14 @@ class BandSox:
         """Creates and starts a new VM from a Docker image."""
         vm_id = str(uuid.uuid4())
         logger.info(f"Creating VM {vm_id} from {docker_image}")
+        
+        # Validate kernel presence up front for a clearer error
+        if not os.path.exists(kernel_path):
+            raise FileNotFoundError(
+                f"Kernel not found at {kernel_path}. "
+                f"Run 'bandsox init --kernel-output {kernel_path}' or copy a vmlinux "
+                "from the current directory to this path before creating VMs."
+            )
         
         # 1. Build Rootfs
         sanitized_name = docker_image.replace(":", "_").replace("/", "_")

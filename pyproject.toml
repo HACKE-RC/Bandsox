@@ -42,3 +42,6 @@ bandsox = "bandsox.cli:main"
 include = [
     "bandsox/static/**",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["bandsox"]
