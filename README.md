@@ -1,4 +1,9 @@
 # BandSox
+<img width="60" height="200" alt="image" src="https://github.com/user-attachments/assets/d80944af-45ac-407d-b2f2-70c95d68be97"/>
+
+
+
+
 BandSox is a fast, lightweight Python library and CLI for managing Firecracker microVMs. It provides a simple interface to create, manage, and interact with secure sandboxes, making it easy to run untrusted code or isolate workloads.
 
 ## Features
