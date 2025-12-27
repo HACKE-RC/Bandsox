@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Markdown Viewer - BandSox</title>
+    <!-- Marked.js for markdown parsing -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Highlight.js for code syntax highlighting -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0a0b;
+            --bg-secondary: #111113;
+            --bg-tertiary: #18181b;
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-primary: #fafafa;
+            --text-secondary: #a1a1aa;
+            --text-muted: #71717a;
+            --accent-warm: #f59e0b;
+            --accent-coral: #fb7185;
+            --accent-teal: #2dd4bf;
+            --link-color: #60a5fa;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: 'Source Sans 3', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            line-height: 1.7;
+            min-height: 100vh;
+        }
+
+        /* Loading State */
+        .loading-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 60vh;
+            gap: 1.5rem;
+        }
+
+        .loading-spinner {
+            width: 48px;
+            height: 48px;
+            border: 3px solid var(--border-color);
+            border-top-color: var(--accent-warm);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .loading-text {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            letter-spacing: 0.05em;
+        }
+
+        /* Error State */
+        .error-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 60vh;
+            gap: 1rem;
+            padding: 2rem;
+            text-align: center;
+        }
+
+        .error-icon {
+            width: 64px;
+            height: 64px;
+            color: var(--accent-coral);
+        }
+
+        .error-title {
+            font-size: 1.5rem;
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+
+        .error-message {
+            color: var(--text-secondary);
+            max-width: 400px;
+        }
+
+        /* Header */
+        .header {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: rgba(10, 10, 11, 0.85);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border-color);
+            padding: 0.75rem 2rem;
+        }
+
+        .header-content {
+            max-width: 900px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+        }
+
+        .file-info {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            min-width: 0;
+        }
+
+        .file-icon {
+            width: 20px;
+            height: 20px;
+            color: var(--accent-warm);
+            flex-shrink: 0;
+        }
+
+        .file-path {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            font-size: 0.8rem;
+            font-weight: 500;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-decoration: none;
+        }
+
+        .btn:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .btn-icon {
+            width: 16px;
+            height: 16px;
+        }
+
+        /* Main Content */
+        .main {
+            padding: 3rem 2rem 6rem;
+        }
+
+        .article-container {
+            max-width: 750px;
+            margin: 0 auto;
+        }
+
+        /* Markdown Content Styles */
+        .markdown-body {
+            color: var(--text-primary);
+            font-size: 1.05rem;
+        }
+
+        .markdown-body h1,
+        .markdown-body h2,
+        .markdown-body h3,
+        .markdown-body h4,
+        .markdown-body h5,
+        .markdown-body h6 {
+            font-family: 'Crimson Pro', Georgia, 'Times New Roman', serif;
+            font-weight: 600;
+            line-height: 1.3;
+            margin-top: 2.5rem;
+            margin-bottom: 1rem;
+            color: var(--text-primary);
+        }
+
+        .markdown-body h1 {
+            font-size: 2.75rem;
+            margin-top: 0;
+            margin-bottom: 1.5rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border-color);
+            font-weight: 500;
+        }
+
+        .markdown-body h2 {
+            font-size: 1.85rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .markdown-body h3 {
+            font-size: 1.45rem;
+        }
+
+        .markdown-body h4 {
+            font-size: 1.2rem;
+        }
+
+        .markdown-body p {
+            margin-bottom: 1.25rem;
+            color: var(--text-secondary);
+        }
+
+        .markdown-body a {
+            color: var(--link-color);
+            text-decoration: none;
+            border-bottom: 1px solid transparent;
+            transition: border-color 0.2s ease;
+        }
+
+        .markdown-body a:hover {
+            border-bottom-color: var(--link-color);
+        }
+
+        .markdown-body strong {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .markdown-body em {
+            font-style: italic;
+        }
+
+        .markdown-body ul,
+        .markdown-body ol {
+            margin-bottom: 1.25rem;
+            padding-left: 1.75rem;
+            color: var(--text-secondary);
+        }
+
+        .markdown-body li {
+            margin-bottom: 0.5rem;
+        }
+
+        .markdown-body li > ul,
+        .markdown-body li > ol {
+            margin-top: 0.5rem;
+            margin-bottom: 0;
+        }
+
+        .markdown-body blockquote {
+            margin: 1.5rem 0;
+            padding: 1rem 1.5rem;
+            border-left: 4px solid var(--accent-warm);
+            background: var(--bg-secondary);
+            border-radius: 0 8px 8px 0;
+            color: var(--text-secondary);
+            font-style: italic;
+        }
+
+        .markdown-body blockquote p:last-child {
+            margin-bottom: 0;
+        }
+
+        .markdown-body code {
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.88em;
+            padding: 0.2em 0.45em;
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+            color: var(--accent-coral);
+        }
+
+        .markdown-body pre {
+            margin: 1.5rem 0;
+            padding: 1.25rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            overflow-x: auto;
+        }
+
+        .markdown-body pre code {
+            padding: 0;
+            background: transparent;
+            color: inherit;
+            font-size: 0.85rem;
+            line-height: 1.6;
+        }
+
+        .markdown-body img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 10px;
+            margin: 1.5rem 0;
+        }
+
+        .markdown-body hr {
+            border: none;
+            height: 1px;
+            background: var(--border-color);
+            margin: 3rem 0;
+        }
+
+        .markdown-body table {
+            width: 100%;
+            margin: 1.5rem 0;
+            border-collapse: collapse;
+            font-size: 0.95rem;
+        }
+
+        .markdown-body th,
+        .markdown-body td {
+            padding: 0.75rem 1rem;
+            border: 1px solid var(--border-color);
+            text-align: left;
+        }
+
+        .markdown-body th {
+            background: var(--bg-secondary);
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .markdown-body td {
+            color: var(--text-secondary);
+        }
+
+        .markdown-body tr:nth-child(even) td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        /* Task lists */
+        .markdown-body input[type="checkbox"] {
+            margin-right: 0.5rem;
+            accent-color: var(--accent-teal);
+        }
+
+        /* Code block header */
+        .code-block-wrapper {
+            position: relative;
+            margin: 1.5rem 0;
+        }
+
+        .code-lang-label {
+            position: absolute;
+            top: 0;
+            right: 0;
+            padding: 0.35rem 0.75rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            background: var(--bg-tertiary);
+            border-radius: 0 10px 0 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        /* Progress indicator */
+        .reading-progress {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 0%;
+            height: 2px;
+            background: linear-gradient(90deg, var(--accent-warm), var(--accent-coral));
+            z-index: 1000;
+            transition: width 0.1s ease-out;
+        }
+
+        /* Scroll to top button */
+        .scroll-top {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .scroll-top.visible {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .scroll-top:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            transform: translateY(-2px);
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .header {
+                padding: 0.75rem 1rem;
+            }
+
+            .main {
+                padding: 2rem 1rem 4rem;
+            }
+
+            .markdown-body h1 {
+                font-size: 2rem;
+            }
+
+            .markdown-body h2 {
+                font-size: 1.5rem;
+            }
+
+            .file-path {
+                max-width: 200px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Reading Progress Bar -->
+    <div class="reading-progress" id="reading-progress"></div>
+
+    <!-- Header -->
+    <header class="header">
+        <div class="header-content">
+            <div class="file-info">
+                <svg class="file-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                </svg>
+                <span class="file-path" id="file-path">Loading...</span>
+            </div>
+            <div class="header-actions">
+                <button class="btn" onclick="downloadFile()" title="Download file">
+                    <svg class="btn-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                    </svg>
+                    Download
+                </button>
+                <button class="btn" onclick="window.close()" title="Close viewer">
+                    <svg class="btn-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                    Close
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main">
+        <div class="article-container">
+            <!-- Loading State -->
+            <div class="loading-container" id="loading">
+                <div class="loading-spinner"></div>
+                <span class="loading-text">Loading markdown...</span>
+            </div>
+
+            <!-- Error State -->
+            <div class="error-container" id="error" style="display: none;">
+                <svg class="error-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+                </svg>
+                <h2 class="error-title">Failed to load file</h2>
+                <p class="error-message" id="error-message">An error occurred while loading the markdown file.</p>
+            </div>
+
+            <!-- Markdown Content -->
+            <article class="markdown-body" id="content" style="display: none;"></article>
+        </div>
+    </main>
+
+    <!-- Scroll to Top Button -->
+    <button class="scroll-top" id="scroll-top" onclick="scrollToTop()">
+        <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18"></path>
+        </svg>
+    </button>
+
+    <script>
+        let vmId = null;
+        let filePath = null;
+
+        // Get parameters from URL
+        function getParams() {
+            const params = new URLSearchParams(window.location.search);
+            vmId = params.get('vm_id');
+            filePath = params.get('path');
+            return { vmId, filePath };
+        }
+
+        // Configure marked
+        marked.setOptions({
+            highlight: function(code, lang) {
+                if (lang && hljs.getLanguage(lang)) {
+                    return hljs.highlight(code, { language: lang }).value;
+                }
+                return hljs.highlightAuto(code).value;
+            },
+            breaks: true,
+            gfm: true
+        });
+
+        // Custom renderer for code blocks with language labels
+        const renderer = new marked.Renderer();
+        const originalCodeRenderer = renderer.code.bind(renderer);
+        renderer.code = function(code, language, escaped) {
+            const highlighted = language && hljs.getLanguage(language)
+                ? hljs.highlight(code, { language }).value
+                : hljs.highlightAuto(code).value;
+            
+            const langLabel = language ? `<span class="code-lang-label">${language}</span>` : '';
+            return `<div class="code-block-wrapper">${langLabel}<pre><code class="hljs">${highlighted}</code></pre></div>`;
+        };
+        marked.setOptions({ renderer });
+
+        // Load and render markdown
+        async function loadMarkdown() {
+            const { vmId, filePath } = getParams();
+            
+            if (!vmId || !filePath) {
+                showError('Missing required parameters (vm_id or path)');
+                return;
+            }
+
+            // Update file path display
+            document.getElementById('file-path').textContent = filePath;
+            document.title = `${filePath.split('/').pop()} - Markdown Viewer`;
+
+            try {
+                const response = await fetch(`/api/vms/${vmId}/download?path=${encodeURIComponent(filePath)}`);
+                
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch file: ${response.status} ${response.statusText}`);
+                }
+
+                const markdown = await response.text();
+                
+                // Hide loading, show content
+                document.getElementById('loading').style.display = 'none';
+                const contentEl = document.getElementById('content');
+                contentEl.style.display = 'block';
+                
+                // Render markdown
+                contentEl.innerHTML = marked.parse(markdown);
+
+                // Apply syntax highlighting to any code blocks
+                document.querySelectorAll('pre code').forEach((block) => {
+                    hljs.highlightElement(block);
+                });
+
+            } catch (error) {
+                console.error('Failed to load markdown:', error);
+                showError(error.message);
+            }
+        }
+
+        function showError(message) {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('error').style.display = 'flex';
+            document.getElementById('error-message').textContent = message;
+        }
+
+        function downloadFile() {
+            if (vmId && filePath) {
+                const url = `/api/vms/${vmId}/download?path=${encodeURIComponent(filePath)}`;
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = filePath.split('/').pop();
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }
+        }
+
+        function scrollToTop() {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        // Reading progress bar
+        function updateReadingProgress() {
+            const scrollHeight = document.documentElement.scrollHeight - window.innerHeight;
+            const scrollProgress = (window.scrollY / scrollHeight) * 100;
+            document.getElementById('reading-progress').style.width = Math.min(scrollProgress, 100) + '%';
+            
+            // Toggle scroll-to-top button
+            const scrollTopBtn = document.getElementById('scroll-top');
+            if (window.scrollY > 300) {
+                scrollTopBtn.classList.add('visible');
+            } else {
+                scrollTopBtn.classList.remove('visible');
+            }
+        }
+
+        // Event listeners
+        window.addEventListener('scroll', updateReadingProgress);
+        window.addEventListener('DOMContentLoaded', loadMarkdown);
+    </script>
+</body>
+
+</html>
+

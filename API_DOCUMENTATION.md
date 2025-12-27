@@ -12,6 +12,8 @@ BandSox is a Python library for managing Firecracker microVMs. It allows you to 
   - [Executing Commands](#executing-commands)
   - [File Operations](#file-operations)
   - [Snapshots](#snapshots)
+- [CLI Reference](#cli-reference)
+- [HTTP API](#http-api)
 - [Class Reference](#class-reference)
 - [Caveats & Troubleshooting](#caveats--troubleshooting)
 
@@ -58,7 +60,7 @@ from bandsox.core import BandSox
 manager = BandSox(storage_dir="/path/to/storage")
 ```
 
-**Note**: The storage directory will contain sensitive data (images, sockets, metadata). Ensure proper permissions.
+**Note**: The storage directory will contain sensitive data (images, sockets, metadata). Ensure proper permissions. Large artifacts (kernel, CNI plugins, rootfs images) are not shipped in git; use the CLI `bandsox init` command to download them.
 
 ### Creating VMs
 
@@ -141,6 +143,53 @@ snapshot_id = manager.snapshot_vm(vm, snapshot_name="checkpoint-1")
 # Use this snapshot ID to start new identical VMs
 restored_vm = manager.restore_vm(snapshot_id)
 ```
+
+## CLI Reference
+
+The `bandsox` CLI wraps the server and API for common workflows.
+
+- `bandsox init` — download required artifacts.
+  - Flags: `--kernel-url`, `--kernel-output`, `--skip-kernel`, `--cni-url`, `--cni-dir`, `--skip-cni`, `--rootfs-url`, `--rootfs-output`, `--skip-rootfs`, `--force`
+  - Behavior: downloads `vmlinux`, CNI plugins (tgz), and optionally a base `.ext4` rootfs. Skips existing files unless `--force` is set. Build your rootfs locally and point to a path or `file://` URL, e.g.:
+    ```
+    bandsox init --rootfs-url ./bandsox-base.ext4
+    ```
+  - Example CNI source (Linux/amd64): `--cni-url https://github.com/containernetworking/plugins/releases/download/v1.5.1/cni-plugins-linux-amd64-v1.5.1.tgz`
+- `bandsox serve [--host 0.0.0.0] [--port 8000] [--storage /var/lib/sandbox]` — run the FastAPI dashboard/API.
+- `bandsox create <image> [--name NAME] [--vcpu N] [--mem MiB] [--disk-size MiB] [--host HOST] [--port PORT]` — create a VM from a Docker image via the server API.
+- `bandsox vm list|stop|pause|resume|delete|save ...` — manage VMs over the HTTP API.
+- `bandsox snapshot list|delete|restore ...` — manage snapshots.
+- `bandsox terminal <vm_id> [--host HOST] [--port PORT]` — connect to a VM’s terminal over WebSocket.
+- `bandsox cleanup` — remove stale TAP devices.
+
+## HTTP API
+
+Base URL: `http://HOST:PORT`
+
+VMs
+- `GET /api/vms` — list VMs.
+- `POST /api/vms` — create a VM from an image.
+  - Body: `{ "image": "alpine:latest", "name": "...", "vcpu": 1, "mem_mib": 128, "enable_networking": true, "force_rebuild": false, "disk_size_mib": 4096 }`
+- `GET /api/vms/{vm_id}` — get VM details.
+- `POST /api/vms/{vm_id}/stop|pause|resume` — lifecycle operations.
+- `DELETE /api/vms/{vm_id}` — delete a VM.
+- `POST /api/vms/{vm_id}/snapshot` — snapshot a running VM.
+  - Body: `{ "name": "snap-name" }`
+- `GET /api/vms/{vm_id}/files?path=/` — list files inside the VM (may start a temporary instance when stopped).
+- `GET /api/vms/{vm_id}/download?path=/etc/hosts` — download a file.
+- `WS /api/vms/{vm_id}/terminal?cols=80&rows=24` — interactive terminal.
+
+Snapshots
+- `GET /api/snapshots` — list snapshots.
+- `DELETE /api/snapshots/{snapshot_id}` — delete a snapshot.
+- `POST /api/snapshots/{snapshot_id}/restore` — restore into a new VM.
+  - Body: `{ "name": "optional-name", "enable_networking": true }`
+
+Static assets
+- `GET /` — dashboard.
+- `GET /terminal` — web terminal page.
+- `GET /vm_details` — VM details page.
+- `GET /markdown_viewer` — markdown viewer.
 
 ## Class Reference
 
