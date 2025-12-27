@@ -38,7 +38,7 @@ def setup_tap_device(tap_name: str, host_ip: str, cidr: int = 24):
     import os
     user = os.environ.get("SUDO_USER", os.environ.get("USER", "rc"))
     try:
-        run_command(["sudo", "ip", "tuntap", "add", "dev", tap_name, "mode", "tap", "user", user, "group", user])
+        run_command(["sudo", "-n", "ip", "tuntap", "add", "dev", tap_name, "mode", "tap", "user", user, "group", user])
     except subprocess.CalledProcessError:
         # Ignore if it fails (likely exists). We proceed to set IP/UP which might fix it or fail later.
         logger.warning(f"Failed to create TAP {tap_name} (might already involve). Continuing...")
@@ -59,15 +59,15 @@ def setup_tap_device(tap_name: str, host_ip: str, cidr: int = 24):
     else:
         # Not found, add it
         try:
-            run_command(["sudo", "ip", "addr", "add", f"{host_ip}/{cidr}", "dev", tap_name])
+            run_command(["sudo", "-n", "ip", "addr", "add", f"{host_ip}/{cidr}", "dev", tap_name])
         except subprocess.CalledProcessError as e:
             raise Exception(f"Failed to assign IP {host_ip} to {tap_name}: {e}")
     
     # Bring up
-    run_command(["sudo", "ip", "link", "set", tap_name, "up"])
+    run_command(["sudo", "-n", "ip", "link", "set", tap_name, "up"])
     
     # Enable IP forwarding
-    run_command(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=1"])
+    run_command(["sudo", "-n", "sysctl", "-w", "net.ipv4.ip_forward=1"])
     
     # Setup NAT (Masquerading)
     ext_if = get_default_interface()
@@ -76,22 +76,22 @@ def setup_tap_device(tap_name: str, host_ip: str, cidr: int = 24):
     # Check and add firewall rules
     try:
         # Masquerade (NAT)
-        run_command(["sudo", "iptables", "-t", "nat", "-C", "POSTROUTING", "-o", ext_if, "-j", "MASQUERADE"], check=False)
-        if run_command(["sudo", "iptables", "-t", "nat", "-C", "POSTROUTING", "-o", ext_if, "-j", "MASQUERADE"], check=False).returncode != 0:
-             run_command(["sudo", "iptables", "-t", "nat", "-A", "POSTROUTING", "-o", ext_if, "-j", "MASQUERADE"])
+        run_command(["sudo", "-n", "iptables", "-t", "nat", "-C", "POSTROUTING", "-o", ext_if, "-j", "MASQUERADE"], check=False)
+        if run_command(["sudo", "-n", "iptables", "-t", "nat", "-C", "POSTROUTING", "-o", ext_if, "-j", "MASQUERADE"], check=False).returncode != 0:
+             run_command(["sudo", "-n", "iptables", "-t", "nat", "-A", "POSTROUTING", "-o", ext_if, "-j", "MASQUERADE"])
         
         # Conntrack
-        if run_command(["sudo", "iptables", "-C", "FORWARD", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"], check=False).returncode != 0:
-            run_command(["sudo", "iptables", "-I", "FORWARD", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"])
+        if run_command(["sudo", "-n", "iptables", "-C", "FORWARD", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"], check=False).returncode != 0:
+            run_command(["sudo", "-n", "iptables", "-I", "FORWARD", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"])
             
         # Forward TAP
-        if run_command(["sudo", "iptables", "-C", "FORWARD", "-i", tap_name, "-o", ext_if, "-j", "ACCEPT"], check=False).returncode != 0:
-            run_command(["sudo", "iptables", "-I", "FORWARD", "-i", tap_name, "-o", ext_if, "-j", "ACCEPT"])
+        if run_command(["sudo", "-n", "iptables", "-C", "FORWARD", "-i", tap_name, "-o", ext_if, "-j", "ACCEPT"], check=False).returncode != 0:
+            run_command(["sudo", "-n", "iptables", "-I", "FORWARD", "-i", tap_name, "-o", ext_if, "-j", "ACCEPT"])
             
         # Allow Host -> VM (and established return traffic)
         # We need to allow packets destined to the TAP device
-        if run_command(["sudo", "iptables", "-C", "FORWARD", "-o", tap_name, "-j", "ACCEPT"], check=False).returncode != 0:
-             run_command(["sudo", "iptables", "-I", "FORWARD", "-o", tap_name, "-j", "ACCEPT"])
+        if run_command(["sudo", "-n", "iptables", "-C", "FORWARD", "-o", tap_name, "-j", "ACCEPT"], check=False).returncode != 0:
+             run_command(["sudo", "-n", "iptables", "-I", "FORWARD", "-o", tap_name, "-j", "ACCEPT"])
             
     except Exception as e:
         logger.warning(f"iptables setup failed (might already exist or permission denied): {e}")
@@ -143,7 +143,7 @@ def setup_netns_networking(netns_name: str, tap_name: str, host_ip: str, vm_id: 
     run_command(["sudo", "ip", "netns", "exec", netns_name, "ip", "link", "set", tap_name, "up"])
     
     # 4. Enable Forwarding
-    run_command(["sudo", "ip", "netns", "exec", netns_name, "sysctl", "-w", "net.ipv4.ip_forward=1"])
+    run_command(["sudo", "-n", "ip", "netns", "exec", netns_name, "sysctl", "-w", "net.ipv4.ip_forward=1"])
     
     # Strategy: Routing + NAT (Double NAT)
     # VM(172.16..) -> TAP -> NAT -> eth0(10.200..) -> CNI Bridge -> Host
@@ -181,7 +181,7 @@ def add_host_route(target_subnet: str, gateway_ip: str):
     logger.info(f"Adding host route: {target_subnet} via {gateway_ip}")
     try:
         # Use replace to handle existing routes (updates gateway if changed)
-        run_command(["sudo", "ip", "route", "replace", target_subnet, "via", gateway_ip])
+        run_command(["sudo", "-n", "ip", "route", "replace", target_subnet, "via", gateway_ip])
     except Exception as e:
         logger.warning(f"Failed to add/replace route: {e}")
 
@@ -189,7 +189,7 @@ def delete_host_route(target_subnet: str):
     """Deletes a host route to the target subnet."""
     logger.info(f"Deleting host route: {target_subnet}")
     try:
-        run_command(["sudo", "ip", "route", "del", target_subnet], check=False)
+        run_command(["sudo", "-n", "ip", "route", "del", target_subnet], check=False)
     except Exception as e:
         logger.warning(f"Failed to delete route: {e}")
 
@@ -209,7 +209,7 @@ def cleanup_netns(netns_name: str, vm_id: str, host_ip: str):
 
     # Delete NetNS
     try:
-        run_command(["sudo", "ip", "netns", "delete", netns_name], check=False)
+        run_command(["sudo", "-n", "ip", "netns", "delete", netns_name], check=False)
     except: pass
 
     
@@ -220,9 +220,9 @@ def cleanup_tap_device(tap_name: str, netns_name: str = None, vm_id: str = None,
     else:
         logger.info(f"Cleaning up TAP device {tap_name}")
         try:
-            run_command(["sudo", "ip", "tuntap", "del", "dev", tap_name, "mode", "tap"], check=False)
+            run_command(["sudo", "-n", "ip", "tuntap", "del", "dev", tap_name, "mode", "tap"], check=False)
             ext_if = get_default_interface()
-            run_command(["sudo", "iptables", "-D", "FORWARD", "-i", tap_name, "-o", ext_if, "-j", "ACCEPT"], check=False)
+            run_command(["sudo", "-n", "iptables", "-D", "FORWARD", "-i", tap_name, "-o", ext_if, "-j", "ACCEPT"], check=False)
         except Exception as e:
             logger.error(f"Error cleaning up TAP device: {e}")
 
@@ -232,12 +232,12 @@ def setup_tc_redirect(netns_name: str, src_if: str, dst_if: str):
     Sets up bidirectional traffic mirroring between two interfaces using TC.
     """
     # Ingress on src -> Egress on dst
-    run_command(["sudo", "ip", "netns", "exec", netns_name, "tc", "qdisc", "add", "dev", src_if, "ingress"], check=False)
-    run_command(["sudo", "ip", "netns", "exec", netns_name, "tc", "filter", "add", "dev", src_if, "parent", "ffff:", "protocol", "all", "u32", "match", "u32", "0", "0", "action", "mirred", "egress", "redirect", "dev", dst_if])
+    run_command(["sudo", "-n", "ip", "netns", "exec", netns_name, "tc", "qdisc", "add", "dev", src_if, "ingress"], check=False)
+    run_command(["sudo", "-n", "ip", "netns", "exec", netns_name, "tc", "filter", "add", "dev", src_if, "parent", "ffff:", "protocol", "all", "u32", "match", "u32", "0", "0", "action", "mirred", "egress", "redirect", "dev", dst_if])
 
     # Ingress on dst -> Egress on src
-    run_command(["sudo", "ip", "netns", "exec", netns_name, "tc", "qdisc", "add", "dev", dst_if, "ingress"], check=False)
-    run_command(["sudo", "ip", "netns", "exec", netns_name, "tc", "filter", "add", "dev", dst_if, "parent", "ffff:", "protocol", "all", "u32", "match", "u32", "0", "0", "action", "mirred", "egress", "redirect", "dev", src_if])
+    run_command(["sudo", "-n", "ip", "netns", "exec", netns_name, "tc", "qdisc", "add", "dev", dst_if, "ingress"], check=False)
+    run_command(["sudo", "-n", "ip", "netns", "exec", netns_name, "tc", "filter", "add", "dev", dst_if, "parent", "ffff:", "protocol", "all", "u32", "match", "u32", "0", "0", "action", "mirred", "egress", "redirect", "dev", src_if])
     
 def configure_tap_offloading(netns_name: str, tap_name: str, vm_id: str):
     """
@@ -248,7 +248,7 @@ def configure_tap_offloading(netns_name: str, tap_name: str, vm_id: str):
     try:
         import subprocess
         logger.info(f"Disabling checksum offloading on {tap_name} in {netns_name}")
-        run_command(["sudo", "ip", "netns", "exec", netns_name, "ethtool", "-K", tap_name, "tx", "off", "sg", "off", "tso", "off", "ufo", "off", "gso", "off"], check=False)
+        run_command(["sudo", "-n", "ip", "netns", "exec", netns_name, "ethtool", "-K", tap_name, "tx", "off", "sg", "off", "tso", "off", "ufo", "off", "gso", "off"], check=False)
     except Exception as e:
         logger.warning(f"Failed to run ethtool: {e}")
 

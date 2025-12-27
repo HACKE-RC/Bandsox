@@ -44,6 +44,13 @@ async def read_markdown_viewer():
 def list_vms():
     return bs.list_vms()
 
+@app.get("/api/projects")
+def list_projects():
+    """
+    Alias for listing VMs used by the UI.
+    """
+    return bs.list_vms()
+
 @app.get("/api/snapshots")
 def list_snapshots():
     return bs.list_snapshots()

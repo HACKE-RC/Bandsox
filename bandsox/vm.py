@@ -162,7 +162,7 @@ class MicroVM:
             user = os.environ.get("SUDO_USER", os.environ.get("USER", "rc"))
             
             # Note: We need full path for sudo if environment is weird, but usually okay.
-            cmd = ["sudo", "-n", "ip", "netns", "exec", self.netns, "sudo", "-n", "-u", user] + cmd
+            cmd = ["sudo", "ip", "netns", "exec", self.netns, "sudo", "-u", user] + cmd
             
         logger.info(f"Starting Firecracker: {' '.join(cmd)}")
         # We need pipes for serial console interaction

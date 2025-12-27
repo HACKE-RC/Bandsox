@@ -18,7 +18,7 @@ class FirecrackerClient:
         encoded_path = socket_path.replace("/", "%2F")
         self.base_url = f"http+unix://{encoded_path}"
         
-    def _request(self, method, endpoint, data=None):
+    def _request(self, method, endpoint, data=None, log_error=True):
         url = f"{self.base_url}{endpoint}"
         headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
         
@@ -31,7 +31,10 @@ class FirecrackerClient:
             
             # Firecracker returns 204 No Content for success often
             if response.status_code not in [200, 204]:
-                logger.error(f"Firecracker API error {response.status_code}: {response.text}")
+                # Some callers (e.g. snapshot load) intentionally retry after inspecting the error.
+                # Allow suppressing loud logs while still surfacing the exception.
+                log_fn = logger.error if log_error else logger.debug
+                log_fn(f"Firecracker API error {response.status_code}: {response.text}")
                 raise Exception(f"Firecracker API error: {response.text}")
             
             return response
@@ -115,7 +118,8 @@ class FirecrackerClient:
             "enable_diff_snapshots": False,
             "resume_vm": False 
         }
-        return self._request("PUT", "/snapshot/load", data)
+        # Allow the caller to inspect/handle 4xx responses (e.g. missing backing file) without loud logs.
+        return self._request("PUT", "/snapshot/load", data, log_error=False)
         
     def resume_vm(self):
         data = {
