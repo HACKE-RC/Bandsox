@@ -1,5 +1,4 @@
 # BandSox
-
 BandSox is a fast, lightweight Python library and CLI for managing Firecracker microVMs. It provides a simple interface to create, manage, and interact with secure sandboxes, making it easy to run untrusted code or isolate workloads.
 
 ## Features
@@ -99,6 +98,32 @@ print(content) # Output: Hello World
 # Stop the VM
 vm.stop()
 ```
+
+## Web UI
+#### Home Page
+<img width="1564" height="931" alt="image" src="https://github.com/user-attachments/assets/e3bba19c-dba5-4f5d-a5ef-e38df43bbee8" />
+
+---
+
+#### Details Page
+<img width="1446" height="852" alt="image" src="https://github.com/user-attachments/assets/135512d7-2212-49aa-9454-fa2ae2e918fc" />
+
+##### File browser
+###### The details page has a file browser which you can use to explore the files inside the VM.
+<img width="1618" height="852" alt="image" src="https://github.com/user-attachments/assets/13191fa2-5b2c-4935-a448-e5d8810a9a1e" />
+
+##### Markdown viewer
+###### Markdown files have a view button next to them, which opens a markdown viewer
+<img width="1261" height="369" alt="image" src="https://github.com/user-attachments/assets/54ca063a-9885-497c-b2be-83ef7180da52" />
+
+
+---
+
+#### Terminal
+###### The webui has a terminal which can be accessed by clicking on the terminal button
+<img width="613" height="219" alt="image" src="https://github.com/user-attachments/assets/2c0148bf-9820-431f-87c0-620c45d4bd03" />
+
+
 
 ## Architecture
 
