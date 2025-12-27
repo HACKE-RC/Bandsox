@@ -11,10 +11,10 @@ def main():
     import os
     from pathlib import Path
     cwd = os.getcwd()
-    bs = BandSox(storage_dir=f"{cwd}/storage_verify_dockerfile")
+    bs = BandSox(storage_dir=f"/home/rc/bandsox/storage")
     
     logger.info("Creating VM from Dockerfile...")
-    vm = bs.create_vm_from_dockerfile("verification/Dockerfile", tag="bandsox-test-image-v5", vcpu=1, mem_mib=256, kernel_path=f"{cwd}/vmlinux", enable_networking=False)
+    vm = bs.create_vm_from_dockerfile("verification/Dockerfile", tag="bandsox-test-image-v5", vcpu=1, mem_mib=256, kernel_path=f"{cwd}/vmlinux", enable_networking=True)
     
     try:
         logger.info(f"VM {vm.vm_id} started. Waiting for boot...")

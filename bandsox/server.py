@@ -36,6 +36,10 @@ async def read_vm_details():
 async def read_terminal():
     return FileResponse(os.path.join(static_dir, "terminal.html"))
 
+@app.get("/markdown_viewer")
+async def read_markdown_viewer():
+    return FileResponse(os.path.join(static_dir, "markdown_viewer.html"))
+
 @app.get("/api/vms")
 def list_vms():
     return bs.list_vms()
@@ -51,12 +55,13 @@ class CreateVMRequest(BaseModel):
     mem_mib: int = 128
     enable_networking: bool = True
     force_rebuild: bool = False
+    disk_size_mib: int = 4096
 
 @app.post("/api/vms")
 def create_vm(req: CreateVMRequest):
     logger.info(f"Received create request for {req.image}")
     try:
-        vm = bs.create_vm(req.image, name=req.name, vcpu=req.vcpu, mem_mib=req.mem_mib, enable_networking=req.enable_networking, force_rebuild=req.force_rebuild)
+        vm = bs.create_vm(req.image, name=req.name, vcpu=req.vcpu, mem_mib=req.mem_mib, enable_networking=req.enable_networking, force_rebuild=req.force_rebuild, disk_size_mib=req.disk_size_mib)
         return {"id": vm.vm_id, "status": "created"}
     except Exception as e:
         logger.error(f"Failed to create VM: {e}")

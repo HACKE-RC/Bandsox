@@ -2,6 +2,7 @@ import os
 import subprocess
 import uuid
 import logging
+import shutil
 from pathlib import Path
 from .vm import MicroVM, DEFAULT_KERNEL_PATH
 from .image import build_rootfs
@@ -41,6 +42,35 @@ class BandSox:
             with open(meta_path, "r") as f:
                 return json.load(f)
         return {}
+
+    def _clone_rootfs(self, src: Path, dest: Path) -> str:
+        """
+        Clone a rootfs file, preferring reflink/CoW to avoid large copies.
+        Returns the method used for logging/debugging.
+        """
+        start = time.time()
+        src = Path(src)
+        dest = Path(dest)
+        if dest.exists():
+            dest.unlink()
+
+        method = "copy"
+        try:
+            subprocess.run(
+                ["cp", "--reflink=always", "--sparse=auto", str(src), str(dest)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            method = "reflink"
+        except Exception as e:
+            logger.debug(f"Reflink clone failed ({e}); falling back to full copy")
+            shutil.copy2(src, dest)
+            method = "copy"
+
+        elapsed = time.time() - start
+        logger.info(f"Cloned rootfs to {dest.name} via {method} in {elapsed:.2f}s")
+        return method
 
     def update_vm_status(self, vm_id: str, status: str):
         """Updates the status field in the VM metadata."""
@@ -95,8 +125,7 @@ class BandSox:
             
         # Copy to instance specific path
         instance_rootfs = self.images_dir / f"{vm_id}.ext4"
-        import shutil
-        shutil.copy2(base_rootfs, instance_rootfs)
+        self._clone_rootfs(base_rootfs, instance_rootfs)
         
         # Inject latest agent
         self._inject_agent(str(instance_rootfs))
@@ -278,12 +307,11 @@ class BandSox:
 
         _start_vm_process()
         # Copy snapshot rootfs if available (must do this before starting process potentially?)
-        import shutil
         snap_rootfs = snapshot_meta.get("rootfs_path")
         instance_rootfs = self.images_dir / f"{new_vm_id}.ext4"
         
         if snap_rootfs and os.path.exists(snap_rootfs):
-            shutil.copy2(snap_rootfs, instance_rootfs)
+            self._clone_rootfs(snap_rootfs, instance_rootfs)
             self._inject_agent(str(instance_rootfs))
         
         # Try to load snapshot
@@ -426,7 +454,7 @@ class BandSox:
         source_rootfs = Path(vm_meta.get("rootfs_path"))
         snap_rootfs = snap_dir / "rootfs.ext4"
         if source_rootfs.exists():
-            shutil.copy2(source_rootfs, snap_rootfs)
+            self._clone_rootfs(source_rootfs, snap_rootfs)
         
         snapshot_meta = {
             "snapshot_name": snapshot_name,

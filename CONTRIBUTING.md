@@ -7,6 +7,7 @@ We welcome contributions to BandSox!
 1.  Clone the repo.
 2.  Install development dependencies (e.g., `pytest`, `black`, `isort`).
 3.  Ensure you have `firecracker` installed.
+4.  Fetch runtime artifacts with `bandsox init` (kernel, CNI, optional base rootfs). These are not committed to git.
 
 ## Project Structure
 
