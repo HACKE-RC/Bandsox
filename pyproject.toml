@@ -1,10 +1,10 @@
 [project]
 name = "bandsox"
-version = "0.1.0"
+version = "0.5.0"
 description = "Fast Firecracker microVM manager"
 authors = [{name = "Antigravity", email = "antigravity@deepmind.com"}]
 readme = "README.md"
-license = {text = "MIT"}
+license = {file = "LICENSE"}
 keywords = ["firecracker", "microvm", "sandbox", "fastapi", "cli"]
 dependencies = [
     "requests",
@@ -16,7 +16,7 @@ dependencies = [
 ]
 requires-python = ">=3.8"
 classifiers = [
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
@@ -28,8 +28,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/bandsox"
-Repository = "https://github.com/yourusername/bandsox"
+Homepage = "https://github.com/HACKE-RC/Bandsox/"
+Repository = "https://github.com/HACKE-RC/Bandsox/"
 
 [build-system]
 requires = ["hatchling"]
