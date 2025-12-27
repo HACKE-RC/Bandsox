@@ -637,7 +637,11 @@ class MicroVM:
                 self.process.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 self.process.kill()
-        if self.network_setup:
+        # Clean up networking even if network_setup is False but we still have
+        # a remembered netns or network_config (e.g., after restore or server
+        # restart) to avoid leaking veth/netns devices.
+        should_cleanup_net = self.network_setup or getattr(self, "netns", None) or getattr(self, "network_config", None)
+        if should_cleanup_net:
             cleanup_tap_device(self.tap_name, netns_name=getattr(self, 'netns', None), vm_id=self.vm_id)
             
             # Cleanup host route if present
