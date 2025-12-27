@@ -287,9 +287,40 @@ class BandSox:
             vm.netns = netns_name
             
         runner_process = None
+        # Precompute log path for detached runner so we can surface it on failures
+        log_dir = self.storage_dir / "logs"
+        log_dir.mkdir(exist_ok=True)
+        log_file = log_dir / f"{new_vm_id}.log"
         
+        def _ensure_netns():
+            """Recreate netns/tap if it was cleaned up between runs (e.g., previous VM shutdown)."""
+            if not netns_name:
+                return
+            netns_path = Path("/var/run/netns") / netns_name
+            if netns_path.exists():
+                return
+            try:
+                from .network import setup_netns_networking, add_host_route
+                logger.info(f"NetNS {netns_name} missing; recreating before start")
+                cni_ip = setup_netns_networking(netns_name, old_tap_name, host_ip, new_vm_id)
+                guest_ip = net_config.get("guest_ip")
+                if cni_ip and guest_ip:
+                    add_host_route(guest_ip, cni_ip)
+            except Exception as e:
+                logger.error(f"Failed to recreate NetNS {netns_name}: {e}")
+                raise
+
         def _start_vm_process():
             nonlocal runner_process
+            socket_parent = Path(socket_path).parent
+            socket_parent.mkdir(parents=True, exist_ok=True)
+            _ensure_netns()
+            # Proactively clear any stale socket so Firecracker can bind cleanly
+            if os.path.exists(socket_path):
+                try:
+                    os.unlink(socket_path)
+                except PermissionError as e:
+                    raise Exception(f"Cannot remove stale socket {socket_path}: {e}")
             if detach:
                 import sys
                 import subprocess
@@ -298,22 +329,27 @@ class BandSox:
                 if netns_name:
                     runner_cmd.extend(["--netns", netns_name])
                 
-                # Logs
-                log_dir = self.storage_dir / "logs"
-                log_dir.mkdir(exist_ok=True)
-                log_file = log_dir / f"{new_vm_id}.log"
-                
                 logger.info(f"Spawning detached runner for VM {new_vm_id}")
                 with open(log_file, "w") as f:
                     # We do NOT use start_new_session=True because it breaks sudo (loses tty/tickets).
                     # Instead, the runner ignores SIGINT/SIGHUP to detach logically.
                     runner_process = subprocess.Popen(runner_cmd, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT)
                 
-                # Wait for API socket to appear
+                # Wait for API socket to appear, surfacing runner crashes promptly
                 start_wait = time.time()
-                while not os.path.exists(socket_path):
-                    if time.time() - start_wait > 5:
-                        raise Exception("Timeout waiting for detached runner to start Firecracker")
+                while True:
+                    if os.path.exists(socket_path):
+                        break
+                    if runner_process and runner_process.poll() is not None:
+                        raise Exception(
+                            f"Detached runner exited with code {runner_process.returncode}. "
+                            f"See log at {log_file}"
+                        )
+                    if time.time() - start_wait > 20:
+                        raise Exception(
+                            f"Timeout waiting for detached runner to start Firecracker. "
+                            f"See log at {log_file}"
+                        )
                     time.sleep(0.1)
             else:
                 vm.start_process()
