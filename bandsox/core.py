@@ -1,6 +1,8 @@
 import os
+import subprocess
 import uuid
 import logging
+import shutil
 from pathlib import Path
 from .vm import MicroVM, DEFAULT_KERNEL_PATH
 from .image import build_rootfs
@@ -24,9 +26,12 @@ class BandSox:
         
         self.active_vms = {} # vm_id -> MicroVM instance
         
-        # Ensure kernel exists or warn
+        # Ensure kernel exists or warn with remediation steps
         if not os.path.exists(DEFAULT_KERNEL_PATH):
-            logger.warning(f"Kernel not found at {DEFAULT_KERNEL_PATH}. VMs may fail to start.")
+            logger.warning(
+                f"Kernel not found at {DEFAULT_KERNEL_PATH}. "
+                "Run 'bandsox init' (or copy a vmlinux file here) before creating VMs."
+            )
 
     def _save_metadata(self, vm_id: str, metadata: dict):
         import json
@@ -40,6 +45,35 @@ class BandSox:
             with open(meta_path, "r") as f:
                 return json.load(f)
         return {}
+
+    def _clone_rootfs(self, src: Path, dest: Path) -> str:
+        """
+        Clone a rootfs file, preferring reflink/CoW to avoid large copies.
+        Returns the method used for logging/debugging.
+        """
+        start = time.time()
+        src = Path(src)
+        dest = Path(dest)
+        if dest.exists():
+            dest.unlink()
+
+        method = "copy"
+        try:
+            subprocess.run(
+                ["cp", "--reflink=always", "--sparse=auto", str(src), str(dest)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            method = "reflink"
+        except Exception as e:
+            logger.debug(f"Reflink clone failed ({e}); falling back to full copy")
+            shutil.copy2(src, dest)
+            method = "copy"
+
+        elapsed = time.time() - start
+        logger.info(f"Cloned rootfs to {dest.name} via {method} in {elapsed:.2f}s")
+        return method
 
     def update_vm_status(self, vm_id: str, status: str):
         """Updates the status field in the VM metadata."""
@@ -80,10 +114,18 @@ class BandSox:
         except Exception as e:
             logger.error(f"Failed to inject agent: {e}")
 
-    def create_vm(self, docker_image: str, name: str = None, vcpu: int = 1, mem_mib: int = 128, kernel_path: str = DEFAULT_KERNEL_PATH, enable_networking: bool = True, force_rebuild: bool = False) -> MicroVM:
+    def create_vm(self, docker_image: str, name: str = None, vcpu: int = 1, mem_mib: int = 128, kernel_path: str = DEFAULT_KERNEL_PATH, enable_networking: bool = True, force_rebuild: bool = False, disk_size_mib: int = 4096) -> MicroVM:
         """Creates and starts a new VM from a Docker image."""
         vm_id = str(uuid.uuid4())
         logger.info(f"Creating VM {vm_id} from {docker_image}")
+        
+        # Validate kernel presence up front for a clearer error
+        if not os.path.exists(kernel_path):
+            raise FileNotFoundError(
+                f"Kernel not found at {kernel_path}. "
+                f"Run 'bandsox init --kernel-output {kernel_path}' or copy a vmlinux "
+                "from the current directory to this path before creating VMs."
+            )
         
         # 1. Build Rootfs
         sanitized_name = docker_image.replace(":", "_").replace("/", "_")
@@ -94,11 +136,35 @@ class BandSox:
             
         # Copy to instance specific path
         instance_rootfs = self.images_dir / f"{vm_id}.ext4"
-        import shutil
-        shutil.copy2(base_rootfs, instance_rootfs)
+        self._clone_rootfs(base_rootfs, instance_rootfs)
         
         # Inject latest agent
         self._inject_agent(str(instance_rootfs))
+        
+        # Resize if needed
+        # Check current size
+        current_size = instance_rootfs.stat().st_size
+        target_size = disk_size_mib * 1024 * 1024
+        
+        if target_size > current_size:
+            logger.info(f"Resizing rootfs from {current_size} to {target_size} bytes")
+            try:
+                # 1. Extend file
+                subprocess.run(["truncate", "-s", str(target_size), str(instance_rootfs)], check=True)
+                
+                # 2. Check filesystem
+                subprocess.run(["e2fsck", "-f", "-p", str(instance_rootfs)], check=False) # -p automatic repair, return code might be non-zero for corrections
+                
+                # 3. Resize filesystem
+                subprocess.run(["resize2fs", str(instance_rootfs)], check=True)
+                
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Failed to resize rootfs: {e}")
+                # We might continue with original size or fail? Let's warn but continue if possible, or maybe fail is safer.
+                # If resize failed, the file might be truncated but FS not resized. 
+                # e2fsck should fix valid FS but size mismatch might occur.
+                # Let's raise to be safe.
+                raise Exception(f"Failed to resize disk: {e}")
         
         # 2. Create VM instance
         socket_path = str(self.sockets_dir / f"{vm_id}.sock")
@@ -119,6 +185,7 @@ class BandSox:
             "image": docker_image,
             "vcpu": vcpu,
             "mem_mib": mem_mib,
+            "disk_size_mib": disk_size_mib,
             "rootfs_path": str(instance_rootfs),  # Save rootfs path for file operations
             "network_config": getattr(vm, "network_config", None),
             "created_at": time.time(),
@@ -129,7 +196,7 @@ class BandSox:
         self.active_vms[vm_id] = vm
         return vm
 
-    def create_vm_from_dockerfile(self, dockerfile_path: str, tag: str = None, name: str = None, vcpu: int = 1, mem_mib: int = 128, **kwargs) -> MicroVM:
+    def create_vm_from_dockerfile(self, dockerfile_path: str, tag: str = None, name: str = None, vcpu: int = 1, mem_mib: int = 128, disk_size_mib: int = 4096, **kwargs) -> MicroVM:
         """Creates a VM from a Dockerfile."""
         if not tag:
             tag = f"bandsox-build-{uuid.uuid4()}"
@@ -142,9 +209,9 @@ class BandSox:
         
         build_image_from_dockerfile(dockerfile_path, tag, nocache=nocache)
         
-        return self.create_vm(tag, name=name, vcpu=vcpu, mem_mib=mem_mib, **kwargs)
+        return self.create_vm(tag, name=name, vcpu=vcpu, mem_mib=mem_mib, disk_size_mib=disk_size_mib, **kwargs)
 
-    def restore_vm(self, snapshot_id: str, name: str = None, enable_networking: bool = True) -> MicroVM:
+    def restore_vm(self, snapshot_id: str, name: str = None, enable_networking: bool = True, detach: bool = True) -> MicroVM:
         """Restores a VM from a snapshot."""
         # Snapshot ID should point to a folder containing snapshot file and mem file
         snap_dir = self.snapshots_dir / snapshot_id
@@ -217,14 +284,45 @@ class BandSox:
             vm.network_config = net_config
             vm.netns = netns_name
             
-        vm.start_process()
+        runner_process = None
+        
+        def _start_vm_process():
+            nonlocal runner_process
+            if detach:
+                import sys
+                import subprocess
+                
+                runner_cmd = [sys.executable, "-m", "bandsox.runner", new_vm_id, "--socket-path", socket_path]
+                if netns_name:
+                    runner_cmd.extend(["--netns", netns_name])
+                
+                # Logs
+                log_dir = self.storage_dir / "logs"
+                log_dir.mkdir(exist_ok=True)
+                log_file = log_dir / f"{new_vm_id}.log"
+                
+                logger.info(f"Spawning detached runner for VM {new_vm_id}")
+                with open(log_file, "w") as f:
+                    # We do NOT use start_new_session=True because it breaks sudo (loses tty/tickets).
+                    # Instead, the runner ignores SIGINT/SIGHUP to detach logically.
+                    runner_process = subprocess.Popen(runner_cmd, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT)
+                
+                # Wait for API socket to appear
+                start_wait = time.time()
+                while not os.path.exists(socket_path):
+                    if time.time() - start_wait > 5:
+                        raise Exception("Timeout waiting for detached runner to start Firecracker")
+                    time.sleep(0.1)
+            else:
+                vm.start_process()
+
+        _start_vm_process()
         # Copy snapshot rootfs if available (must do this before starting process potentially?)
-        import shutil
         snap_rootfs = snapshot_meta.get("rootfs_path")
         instance_rootfs = self.images_dir / f"{new_vm_id}.ext4"
         
         if snap_rootfs and os.path.exists(snap_rootfs):
-            shutil.copy2(snap_rootfs, instance_rootfs)
+            self._clone_rootfs(snap_rootfs, instance_rootfs)
             self._inject_agent(str(instance_rootfs))
         
         # Try to load snapshot
@@ -259,8 +357,18 @@ class BandSox:
                         
                         # Restart process to ensure clean state
                         logger.info("Restarting Firecracker process for retry...")
-                        vm.stop()
-                        vm.start_process()
+                        if detach and runner_process:
+                             runner_process.terminate()
+                             try:
+                                 runner_process.wait(timeout=1)
+                             except:
+                                 runner_process.kill()
+                             if os.path.exists(socket_path):
+                                 os.unlink(socket_path)
+                        else:
+                             vm.stop()
+                        
+                        _start_vm_process()
                         
                         # Retry load
                         vm.load_snapshot(str(snapshot_path), str(mem_path), enable_networking=enable_networking, guest_mac=guest_mac)
@@ -326,7 +434,7 @@ class BandSox:
             "restored_from": snapshot_id,
             "rootfs_path": str(instance_rootfs),
             "network_config": vm.network_config if hasattr(vm, "network_config") else None,
-            "pid": vm.process.pid,
+            "pid": runner_process.pid if detach and runner_process else vm.process.pid if vm.process else None,
             "agent_ready": True
         })
         
@@ -357,7 +465,7 @@ class BandSox:
         source_rootfs = Path(vm_meta.get("rootfs_path"))
         snap_rootfs = snap_dir / "rootfs.ext4"
         if source_rootfs.exists():
-            shutil.copy2(source_rootfs, snap_rootfs)
+            self._clone_rootfs(source_rootfs, snap_rootfs)
         
         snapshot_meta = {
             "snapshot_name": snapshot_name,

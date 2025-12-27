@@ -35,13 +35,21 @@ BandSox is a fast, lightweight Python library and CLI for managing Firecracker m
     pip install -e .
     ```
 
-3. Download the Linux kernel (required for Firecracker):
+3. Initialize required artifacts (kernel, CNI plugins, optional base rootfs):
 
     ```bash
-    ./scripts/download_kernel.sh
+    # Use a locally-built rootfs (see instructions below)
+    bandsox init --rootfs-url ./bandsox-base.ext4
     ```
 
-    (Note: Ensure `download_kernel.sh` is executable and run it to fetch `vmlinux`).
+    This downloads:
+    - `vmlinux` (Firecracker kernel)
+    - CNI plugins (from the official upstream releases, e.g.
+      `https://github.com/containernetworking/plugins/releases/download/v1.5.1/cni-plugins-linux-amd64-v1.5.1.tgz`)
+      into `cni/bin/` (or your chosen `--cni-dir`)
+    - (Optional) a base rootfs `.ext4` into `storage/images/` when `--rootfs-url` is provided
+
+    Default URLs are provided for kernel and CNI. For the rootfs, build one locally (instructions below) and point `--rootfs-url` to a local path (or `file://` URL). Use `--skip-*` flags to omit specific downloads or `--force` to re-download.
 
 ## Usage
 
@@ -100,6 +108,64 @@ BandSox consists of several components:
 - **VM (`bandsox.vm`)**: Wrapper around the Firecracker process, handling configuration, network, and interaction.
 - **Agent (`bandsox.agent`)**: A lightweight Python agent injected into the VM to handle command execution and file operations.
 - **Server (`bandsox.server`)**: FastAPI-based backend for the web dashboard.
+
+## Docs & APIs
+
+- Full library, CLI, and HTTP endpoint reference: [`API_DOCUMENTATION.md`](API_DOCUMENTATION.md)
+- REST base path: `http://<host>:<port>/api` (see docs for endpoints such as `/api/vms`, `/api/snapshots`, `/api/vms/{id}/terminal` WebSocket)
+
+## Building a local base rootfs (no hosting required)
+
+- Build a minimal ext4 from a Docker image and keep it local:
+  ```bash
+  IMG=alpine:latest          # pick a base image with python if needed
+  OUT=bandsox-base.ext4
+  SIZE_MB=512                # increase for more disk
+  TMP=$(mktemp -d)
+
+  docker pull "$IMG"
+  CID=$(docker create "$IMG")
+  docker export "$CID" -o "$TMP/rootfs.tar"
+  docker rm "$CID"
+
+  dd if=/dev/zero of="$OUT" bs=1M count=$SIZE_MB
+  mkfs.ext4 -F "$OUT"
+  mkdir -p "$TMP/mnt"
+  sudo mount -o loop "$OUT" "$TMP/mnt"
+  sudo tar -xf "$TMP/rootfs.tar" -C "$TMP/mnt"
+
+  cat <<'EOF' | sudo tee "$TMP/mnt/init" >/dev/null
+#!/bin/sh
+export PATH=/usr/local/bin:/usr/bin:/bin:/sbin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+P=$(command -v python3 || command -v python)
+[ -z "$P" ] && exec /usr/local/bin/agent.py
+exec "$P" /usr/local/bin/agent.py
+EOF
+  sudo chmod +x "$TMP/mnt/init"
+
+  sudo mkdir -p "$TMP/mnt/usr/local/bin"
+  sudo cp bandsox/agent.py "$TMP/mnt/usr/local/bin/agent.py"
+  sudo chmod 755 "$TMP/mnt/usr/local/bin/agent.py"
+
+  sudo umount "$TMP/mnt"
+  sudo e2fsck -fy "$OUT"
+  sudo resize2fs -M "$OUT"   # optional: shrink to minimum
+  rm -rf "$TMP"
+  ```
+
+- Use it locally with `bandsox init --rootfs-url ./bandsox-base.ext4` (or `file://$PWD/bandsox-base.ext4`).
+
+- Alternative: skip providing a base rootfs entirely—BandSox can build per-image rootfs on demand from Docker images when you call `bandsox create <image>`.
+
+## Storage & Artifacts
+
+- Large artifacts (ext4 rootfs images, snapshots, `vmlinux`, CNI binaries) are **not** tracked in git; `bandsox init` downloads them into `storage/` and `cni/bin/` (or a directory you pass via `--cni-dir` pointing at the official CNI release tarball).
+- Default storage path is `/var/lib/sandbox`; override with `BANDSOX_STORAGE` or `--storage` when running the server.
+- To pre-seed a base rootfs, build it locally and reference it via `--rootfs-url file://...`; otherwise, create VMs from Docker images on demand (no prebuilt rootfs needed).
 
 ## Verification & Testing
 

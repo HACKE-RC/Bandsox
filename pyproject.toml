@@ -3,6 +3,9 @@ name = "bandsox"
 version = "0.1.0"
 description = "Fast Firecracker microVM manager"
 authors = [{name = "Antigravity", email = "antigravity@deepmind.com"}]
+readme = "README.md"
+license = {text = "MIT"}
+keywords = ["firecracker", "microvm", "sandbox", "fastapi", "cli"]
 dependencies = [
     "requests",
     "requests-unixsocket",
@@ -12,6 +15,21 @@ dependencies = [
     "pydantic",
 ]
 requires-python = ">=3.8"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/bandsox"
+Repository = "https://github.com/yourusername/bandsox"
 
 [build-system]
 requires = ["hatchling"]
@@ -19,3 +37,11 @@ build-backend = "hatchling.build"
 
 [project.scripts]
 bandsox = "bandsox.cli:main"
+
+[tool.hatch.build]
+include = [
+    "bandsox/static/**",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["bandsox"]
