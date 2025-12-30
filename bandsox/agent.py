@@ -63,11 +63,17 @@ def read_pty_master(master_fd, cmd_id):
     except Exception as e:
         send_event("error", {"cmd_id": cmd_id, "error": str(e)})
 
-def handle_command(cmd_id, command, background=False):
+def handle_command(cmd_id, command, background=False, env=None):
     try:
+        # Prepare environment
+        proc_env = os.environ.copy()
+        if env:
+            proc_env.update(env)
+
         process = subprocess.Popen(
             command,
             shell=True,
+            env=proc_env,
             stdin=subprocess.PIPE, # Enable stdin
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -124,7 +130,7 @@ def handle_command(cmd_id, command, background=False):
             "error": str(e)
         })
 
-def handle_pty_command(cmd_id, command, cols=80, rows=24):
+def handle_pty_command(cmd_id, command, cols=80, rows=24, env=None):
     try:
         pid, master_fd = pty.fork()
         
@@ -133,6 +139,10 @@ def handle_pty_command(cmd_id, command, cols=80, rows=24):
             # Set window size
             winsize = struct.pack("HHHH", rows, cols, 0, 0)
             fcntl.ioctl(0, termios.TIOCSWINSZ, winsize)
+            
+            # Prepare environment
+            if env:
+                os.environ.update(env)
             
             # Execute command
             # Use shell to execute command string
@@ -338,9 +348,10 @@ def main():
                 if req_type == "exec":
                     cmd = req.get("command")
                     bg = req.get("background", False)
+                    env = req.get("env")
                     if cmd:
                         # Run in a thread to allow concurrent commands/sessions
-                        t = threading.Thread(target=handle_command, args=(cmd_id, cmd, bg), daemon=True)
+                        t = threading.Thread(target=handle_command, args=(cmd_id, cmd, bg, env), daemon=True)
                         t.start()
                     else:
                         send_event("error", {"error": "Invalid request"})
@@ -349,7 +360,8 @@ def main():
                     cmd = req.get("command")
                     cols = req.get("cols", 80)
                     rows = req.get("rows", 24)
-                    t = threading.Thread(target=handle_pty_command, args=(cmd_id, cmd, cols, rows), daemon=True)
+                    env = req.get("env")
+                    t = threading.Thread(target=handle_pty_command, args=(cmd_id, cmd, cols, rows, env), daemon=True)
                     t.start()
                         
                 elif req_type == "input":

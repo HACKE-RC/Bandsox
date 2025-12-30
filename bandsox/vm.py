@@ -142,6 +142,7 @@ class MicroVM:
         self.console_conn = None # Connection to console socket if not owner
         self.event_callbacks = {} # cmd_id -> {stdout: func, stderr: func, exit: func}
         self.agent_ready = False
+        self.env_vars = {}
 
     def start_process(self):
         """Starts the Firecracker process."""
@@ -374,7 +375,7 @@ class MicroVM:
 
     def exec_command(self, command: str, on_stdout=None, on_stderr=None, timeout=30):
         """Executes a command in the VM via the agent (blocking)."""
-        return self.send_request("exec", {"command": command, "background": False}, on_stdout=on_stdout, on_stderr=on_stderr, timeout=timeout)
+        return self.send_request("exec", {"command": command, "background": False, "env": self.env_vars}, on_stdout=on_stdout, on_stderr=on_stderr, timeout=timeout)
 
     def exec_python(self, code: str, cwd: str = "/tmp", packages: list = None, on_stdout=None, on_stderr=None, timeout=60, cleanup_venv: bool = True):
         """
@@ -599,7 +600,7 @@ class MicroVM:
             "on_exit": on_exit
         }
         
-        req = json.dumps({"type": "exec", "id": session_id, "command": command, "background": True})
+        req = json.dumps({"type": "exec", "id": session_id, "command": command, "background": True, "env": self.env_vars})
         self._write_to_agent(req + "\n")
         
         return session_id

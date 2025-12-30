@@ -41,15 +41,28 @@ async def read_markdown_viewer():
     return FileResponse(os.path.join(static_dir, "markdown_viewer.html"))
 
 @app.get("/api/vms")
-def list_vms():
-    return bs.list_vms()
+def list_vms(limit: int = None, metadata_equals: str = None):
+    meta_filter = None
+    if metadata_equals:
+        try:
+            meta_filter = json.loads(metadata_equals)
+        except json.JSONDecodeError:
+             # Or raise HTTPException?
+             pass
+    return bs.list_vms(limit=limit, metadata_equals=meta_filter)
 
 @app.get("/api/projects")
-def list_projects():
+def list_projects(limit: int = None, metadata_equals: str = None):
     """
     Alias for listing VMs used by the UI.
     """
-    return bs.list_vms()
+    meta_filter = None
+    if metadata_equals:
+        try:
+            meta_filter = json.loads(metadata_equals)
+        except json.JSONDecodeError:
+             pass
+    return bs.list_vms(limit=limit, metadata_equals=meta_filter)
 
 @app.get("/api/snapshots")
 def list_snapshots():
@@ -63,12 +76,14 @@ class CreateVMRequest(BaseModel):
     enable_networking: bool = True
     force_rebuild: bool = False
     disk_size_mib: int = 4096
+    env_vars: dict = None
+    metadata: dict = None
 
 @app.post("/api/vms")
 def create_vm(req: CreateVMRequest):
     logger.info(f"Received create request for {req.image}")
     try:
-        vm = bs.create_vm(req.image, name=req.name, vcpu=req.vcpu, mem_mib=req.mem_mib, enable_networking=req.enable_networking, force_rebuild=req.force_rebuild, disk_size_mib=req.disk_size_mib)
+        vm = bs.create_vm(req.image, name=req.name, vcpu=req.vcpu, mem_mib=req.mem_mib, enable_networking=req.enable_networking, force_rebuild=req.force_rebuild, disk_size_mib=req.disk_size_mib, env_vars=req.env_vars, metadata=req.metadata)
         return {"id": vm.vm_id, "status": "created"}
     except Exception as e:
         logger.error(f"Failed to create VM: {e}")
@@ -77,12 +92,14 @@ def create_vm(req: CreateVMRequest):
 class RestoreVMRequest(BaseModel):
     name: str = None
     enable_networking: bool = True
+    env_vars: dict = None
+    metadata: dict = None
 
 @app.post("/api/snapshots/{snapshot_id}/restore")
 def restore_snapshot(snapshot_id: str, req: RestoreVMRequest):
     logger.info(f"Received restore request for snapshot {snapshot_id}")
     try:
-        vm = bs.restore_vm(snapshot_id, name=req.name, enable_networking=req.enable_networking)
+        vm = bs.restore_vm(snapshot_id, name=req.name, enable_networking=req.enable_networking, env_vars=req.env_vars, metadata=req.metadata)
         return {"id": vm.vm_id, "status": "restored"}
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Snapshot not found")
