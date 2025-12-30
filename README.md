@@ -17,45 +17,23 @@ BandSox is a fast, lightweight Python library and CLI for managing Firecracker m
 - **File Operations**: Upload, download, and manage files within the VM.
 - **Terminal Access**: Interactive web-based terminal for running VMs.
 
-## Prerequisites
-
-- Linux system with KVM support (bare metal or nested virtualization).
-- [Firecracker](https://firecracker-microvm.github.io/) installed and in your PATH (`/usr/bin/firecracker`).
-- Python 3.8+.
-- `sudo` access (required for setting up TAP devices for networking).
-
-## Installation
-
-1. Clone the repository:
-
-    ```bash
-    git clone https://github.com/HACKE-RC/Bandsox.git
-    cd bandsox
-    ```
-
-2. Install dependencies:
-
-    ```bash
-    pip install -e .
-    ```
-
-3. Initialize required artifacts (kernel, CNI plugins, optional base rootfs):
-
-    ```bash
-    # Use a locally-built rootfs (see instructions below)
-    bandsox init --rootfs-url ./bandsox-base.ext4
-    ```
-
-    This downloads:
-    - `vmlinux` (Firecracker kernel)
-    - CNI plugins (from the official upstream releases, e.g.
-      `https://github.com/containernetworking/plugins/releases/download/v1.5.1/cni-plugins-linux-amd64-v1.5.1.tgz`)
-      into `cni/bin/` (or your chosen `--cni-dir`)
-    - (Optional) a base rootfs `.ext4` into `storage/images/` when `--rootfs-url` is provided
-
-    Default URLs are provided for kernel and CNI. For the rootfs, build one locally (instructions below) and point `--rootfs-url` to a local path (or `file://` URL). Use `--skip-*` flags to omit specific downloads or `--force` to re-download.
-
 ## Usage
+
+### Quick Start - Hello World
+
+Create a VM and run Python code in just a few seconds:
+
+```python
+from bandsox.core import BandSox
+
+bs = BandSox()
+vm = bs.create_vm("python:3-alpine", enable_networking=False)
+
+result = vm.exec_python_capture("print('Hello from VM!')")
+print(result['stdout'])  # Output: Hello from VM!
+
+vm.stop()
+```
 
 ### Python API
 
@@ -65,12 +43,16 @@ from bandsox.core import BandSox
 # Initialize
 bs = BandSox()
 
-# Create a VM from a Docker image
-vm = bs.create_vm("alpine:latest", name="test-vm")
+# Create a VM from a Docker image (which has python preinstalled)
+vm = bs.create_vm("python:3-alpine", name="test-vm")
 print(f"VM started: {vm.vm_id}")
 
 # Execute a command
 exit_code = vm.exec_command("echo Hello World > /root/hello.txt")
+
+# Execute Python code directly in the VM (capture output)
+result = vm.exec_python_capture("print('Hello World')")
+print(result['stdout'])  # Output: Hello World
 
 # Read a file
 content = vm.get_file_contents("/root/hello.txt")
@@ -113,6 +95,45 @@ sudo python3 -m bandsox.cli serve --host 0.0.0.0 --port 8000
 ```
 
 Visit `http://localhost:8000` to access the dashboard.
+
+## Prerequisites
+
+- Linux system with KVM support (bare metal or nested virtualization).
+- [Firecracker](https://firecracker-microvm.github.io/) installed and in your PATH (`/usr/bin/firecracker`).
+- Python 3.8+.
+- `sudo` access (required for setting up TAP devices for networking).
+
+## Installation
+
+1. Clone the repository:
+
+    ```bash
+    git clone https://github.com/HACKE-RC/Bandsox.git
+    cd bandsox
+    ```
+
+2. Install dependencies:
+
+    ```bash
+    pip install -e .
+    ```
+
+3. Initialize required artifacts (kernel, CNI plugins, optional base rootfs):
+
+    ```bash
+    # Use a locally-built rootfs (see instructions below)
+    bandsox init --rootfs-url ./bandsox-base.ext4
+    ```
+
+    This downloads:
+    - `vmlinux` (Firecracker kernel)
+    - CNI plugins (from the official upstream releases, e.g.
+      `https://github.com/containernetworking/plugins/releases/download/v1.5.1/cni-plugins-linux-amd64-v1.5.1.tgz`)
+      into `cni/bin/` (or your chosen `--cni-dir`)
+    - (Optional) a base rootfs `.ext4` into `storage/images/` when `--rootfs-url` is provided
+
+    Default URLs are provided for kernel and CNI. For the rootfs, build one locally (instructions below) and point `--rootfs-url` to a local path (or `file://` URL). Use `--skip-*` flags to omit specific downloads or `--force` to re-download.
+
 
 ## Web UI Screenshots
 #### Home Page
