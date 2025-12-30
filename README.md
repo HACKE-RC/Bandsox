@@ -57,30 +57,6 @@ BandSox is a fast, lightweight Python library and CLI for managing Firecracker m
 
 ## Usage
 
-### CLI
-
-BandSox includes a CLI tool `bandsox` (or `python -m bandsox.cli`).
-
-**Start the Web Dashboard:**
-
-```bash
-sudo python3 -m bandsox.cli serve --host 0.0.0.0 --port 8000
-```
-
-Visit `http://localhost:8000` to access the dashboard.
-
-**Create a VM:**
-
-```bash
-sudo python3 -m bandsox.cli create ubuntu:latest --name my-vm
-```
-
-**Open a Terminal:**
-
-```bash
-sudo python3 -m bandsox.cli terminal <vm_id>
-```
-
 ### Python API
 
 ```python
@@ -104,7 +80,41 @@ print(content) # Output: Hello World
 vm.stop()
 ```
 
-## Web UI
+### Web UI
+
+Start the web dashboard:
+
+```bash
+sudo python3 -m bandsox.cli serve --host 0.0.0.0 --port 8000
+```
+
+Visit `http://localhost:8000` to access the dashboard.
+
+### CLI
+
+BandSox includes a CLI tool `bandsox` (or `python -m bandsox.cli`).
+
+**Create a VM:**
+
+```bash
+sudo python3 -m bandsox.cli create ubuntu:latest --name my-vm
+```
+
+**Open a Terminal:**
+
+```bash
+sudo python3 -m bandsox.cli terminal <vm_id>
+```
+
+**Start the Web Dashboard:**
+
+```bash
+sudo python3 -m bandsox.cli serve --host 0.0.0.0 --port 8000
+```
+
+Visit `http://localhost:8000` to access the dashboard.
+
+## Web UI Screenshots
 #### Home Page
 <img width="1564" height="931" alt="image" src="https://github.com/user-attachments/assets/e3bba19c-dba5-4f5d-a5ef-e38df43bbee8" />
 
