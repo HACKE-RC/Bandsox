@@ -14,7 +14,6 @@ class CNIRuntime:
         self.netns_name = os.path.basename(netns_path)
         
     def _run_cmd(self, cmd, check=True):
-        # We assume 'ip' commands are allowed via sudo without password
         full_cmd = ["sudo"] + cmd
         res = subprocess.run(full_cmd, capture_output=True, text=True)
         if check and res.returncode != 0:
@@ -107,9 +106,9 @@ class CNIRuntime:
         # We add to 'ip filter FORWARD'
         try:
             # iifname bridge -> accept
-            self._run_cmd(["sudo", "-n", "nft", "add", "rule", "ip", "filter", "FORWARD", "iifname", bridge_name, "counter", "accept"], check=False)
+            self._run_cmd(["sudo", "nft", "add", "rule", "ip", "filter", "FORWARD", "iifname", bridge_name, "counter", "accept"], check=False)
             # oifname bridge -> accept  
-            self._run_cmd(["sudo", "-n", "nft", "add", "rule", "ip", "filter", "FORWARD", "oifname", bridge_name, "counter", "accept"], check=False)
+            self._run_cmd(["sudo", "nft", "add", "rule", "ip", "filter", "FORWARD", "oifname", bridge_name, "counter", "accept"], check=False)
         except Exception:
             pass
             
@@ -134,21 +133,21 @@ class CNIRuntime:
             # 2. Create chain 'POSTROUTING'
             # 3. Add rule
             
-            subprocess.run(["sudo", "-n", "nft", "add", "table", "ip", "nat"], check=True)
+            subprocess.run(["sudo", "nft", "add", "table", "ip", "nat"], check=True)
             # Create chain with proper hooks (type nat hook postrouting priority 100)
             # We use ignore error if it exists (or rely on 'add' being idempotent-ish for existing hooks?)
             # 'nft add chain' creates if not exists.
-            subprocess.run(["sudo", "-n", "nft", "add", "chain", "ip", "nat", "POSTROUTING", "{ type nat hook postrouting priority 100; }"], check=True)
+            subprocess.run(["sudo", "nft", "add", "chain", "ip", "nat", "POSTROUTING", "{ type nat hook postrouting priority 100; }"], check=True)
             
             # Check if rule exists before adding to avoid duplicates
             # nft list chain ip nat POSTROUTING
-            current_rules = subprocess.run(["sudo", "-n", "nft", "list", "chain", "ip", "nat", "POSTROUTING"], capture_output=True, text=True).stdout
+            current_rules = subprocess.run(["sudo", "nft", "list", "chain", "ip", "nat", "POSTROUTING"], capture_output=True, text=True).stdout
             
             rule_content = f"ip saddr {subnet} ip daddr != {subnet} counter masquerade"
             
             if rule_content not in current_rules:
                 nft_cmd = ["nft", "add", "rule", "ip", "nat", "POSTROUTING"] + rule_content.split()
-                subprocess.run(["sudo", "-n"] + nft_cmd, check=True)
+                subprocess.run(["sudo"] + nft_cmd, check=True)
                 
             return
         except Exception:
@@ -160,13 +159,13 @@ class CNIRuntime:
             try:
                 # Check
                 check_cmd = base_cmd + ["-C", "POSTROUTING", "-s", subnet, "!", "-d", subnet, "-j", "MASQUERADE"]
-                cwd_res = subprocess.run(["sudo", "-n"] + check_cmd, capture_output=True)
+                cwd_res = subprocess.run(["sudo"] + check_cmd, capture_output=True)
                 if cwd_res.returncode == 0:
                     return True # Already exists
                 
                 # Add
                 add_cmd = base_cmd + ["-A", "POSTROUTING", "-s", subnet, "!", "-d", subnet, "-j", "MASQUERADE"]
-                subprocess.run(["sudo", "-n"] + add_cmd, check=True)
+                subprocess.run(["sudo"] + add_cmd, check=True)
                 return True
             except Exception:
                 return False

@@ -223,7 +223,7 @@ Static assets
 Standard networking setup (`enable_networking=True`) requires **sudo privileges**.
 
 - The library executes `sudo ip ...` and `sudo iptables ...` to configure TAP devices and NAT.
-- Users must run the script as root OR have sudo configured to allow these commands without a password.
+- Users must run the script as root OR have sudo access to run networking commands.
 - If you do not have sudo access, create the VM with `enable_networking=False`.
 
 ### 2. File Operations Pause VM
