@@ -114,7 +114,7 @@ class BandSox:
         except Exception as e:
             logger.error(f"Failed to inject agent: {e}")
 
-    def create_vm(self, docker_image: str, name: str = None, vcpu: int = 1, mem_mib: int = 128, kernel_path: str = DEFAULT_KERNEL_PATH, enable_networking: bool = True, force_rebuild: bool = False, disk_size_mib: int = 4096) -> MicroVM:
+    def create_vm(self, docker_image: str, name: str = None, vcpu: int = 1, mem_mib: int = 128, kernel_path: str = DEFAULT_KERNEL_PATH, enable_networking: bool = True, force_rebuild: bool = False, disk_size_mib: int = 4096, env_vars: dict = None, metadata: dict = None) -> MicroVM:
         """Creates and starts a new VM from a Docker image."""
         vm_id = str(uuid.uuid4())
         logger.info(f"Creating VM {vm_id} from {docker_image}")
@@ -174,6 +174,9 @@ class BandSox:
         vm.start_process()
         vm.configure(kernel_path, str(instance_rootfs), vcpu, mem_mib, enable_networking=enable_networking)
         
+        if env_vars:
+            vm.env_vars = env_vars
+            
         # 4. Start VM
         vm.start()
         
@@ -190,13 +193,16 @@ class BandSox:
             "network_config": getattr(vm, "network_config", None),
             "created_at": time.time(),
             "status": "running",
-            "pid": vm.process.pid
+            "status": "running",
+            "pid": vm.process.pid,
+            "env_vars": env_vars,
+            "metadata": metadata or {}
         })
         
         self.active_vms[vm_id] = vm
         return vm
 
-    def create_vm_from_dockerfile(self, dockerfile_path: str, tag: str = None, name: str = None, vcpu: int = 1, mem_mib: int = 128, disk_size_mib: int = 4096, **kwargs) -> MicroVM:
+    def create_vm_from_dockerfile(self, dockerfile_path: str, tag: str = None, name: str = None, vcpu: int = 1, mem_mib: int = 128, disk_size_mib: int = 4096, env_vars: dict = None, metadata: dict = None, **kwargs) -> MicroVM:
         """Creates a VM from a Dockerfile."""
         if not tag:
             tag = f"bandsox-build-{uuid.uuid4()}"
@@ -209,9 +215,9 @@ class BandSox:
         
         build_image_from_dockerfile(dockerfile_path, tag, nocache=nocache)
         
-        return self.create_vm(tag, name=name, vcpu=vcpu, mem_mib=mem_mib, disk_size_mib=disk_size_mib, **kwargs)
+        return self.create_vm(tag, name=name, vcpu=vcpu, mem_mib=mem_mib, disk_size_mib=disk_size_mib, env_vars=env_vars, metadata=metadata, **kwargs)
 
-    def restore_vm(self, snapshot_id: str, name: str = None, enable_networking: bool = True, detach: bool = True) -> MicroVM:
+    def restore_vm(self, snapshot_id: str, name: str = None, enable_networking: bool = True, detach: bool = True, env_vars: dict = None, metadata: dict = None) -> MicroVM:
         """Restores a VM from a snapshot."""
         # Snapshot ID should point to a folder containing snapshot file and mem file
         snap_dir = self.snapshots_dir / snapshot_id
@@ -287,6 +293,12 @@ class BandSox:
             vm.netns = netns_name
             
         runner_process = None
+        
+        if env_vars:
+            vm.env_vars = env_vars
+        elif "env_vars" in snapshot_meta:
+            vm.env_vars = snapshot_meta["env_vars"]
+
         # Precompute log path for detached runner so we can surface it on failures
         log_dir = self.storage_dir / "logs"
         log_dir.mkdir(exist_ok=True)
@@ -471,7 +483,10 @@ class BandSox:
             "rootfs_path": str(instance_rootfs),
             "network_config": vm.network_config if hasattr(vm, "network_config") else None,
             "pid": runner_process.pid if detach and runner_process else vm.process.pid if vm.process else None,
-            "agent_ready": True
+            "pid": runner_process.pid if detach and runner_process else vm.process.pid if vm.process else None,
+            "agent_ready": True,
+            "env_vars": vm.env_vars,
+            "metadata": metadata if metadata is not None else snapshot_meta.get("metadata", {})
         })
         
         self.active_vms[new_vm_id] = vm
@@ -522,6 +537,7 @@ class BandSox:
             "rootfs_path": str(snap_rootfs), # Point to the snapshot copy
             "backend_rootfs_path": str(source_rootfs), # Original path for reference/symlink matching
             "network_config": vm_meta.get("network_config"),
+            "metadata": vm_meta.get("metadata", {}),
             "created_at": os.path.getmtime(str(snapshot_path)) if os.path.exists(str(snapshot_path)) else None
         }
         with open(snap_dir / "metadata.json", "w") as f:
@@ -538,7 +554,7 @@ class BandSox:
         else:
             raise FileNotFoundError(f"Snapshot {snapshot_id} not found")
 
-    def list_vms(self):
+    def list_vms(self, limit: int = None, metadata_equals: dict = None):
         """Lists all VMs (running and stopped)."""
         vms = []
         for meta_file in self.metadata_dir.glob("*.json"):
@@ -551,16 +567,33 @@ class BandSox:
                 socket_path = self.sockets_dir / f"{vm_id}.sock"
                 
                 if socket_path.exists():
-                    vms.append(meta)
+                    pass # Running
                 else:
                     # Socket missing, assume stopped
                     if meta.get("status") != "stopped":
                         meta["status"] = "stopped"
-                        # Optional: Update metadata file to reflect reality?
-                        # self._save_metadata(vm_id, meta)
-                    vms.append(meta)
+
+                # Filtering (only append if matches)
+                if metadata_equals:
+                    vm_meta = meta.get("metadata", {})
+                    match = True
+                    for k, v in metadata_equals.items():
+                        if vm_meta.get(k) != v:
+                            match = False
+                            break
+                    if not match:
+                        continue
+                        
+                vms.append(meta)
             except Exception:
                 pass
+        
+        # Sort by created_at desc to make limit meaningful
+        vms.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+        
+        if limit is not None:
+            vms = vms[:limit]
+            
         return vms
 
     def get_vm_info(self, vm_id: str):
@@ -665,6 +698,9 @@ class BandSox:
         
         if meta and "network_config" in meta:
             vm.network_config = meta["network_config"]
+
+        if meta and "env_vars" in meta:
+            vm.env_vars = meta["env_vars"]
             
         return vm
 
