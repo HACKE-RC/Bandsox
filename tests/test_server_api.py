@@ -129,6 +129,12 @@ def test_list_vms(client, fake_bs):
     assert resp.json() == fake_bs.vms
 
 
+def test_list_projects_alias(client, fake_bs):
+    resp = client.get("/api/projects")
+    assert resp.status_code == 200
+    assert resp.json() == fake_bs.vms
+
+
 def test_list_snapshots(client, fake_bs):
     resp = client.get("/api/snapshots")
     assert resp.status_code == 200
