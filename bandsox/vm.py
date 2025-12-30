@@ -376,6 +376,213 @@ class MicroVM:
         """Executes a command in the VM via the agent (blocking)."""
         return self.send_request("exec", {"command": command, "background": False}, on_stdout=on_stdout, on_stderr=on_stderr, timeout=timeout)
 
+    def exec_python(self, code: str, cwd: str = "/tmp", packages: list = None, on_stdout=None, on_stderr=None, timeout=60, cleanup_venv: bool = True):
+        """
+        Executes Python code in the VM with isolated dependencies.
+        
+        This function never raises exceptions - all errors are returned via stderr callback
+        and a non-zero exit code.
+        
+        Args:
+            code: Python code to execute
+            cwd: Working directory to execute code in (default: /tmp)
+            packages: List of Python packages to install via uv before execution
+            on_stdout: Callback for stdout output
+            on_stderr: Callback for stderr output
+            timeout: Timeout in seconds (default: 60)
+            cleanup_venv: Whether to clean up the venv after execution (default: True)
+            
+        Returns:
+            Exit code (0 for success, 1 for error)
+        """
+        import base64
+        import traceback
+        
+        # Generate unique names for temp files
+        unique_id = uuid.uuid4().hex[:8]
+        temp_script = f"/tmp/exec_python_{unique_id}.py"
+        venv_dir = f"/tmp/venv_{unique_id}"
+        
+        def send_error(msg):
+            """Send error message to stderr callback"""
+            if on_stderr:
+                try:
+                    on_stderr(f"ERROR: {msg}\n")
+                except:
+                    pass
+        
+        try:
+            # Write Python code to a temporary file in the VM
+            # Encode code as base64 to handle special characters
+            try:
+                encoded_code = base64.b64encode(code.encode('utf-8')).decode('ascii')
+                write_cmd = f'echo "{encoded_code}" | base64 -d > {temp_script}'
+                exit_code = self.exec_command(write_cmd, timeout=timeout)
+                if exit_code != 0:
+                    send_error(f"Failed to write Python script to VM (exit code: {exit_code})")
+                    return 1
+            except Exception as e:
+                send_error(f"Failed to prepare script: {e}")
+                return 1
+            
+            # Check if uv is available, if not, try to install it or use standard venv
+            try:
+                uv_check = self.exec_command("which uv", timeout=5)
+                use_uv = (uv_check == 0)
+                
+                if not use_uv:
+                    # Try to install uv
+                    logger.info("uv not found, attempting to install it...")
+                    install_uv_cmd = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+                    uv_install_exit = self.exec_command(install_uv_cmd, timeout=60)
+                    
+                    if uv_install_exit == 0:
+                        # Check if uv is now in PATH (it might be in ~/.cargo/bin)
+                        uv_check2 = self.exec_command("which uv || test -f ~/.cargo/bin/uv", timeout=5)
+                        use_uv = (uv_check2 == 0)
+                        if use_uv:
+                            logger.info("uv installed successfully")
+            except Exception as e:
+                logger.warning(f"Error checking uv: {e}")
+                use_uv = False
+            
+            # Create a separate venv for this execution
+            try:
+                if use_uv:
+                    # Use uv if available (check if it's in PATH or ~/.cargo/bin)
+                    venv_cmd = f'(uv venv {venv_dir} || ~/.cargo/bin/uv venv {venv_dir})'
+                else:
+                    # Fall back to standard Python venv
+                    logger.info("Using standard Python venv (uv not available)")
+                    venv_cmd = f'python3 -m venv {venv_dir}'
+                
+                venv_exit = self.exec_command(venv_cmd, on_stdout=on_stdout, on_stderr=on_stderr, timeout=timeout)
+                if venv_exit != 0:
+                    send_error(f"Failed to create venv (exit code: {venv_exit})")
+                    return 1
+            except Exception as e:
+                send_error(f"Failed to create venv: {e}")
+                return 1
+            
+            # Install packages if provided
+            if packages and len(packages) > 0:
+                try:
+                    packages_str = " ".join(packages)
+                    
+                    if use_uv:
+                        # Install packages using uv in the isolated venv
+                        install_cmd = f'(uv pip install --python {venv_dir}/bin/python {packages_str} || ~/.cargo/bin/uv pip install --python {venv_dir}/bin/python {packages_str})'
+                    else:
+                        # Use pip from the venv
+                        install_cmd = f'{venv_dir}/bin/pip install {packages_str}'
+                    
+                    install_exit = self.exec_command(install_cmd, on_stdout=on_stdout, on_stderr=on_stderr, timeout=timeout)
+                    if install_exit != 0:
+                        logger.warning(f"Package installation failed with exit code {install_exit}")
+                        # Continue anyway - the script might still work
+                except Exception as e:
+                    logger.warning(f"Error installing packages: {e}")
+                    # Continue anyway
+            
+            # Execute the Python script in the venv and specified working directory
+            try:
+                exec_cmd = f'cd {cwd} && {venv_dir}/bin/python {temp_script}'
+                return self.exec_command(exec_cmd, on_stdout=on_stdout, on_stderr=on_stderr, timeout=timeout)
+            except Exception as e:
+                send_error(f"Failed to execute Python script: {e}")
+                return 1
+            
+        except Exception as e:
+            # Catch any unexpected errors
+            send_error(f"Unexpected error in exec_python: {e}\n{traceback.format_exc()}")
+            return 1
+            
+        finally:
+            # Clean up the temporary script file and venv
+            try:
+                self.exec_command(f'rm -f {temp_script}', timeout=5)
+                if cleanup_venv:
+                    self.exec_command(f'rm -rf {venv_dir}', timeout=10)
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary files: {e}")
+
+    def exec_python_capture(self, code: str, cwd: str = "/tmp", packages: list = None, timeout=60, cleanup_venv: bool = True):
+        """
+        Executes Python code and captures the output.
+        
+        This is a convenience wrapper around exec_python that automatically captures
+        stdout and stderr and returns them along with the exit code.
+        
+        This function never raises exceptions - all errors are captured and returned
+        in the result dictionary.
+        
+        Args:
+            code: Python code to execute
+            cwd: Working directory to execute code in (default: /tmp)
+            packages: List of Python packages to install via uv before execution
+            timeout: Timeout in seconds (default: 60)
+            cleanup_venv: Whether to clean up the venv after execution (default: True)
+            
+        Returns:
+            dict with keys:
+                - 'exit_code': int (0 for success, 1+ for error)
+                - 'stdout': str (combined stdout)
+                - 'stderr': str (combined stderr)
+                - 'output': str (combined stdout + stderr in order)
+                - 'success': bool (True if exit_code == 0)
+                - 'error': str or None (error message if failed, None if success)
+        """
+        import traceback
+        
+        stdout_lines = []
+        stderr_lines = []
+        all_output = []
+        
+        def capture_stdout(line):
+            stdout_lines.append(line)
+            all_output.append(('stdout', line))
+        
+        def capture_stderr(line):
+            stderr_lines.append(line)
+            all_output.append(('stderr', line))
+        
+        try:
+            exit_code = self.exec_python(
+                code=code,
+                cwd=cwd,
+                packages=packages,
+                on_stdout=capture_stdout,
+                on_stderr=capture_stderr,
+                timeout=timeout,
+                cleanup_venv=cleanup_venv
+            )
+            
+            stdout_str = ''.join(stdout_lines)
+            stderr_str = ''.join(stderr_lines)
+            output_str = ''.join(line for _, line in all_output)
+            
+            return {
+                'exit_code': exit_code,
+                'stdout': stdout_str,
+                'stderr': stderr_str,
+                'output': output_str,
+                'success': exit_code == 0,
+                'error': stderr_str if exit_code != 0 else None
+            }
+            
+        except Exception as e:
+            # If exec_python somehow raises (it shouldn't), catch it here
+            error_msg = f"Unexpected error in exec_python_capture: {e}\n{traceback.format_exc()}"
+            return {
+                'exit_code': 1,
+                'stdout': ''.join(stdout_lines),
+                'stderr': error_msg,
+                'output': ''.join(line for _, line in all_output) + error_msg,
+                'success': False,
+                'error': error_msg
+            }
+
+
     def start_session(self, command: str, on_stdout=None, on_stderr=None, on_exit=None) -> str:
         """Starts a background session in the VM."""
         if not self.agent_ready:

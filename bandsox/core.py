@@ -798,6 +798,18 @@ class ManagedMicroVM(MicroVM):
             raise Exception("Agent not ready")
         return super().exec_command(*args, **kwargs)
 
+    def exec_python(self, *args, **kwargs):
+        if not self.wait_for_agent():
+            raise Exception("Agent not ready")
+        return super().exec_python(*args, **kwargs)
+
+    def exec_python_capture(self, *args, **kwargs):
+        if not self.wait_for_agent():
+            raise Exception("Agent not ready")
+        return super().exec_python_capture(*args, **kwargs)
+
+
+
     def delete(self):
         self.bandsox.delete_vm(self.vm_id)
 

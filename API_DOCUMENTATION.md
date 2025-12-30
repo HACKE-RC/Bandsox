@@ -116,6 +116,31 @@ session_id = vm.start_pty_session("/bin/sh", cols=80, rows=24)
 vm.send_session_input(session_id, "echo Interactive\n")
 ```
 
+**4. Python Execution (`exec_python`)**
+Execute Python code with isolated dependencies (using `uv` for fast package installation).
+
+```python
+# Simple execution
+vm.exec_python("print('Hello from Python!')")
+
+# With isolated dependencies
+vm.exec_python(
+    code="import requests; print(requests.get('https://example.com').status_code)",
+    packages=["requests"]
+)
+```
+
+**5. Python Execution with Capture (`exec_python_capture`)**
+Convenience wrapper that captures output and returns a result dictionary. **Does not raise exceptions.**
+
+```python
+result = vm.exec_python_capture("print('hello')")
+if result['success']:
+    print(f"Output: {result['output']}")
+else:
+    print(f"Error: {result['error']}")
+```
+
 ### File Operations
 
 **Important**: Native file operations (`upload_file`, `download_file`, `get_file_contents`) currently use `debugfs` to manipulate the filesystem image directly. **This requires the VM to be temporarily paused** to avoid corruption. This happens automatically but introduces a brief interruption.
@@ -151,9 +176,11 @@ The `bandsox` CLI wraps the server and API for common workflows.
 - `bandsox init` — download required artifacts.
   - Flags: `--kernel-url`, `--kernel-output`, `--skip-kernel`, `--cni-url`, `--cni-dir`, `--skip-cni`, `--rootfs-url`, `--rootfs-output`, `--skip-rootfs`, `--force`
   - Behavior: downloads `vmlinux`, CNI plugins (tgz), and optionally a base `.ext4` rootfs. Skips existing files unless `--force` is set. Build your rootfs locally and point to a path or `file://` URL, e.g.:
-    ```
+
+    ```bash
     bandsox init --rootfs-url ./bandsox-base.ext4
     ```
+
   - Example CNI source (Linux/amd64): `--cni-url https://github.com/containernetworking/plugins/releases/download/v1.5.1/cni-plugins-linux-amd64-v1.5.1.tgz`
 - `bandsox serve [--host 0.0.0.0] [--port 8000] [--storage /var/lib/sandbox]` — run the FastAPI dashboard/API.
 - `bandsox create <image> [--name NAME] [--vcpu N] [--mem MiB] [--disk-size MiB] [--host HOST] [--port PORT]` — create a VM from a Docker image via the server API.
@@ -167,6 +194,7 @@ The `bandsox` CLI wraps the server and API for common workflows.
 Base URL: `http://HOST:PORT`
 
 VMs
+
 - `GET /api/vms` — list VMs.
 - `POST /api/vms` — create a VM from an image.
   - Body: `{ "image": "alpine:latest", "name": "...", "vcpu": 1, "mem_mib": 128, "enable_networking": true, "force_rebuild": false, "disk_size_mib": 4096 }`
@@ -180,12 +208,14 @@ VMs
 - `WS /api/vms/{vm_id}/terminal?cols=80&rows=24` — interactive terminal.
 
 Snapshots
+
 - `GET /api/snapshots` — list snapshots.
 - `DELETE /api/snapshots/{snapshot_id}` — delete a snapshot.
 - `POST /api/snapshots/{snapshot_id}/restore` — restore into a new VM.
   - Body: `{ "name": "optional-name", "enable_networking": true }`
 
 Static assets
+
 - `GET /` — dashboard.
 - `GET /terminal` — web terminal page.
 - `GET /vm_details` — VM details page.
@@ -196,7 +226,7 @@ Static assets
 ### `BandSox`
 
 | Method | Description |
-|--------|-------------|
+| --- | --- |
 | `create_vm(docker_image, name=None, vcpu=1, mem_mib=128, ...)` | Creates a new VM instance. |
 | `create_vm_from_dockerfile(dockerfile_path, tag, ...)` | Builds an image and creates a VM. |
 | `restore_vm(snapshot_id, enable_networking=True)` | Restores a VM from a snapshot. |
@@ -208,9 +238,11 @@ Static assets
 ### `MicroVM`
 
 | Method | Description |
-|--------|-------------|
+| --- | --- |
 | `start()`, `stop()`, `pause()`, `resume()` | Lifecycle control. |
 | `exec_command(cmd, on_stdout=None, timeout=30)` | Run a command (blocking). |
+| `exec_python(code, cwd, packages, ...)` | Run Python code with isolated env using `uv`. |
+| `exec_python_capture(code, packages, ...)` | Run Python and return output dict (No Except). |
 | `start_session(cmd)` | Run a command (background). |
 | `upload_file(local, remote)` | Upload a file (Pauses VM). |
 | `download_file(remote, local)` | Download a file (Pauses VM). |
