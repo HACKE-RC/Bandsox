@@ -776,6 +776,19 @@ class BandSox:
         if not socket_path.exists() and meta.get("status") != "stopped":
             meta["status"] = "stopped"
 
+<<<<<<< Updated upstream
+=======
+        return meta
+
+    def update_vm_metadata(self, vm_id: str, metadata: dict):
+        """Updates the metadata of a VM."""
+        meta = self._get_metadata(vm_id)
+        if not meta:
+            raise FileNotFoundError(f"VM {vm_id} not found")
+
+        meta["metadata"] = metadata
+        self._save_metadata(vm_id, meta)
+>>>>>>> Stashed changes
         return meta
 
     def list_snapshots(self):
