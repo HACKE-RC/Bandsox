@@ -1,5 +1,5 @@
 # BandSox
-<img width="60" height="200" alt="image" src="https://github.com/user-attachments/assets/d80944af-45ac-407d-b2f2-70c95d68be97"/>
+<img width="100" height="200" alt="image" src="https://github.com/user-attachments/assets/d80944af-45ac-407d-b2f2-70c95d68be97"/>
 
 
 
