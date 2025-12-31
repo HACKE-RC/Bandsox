@@ -2,7 +2,7 @@
 name = "bandsox"
 version = "0.7.0"
 description = "Fast Firecracker microVM manager"
-authors = [{name = "Antigravity", email = "antigravity@deepmind.com"}]
+authors = [{name = "rc", email = "crretsim@gmail.com"}]
 readme = "README.md"
 license = {file = "LICENSE"}
 keywords = ["firecracker", "microvm", "sandbox", "fastapi", "cli"]
