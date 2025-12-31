@@ -114,11 +114,23 @@
 
         <!-- Snapshots Section -->
         <section class="space-y-6">
-            <h2 class="text-xl font-medium text-white">Snapshots</h2>
+            <div class="flex items-center gap-3">
+                <h2 class="text-xl font-medium text-white">Snapshots</h2>
+                <span id="snapshot-count"
+                    class="px-2 py-0.5 rounded text-xs font-mono bg-zinc-900 text-zinc-400 border border-zinc-800">0</span>
+                <button id="btn-bulk-delete-snapshots" onclick="deleteSelectedSnapshots()"
+                    class="hidden ml-auto flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded transition-all shadow-lg shadow-red-900/20 group">
+                    <svg class="w-4 h-4 text-red-100 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                    <span>Delete (<span id="selected-snapshots-count" class="font-bold">0</span>)</span>
+                </button>
+            </div>
             <div class="w-full rounded-lg border border-zinc-800 bg-zinc-950/50">
                 <table class="w-full text-left border-collapse">
                     <thead>
                         <tr class="border-b border-zinc-800 text-xs uppercase tracking-wider text-zinc-500 font-medium">
+                            <th class="pl-6 py-4 w-10">
+                                <input type="checkbox" id="select-all-snapshots" onclick="toggleSelectAllSnapshots()" class="rounded border-zinc-700 bg-zinc-900 text-white focus:ring-0 focus:ring-offset-0 accent-white">
+                            </th>
                             <th class="px-6 py-4">Name</th>
                             <th class="px-6 py-4">Path</th>
                             <th class="px-6 py-4 text-right">Actions</th>
@@ -406,6 +418,7 @@
 
         // Bulk Action State & Functions
         let selectedVmIds = new Set();
+        let selectedSnapshotIds = new Set();
 
         function toggleSelectAll() {
             const masterCheckbox = document.getElementById('select-all-vms');
@@ -468,7 +481,7 @@
 
         async function deleteSelectedVms() {
             if (selectedVmIds.size === 0) return;
-            
+
             showConfirmModal(
                 'Delete Selected VMs',
                 `Are you sure you want to delete ${selectedVmIds.size} selected VMs? This action cannot be undone.`,
@@ -476,8 +489,8 @@
                     const idsToDelete = Array.from(selectedVmIds);
                     console.log('Deleting VMs', idsToDelete);
                     setLoading('btn-bulk-delete', true);
-                    
-                    const promises = idsToDelete.map(id => 
+
+                    const promises = idsToDelete.map(id =>
                         fetch(`/api/vms/${id}`, { method: 'DELETE' })
                             .then(res => {
                                 if (!res.ok) console.error(`Failed to delete ${id}`);
@@ -485,7 +498,7 @@
                             })
                             .catch(e => console.error(`Error deleting ${id}`, e))
                     );
-                    
+
                     try {
                         await Promise.all(promises);
                         selectedVmIds.clear();
@@ -500,6 +513,104 @@
                          alert('Error during bulk deletion: ' + e);
                     } finally {
                          setLoading('btn-bulk-delete', false);
+                    }
+                }
+            );
+        }
+
+        function toggleSelectAllSnapshots() {
+            const masterCheckbox = document.getElementById('select-all-snapshots');
+            const checkboxes = document.querySelectorAll('.snapshot-checkbox');
+            const isChecked = masterCheckbox.checked;
+
+            checkboxes.forEach(cb => {
+                cb.checked = isChecked;
+                if (isChecked) {
+                    selectedSnapshotIds.add(cb.value);
+                } else {
+                    selectedSnapshotIds.delete(cb.value);
+                }
+            });
+            updateBulkDeleteSnapshotsUI();
+        }
+
+        function toggleSnapshotSelection(checkbox) {
+            const id = checkbox.value;
+            if (checkbox.checked) {
+                selectedSnapshotIds.add(id);
+            } else {
+                selectedSnapshotIds.delete(id);
+            }
+            updateMasterSnapshotCheckbox();
+            updateBulkDeleteSnapshotsUI();
+        }
+
+        function updateMasterSnapshotCheckbox() {
+            const masterCheckbox = document.getElementById('select-all-snapshots');
+            const checkboxes = document.querySelectorAll('.snapshot-checkbox');
+
+            if (!masterCheckbox) return;
+
+            if (checkboxes.length > 0 && Array.from(checkboxes).every(cb => cb.checked)) {
+                masterCheckbox.checked = true;
+                masterCheckbox.indeterminate = false;
+            } else if (checkboxes.length > 0 && Array.from(checkboxes).some(cb => cb.checked)) {
+                masterCheckbox.checked = false;
+                masterCheckbox.indeterminate = true;
+            } else {
+                masterCheckbox.checked = false;
+                masterCheckbox.indeterminate = false;
+            }
+        }
+
+        function updateBulkDeleteSnapshotsUI() {
+            const btn = document.getElementById('btn-bulk-delete-snapshots');
+            const countSpan = document.getElementById('selected-snapshots-count');
+
+            if (!btn || !countSpan) return;
+
+            countSpan.textContent = selectedSnapshotIds.size;
+            if (selectedSnapshotIds.size > 0) {
+                btn.classList.remove('hidden');
+            } else {
+                btn.classList.add('hidden');
+            }
+        }
+
+        async function deleteSelectedSnapshots() {
+            if (selectedSnapshotIds.size === 0) return;
+
+            showConfirmModal(
+                'Delete Selected Snapshots',
+                `Are you sure you want to delete ${selectedSnapshotIds.size} selected snapshots? This action cannot be undone.`,
+                async () => {
+                    const idsToDelete = Array.from(selectedSnapshotIds);
+                    console.log('Deleting snapshots', idsToDelete);
+                    setLoading('btn-bulk-delete-snapshots', true);
+
+                    const promises = idsToDelete.map(id =>
+                        fetch(`/api/snapshots/${id}`, { method: 'DELETE' })
+                            .then(res => {
+                                if (!res.ok) console.error(`Failed to delete ${id}`);
+                                return res;
+                            })
+                            .catch(e => console.error(`Error deleting ${id}`, e))
+                    );
+
+                    try {
+                        await Promise.all(promises);
+                        selectedSnapshotIds.clear();
+                        const masterCheckbox = document.getElementById('select-all-snapshots');
+                        if (masterCheckbox) {
+                            masterCheckbox.checked = false;
+                            masterCheckbox.indeterminate = false;
+                        }
+                        updateBulkDeleteSnapshotsUI();
+                        refreshData();
+                    } catch (e) {
+                         alert('Error during bulk deletion: ' + e);
+                    } finally {
+                         setLoading('btn-bulk-delete-snapshots', false);
                     }
                 }
             );
@@ -648,18 +759,39 @@
         function renderSnapshots(snaps) {
             const tbody = document.getElementById('snapshot-list');
             const noSnaps = document.getElementById('no-snapshots');
+            const count = document.getElementById('snapshot-count');
 
             tbody.innerHTML = '';
 
             if (snaps.length === 0) {
                 noSnaps.classList.remove('hidden');
+                const masterCheckbox = document.getElementById('select-all-snapshots');
+                if (masterCheckbox) {
+                    masterCheckbox.checked = false;
+                    masterCheckbox.indeterminate = false;
+                }
+                selectedSnapshotIds.clear();
+                updateBulkDeleteSnapshotsUI();
             } else {
                 noSnaps.classList.add('hidden');
+
+                const currentSnapIds = new Set(snaps.map(s => String(s.id)));
+                for (let id of selectedSnapshotIds) {
+                    if (!currentSnapIds.has(id)) {
+                        selectedSnapshotIds.delete(id);
+                    }
+                }
+                updateBulkDeleteSnapshotsUI();
+
                 snaps.forEach(snap => {
+                    const snapIdStr = String(snap.id);
+                    const isSelected = selectedSnapshotIds.has(snapIdStr);
                     const row = document.createElement('tr');
                     row.className = 'group hover:bg-zinc-900/50 transition-colors';
 
-                    // Format metadata for display
+                    const displayName = snap.snapshot_name || snap.id;
+                    const shortName = displayName.length > 30 ? `${displayName.slice(0, 27)}...` : displayName;
+
                     let metadataDisplay = '';
                     if (snap.metadata && Object.keys(snap.metadata).length > 0) {
                         const metadataStr = JSON.stringify(snap.metadata);
@@ -668,8 +800,14 @@
                     }
 
                     row.innerHTML = `
+                        <td class="pl-6 py-4 w-10">
+                            <input type="checkbox" class="snapshot-checkbox rounded border-zinc-700 bg-zinc-900 text-white focus:ring-0 focus:ring-offset-0 accent-white"
+                                value="${snapIdStr}"
+                                ${isSelected ? 'checked' : ''}
+                                onclick="toggleSnapshotSelection(this)">
+                        </td>
                         <td class="px-6 py-4">
-                            <div class="font-medium text-white">${snap.id}</div>
+                            <div class="font-medium text-white">${shortName}</div>
                             ${metadataDisplay}
                         </td>
                         <td class="px-6 py-4 text-zinc-500 font-mono text-xs truncate max-w-xs">${snap.path}</td>
@@ -695,7 +833,10 @@
                     `;
                     tbody.appendChild(row);
                 });
+                updateMasterSnapshotCheckbox();
             }
+
+            count.textContent = snaps.length;
         }
 
         function setLoading(btnId, isLoading) {
