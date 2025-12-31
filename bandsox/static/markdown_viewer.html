@@ -5,8 +5,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Markdown Viewer - BandSox</title>
-    <!-- Marked.js for markdown parsing -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Marked.js for markdown parsing (pinned to v12.0.0 for stability) -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
     <!-- Highlight.js for code syntax highlighting -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
@@ -523,30 +523,38 @@
             return { vmId, filePath };
         }
 
-        // Configure marked
-        marked.setOptions({
-            highlight: function(code, lang) {
-                if (lang && hljs.getLanguage(lang)) {
-                    return hljs.highlight(code, { language: lang }).value;
-                }
-                return hljs.highlightAuto(code).value;
-            },
+        // Configure marked with v12 API
+        marked.use({
             breaks: true,
-            gfm: true
-        });
+            gfm: true,
+            renderer: {
+                code(code, infostring, escaped) {
+                    // Handle marked.js v12+ API (code is an object)
+                    if (typeof code === 'object' && code !== null) {
+                        const codeText = code.text || '';
+                        const language = code.lang || infostring || '';
 
-        // Custom renderer for code blocks with language labels
-        const renderer = new marked.Renderer();
-        const originalCodeRenderer = renderer.code.bind(renderer);
-        renderer.code = function(code, language, escaped) {
-            const highlighted = language && hljs.getLanguage(language)
-                ? hljs.highlight(code, { language }).value
-                : hljs.highlightAuto(code).value;
-            
-            const langLabel = language ? `<span class="code-lang-label">${language}</span>` : '';
-            return `<div class="code-block-wrapper">${langLabel}<pre><code class="hljs">${highlighted}</code></pre></div>`;
-        };
-        marked.setOptions({ renderer });
+                        const highlighted = language && hljs.getLanguage(language)
+                            ? hljs.highlight(codeText, { language }).value
+                            : hljs.highlightAuto(codeText).value;
+
+                        const langLabel = language ? `<span class="code-lang-label">${language}</span>` : '';
+                        return `<div class="code-block-wrapper">${langLabel}<pre><code class="hljs">${highlighted}</code></pre></div>`;
+                    }
+
+                    // Handle older API (backward compatibility)
+                    const language = infostring || '';
+                    const codeText = String(code || '');
+
+                    const highlighted = language && hljs.getLanguage(language)
+                        ? hljs.highlight(codeText, { language }).value
+                        : hljs.highlightAuto(codeText).value;
+
+                    const langLabel = language ? `<span class="code-lang-label">${language}</span>` : '';
+                    return `<div class="code-block-wrapper">${langLabel}<pre><code class="hljs">${highlighted}</code></pre></div>`;
+                }
+            }
+        });
 
         // Load and render markdown
         async function loadMarkdown() {
@@ -563,20 +571,38 @@
 
             try {
                 const response = await fetch(`/api/vms/${vmId}/download?path=${encodeURIComponent(filePath)}`);
-                
+
                 if (!response.ok) {
                     throw new Error(`Failed to fetch file: ${response.status} ${response.statusText}`);
                 }
 
-                const markdown = await response.text();
-                
+                let markdown = await response.text();
+
+                // Ensure markdown is a string
+                if (typeof markdown !== 'string') {
+                    console.error('Markdown content is not a string:', typeof markdown, markdown);
+                    markdown = String(markdown || '');
+                }
+
+                // Check if empty
+                if (!markdown) {
+                    throw new Error('File is empty or could not be read');
+                }
+
+                console.log('Markdown length:', markdown.length, 'First 100 chars:', markdown.substring(0, 100));
+
                 // Hide loading, show content
                 document.getElementById('loading').style.display = 'none';
                 const contentEl = document.getElementById('content');
                 contentEl.style.display = 'block';
-                
+
                 // Render markdown
-                contentEl.innerHTML = marked.parse(markdown);
+                try {
+                    contentEl.innerHTML = marked.parse(markdown);
+                } catch (parseError) {
+                    console.error('Marked parse error:', parseError);
+                    throw new Error(`Failed to parse markdown: ${parseError.message}`);
+                }
 
                 // Apply syntax highlighting to any code blocks
                 document.querySelectorAll('pre code').forEach((block) => {

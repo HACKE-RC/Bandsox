@@ -331,6 +331,12 @@ def main():
     vm_delete.add_argument("--host", type=str, default="127.0.0.1", help="Host to connect to")
     vm_delete.add_argument("--port", type=int, default=8000, help="Port to connect to")
 
+    vm_rename = vm_sub.add_parser("rename", help="Rename a VM")
+    vm_rename.add_argument("vm_id", type=str, help="VM ID")
+    vm_rename.add_argument("name", type=str, help="New name for the VM")
+    vm_rename.add_argument("--host", type=str, default="127.0.0.1", help="Host to connect to")
+    vm_rename.add_argument("--port", type=int, default=8000, help="Port to connect to")
+
     vm_save = vm_sub.add_parser("save", help="Snapshot a running VM")
     vm_save.add_argument("vm_id", type=str, help="VM ID to snapshot")
     vm_save.add_argument("name", type=str, help="Snapshot name")
@@ -355,6 +361,12 @@ def main():
     snap_restore.add_argument("--enable-networking", action="store_true", default=True, help="Enable networking in restored VM")
     snap_restore.add_argument("--host", type=str, default="127.0.0.1", help="Host to connect to")
     snap_restore.add_argument("--port", type=int, default=8000, help="Port to connect to")
+
+    snap_rename = snap_sub.add_parser("rename", help="Rename a snapshot")
+    snap_rename.add_argument("snapshot_id", type=str, help="Snapshot ID")
+    snap_rename.add_argument("name", type=str, help="New name for snapshot")
+    snap_rename.add_argument("--host", type=str, default="127.0.0.1", help="Host to connect to")
+    snap_rename.add_argument("--port", type=int, default=8000, help="Port to connect to")
     
     cleanup_parser = subparsers.add_parser("cleanup", help="Cleanup stale resources (TAP devices)")
 
@@ -487,6 +499,16 @@ def main():
                     print(f"Failed to snapshot VM {args.vm_id} ({resp.status_code}): {resp.text}")
             except Exception as e:
                 print(f"Error: {e}")
+        elif args.vm_command == "rename":
+            url = f"{base}/{args.vm_id}/name"
+            try:
+                resp = requests.put(url, json={"name": args.name})
+                if resp.status_code == 200:
+                    print(f"VM {args.vm_id} renamed to '{args.name}'")
+                else:
+                    print(f"Failed to rename VM {args.vm_id} ({resp.status_code}): {resp.text}")
+            except Exception as e:
+                print(f"Error: {e}")
         else:
             vm_parser.print_help()
     elif args.command == "snapshot":
@@ -542,6 +564,16 @@ def main():
                     print(f"Snapshot restored to VM: {new_id}")
                 else:
                     print(f"Failed to restore snapshot {args.snapshot_id} ({resp.status_code}): {resp.text}")
+            except Exception as e:
+                print(f"Error: {e}")
+        elif args.snapshot_command == "rename":
+            url = f"{base}/{args.snapshot_id}/name"
+            try:
+                resp = requests.put(url, json={"name": args.name})
+                if resp.status_code == 200:
+                    print(f"Snapshot {args.snapshot_id} renamed to '{args.name}'")
+                else:
+                    print(f"Failed to rename snapshot {args.snapshot_id} ({resp.status_code}): {resp.text}")
             except Exception as e:
                 print(f"Error: {e}")
         else:

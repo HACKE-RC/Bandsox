@@ -267,7 +267,6 @@ class BandSox:
                 "network_config": getattr(vm, "network_config", None),
                 "created_at": time.time(),
                 "status": "running",
-                "status": "running",
                 "pid": vm.process.pid,
                 "env_vars": env_vars,
                 "metadata": metadata or {},
@@ -638,11 +637,6 @@ class BandSox:
                 else vm.process.pid
                 if vm.process
                 else None,
-                "pid": runner_process.pid
-                if detach and runner_process
-                else vm.process.pid
-                if vm.process
-                else None,
                 "agent_ready": True,
                 "env_vars": vm.env_vars,
                 "metadata": metadata
@@ -654,7 +648,7 @@ class BandSox:
         self.active_vms[new_vm_id] = vm
         return vm
 
-    def snapshot_vm(self, vm: MicroVM, snapshot_name: str = None) -> str:
+    def snapshot_vm(self, vm: MicroVM, snapshot_name: str = None, metadata: dict = None) -> str:
         """Snapshot a VM without changing its pre-snapshot running/paused state."""
         if not snapshot_name:
             snapshot_name = (
@@ -703,7 +697,7 @@ class BandSox:
                 source_rootfs
             ),  # Original path for reference/symlink matching
             "network_config": vm_meta.get("network_config"),
-            "metadata": vm_meta.get("metadata", {}),
+            "metadata": metadata if metadata is not None else vm_meta.get("metadata", {}),
             "created_at": os.path.getmtime(str(snapshot_path))
             if os.path.exists(str(snapshot_path))
             else None,
@@ -722,6 +716,56 @@ class BandSox:
             shutil.rmtree(snap_dir)
         else:
             raise FileNotFoundError(f"Snapshot {snapshot_id} not found")
+
+    def update_snapshot_metadata(self, snapshot_id: str, metadata: dict) -> dict:
+        """Updates the metadata of a snapshot."""
+        import json
+
+        snap_dir = self.snapshots_dir / snapshot_id
+        if not snap_dir.exists() or not snap_dir.is_dir():
+            raise FileNotFoundError(f"Snapshot {snapshot_id} not found")
+
+        meta_file = snap_dir / "metadata.json"
+        if not meta_file.exists():
+            raise FileNotFoundError(f"Snapshot metadata not found for {snapshot_id}")
+
+        # Load current snapshot metadata
+        with open(meta_file, "r") as f:
+            snapshot_meta = json.load(f)
+
+        # Update the metadata field
+        snapshot_meta["metadata"] = metadata
+
+        # Save back to file
+        with open(meta_file, "w") as f:
+            json.dump(snapshot_meta, f)
+
+        return snapshot_meta
+
+    def rename_snapshot(self, snapshot_id: str, new_name: str):
+        """Renames a snapshot (updates only snapshot_name field, preserving snapshot_id and directory)."""
+        import json
+
+        snap_dir = self.snapshots_dir / snapshot_id
+        if not snap_dir.exists() or not snap_dir.is_dir():
+            raise FileNotFoundError(f"Snapshot {snapshot_id} not found")
+
+        meta_file = snap_dir / "metadata.json"
+        if not meta_file.exists():
+            raise FileNotFoundError(f"Snapshot metadata not found for {snapshot_id}")
+
+        # Load current snapshot metadata
+        with open(meta_file, "r") as f:
+            snapshot_meta = json.load(f)
+
+        # Update the snapshot_name field
+        snapshot_meta["snapshot_name"] = new_name
+
+        # Save back to file
+        with open(meta_file, "w") as f:
+            json.dump(snapshot_meta, f)
+
+        logger.info(f"Snapshot {snapshot_id} renamed to '{new_name}'")
 
     def list_vms(self, limit: int = None, metadata_equals: dict = None):
         """Lists all VMs (running and stopped)."""
@@ -776,8 +820,6 @@ class BandSox:
         if not socket_path.exists() and meta.get("status") != "stopped":
             meta["status"] = "stopped"
 
-<<<<<<< Updated upstream
-=======
         return meta
 
     def update_vm_metadata(self, vm_id: str, metadata: dict):
@@ -788,8 +830,16 @@ class BandSox:
 
         meta["metadata"] = metadata
         self._save_metadata(vm_id, meta)
->>>>>>> Stashed changes
-        return meta
+
+    def rename_vm(self, vm_id: str, new_name: str):
+        """Renames a VM (updates only the name field, preserving vm_id)."""
+        meta = self._get_metadata(vm_id)
+        if not meta:
+            raise FileNotFoundError(f"VM {vm_id} not found")
+
+        meta["name"] = new_name
+        self._save_metadata(vm_id, meta)
+        logger.info(f"VM {vm_id} renamed to '{new_name}'")
 
     def list_snapshots(self):
         """Lists all snapshots."""

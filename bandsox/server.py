@@ -118,6 +118,36 @@ def delete_snapshot(snapshot_id: str):
         raise HTTPException(status_code=500, detail=str(e))
     return {"status": "deleted"}
 
+class UpdateSnapshotMetadataRequest(BaseModel):
+    metadata: dict
+
+@app.put("/api/snapshots/{snapshot_id}/metadata")
+def update_snapshot_metadata(snapshot_id: str, req: UpdateSnapshotMetadataRequest):
+    logger.info(f"Received metadata update request for snapshot {snapshot_id}")
+    try:
+        updated_meta = bs.update_snapshot_metadata(snapshot_id, req.metadata)
+        return updated_meta
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    except Exception as e:
+        logger.error(f"Failed to update metadata for snapshot {snapshot_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class RenameSnapshotRequest(BaseModel):
+    name: str
+
+@app.put("/api/snapshots/{snapshot_id}/name")
+def rename_snapshot(snapshot_id: str, req: RenameSnapshotRequest):
+    """Rename a snapshot."""
+    try:
+        bs.rename_snapshot(snapshot_id, req.name)
+        return {"status": "renamed", "name": req.name}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    except Exception as e:
+        logger.error(f"Failed to rename snapshot {snapshot_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/vms/{vm_id}/stop")
 def stop_vm(vm_id: str):
     logger.info(f"Received stop request for VM {vm_id}")
@@ -163,6 +193,7 @@ def resume_vm(vm_id: str):
 
 class SnapshotRequest(BaseModel):
     name: str
+    metadata: dict = None
 
 @app.delete("/api/vms/{vm_id}")
 def delete_vm(vm_id: str):
@@ -175,7 +206,7 @@ def snapshot_vm(vm_id: str, req: SnapshotRequest):
     vm = bs.get_vm(vm_id)
     if not vm:
         raise HTTPException(status_code=404, detail="VM not found")
-    snap_id = bs.snapshot_vm(vm, req.name)
+    snap_id = bs.snapshot_vm(vm, req.name, metadata=req.metadata)
     return {"snapshot_id": snap_id}
 
 @app.get("/api/vms/{vm_id}")
@@ -189,6 +220,9 @@ def get_vm_details(vm_id: str):
 class UpdateMetadataRequest(BaseModel):
     metadata: dict
 
+class RenameRequest(BaseModel):
+    name: str
+
 @app.put("/api/vms/{vm_id}/metadata")
 def update_vm_metadata(vm_id: str, req: UpdateMetadataRequest):
     """Update the metadata of a VM."""
@@ -199,6 +233,18 @@ def update_vm_metadata(vm_id: str, req: UpdateMetadataRequest):
         raise HTTPException(status_code=404, detail="VM not found")
     except Exception as e:
         logger.error(f"Failed to update metadata for VM {vm_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/vms/{vm_id}/name")
+def rename_vm(vm_id: str, req: RenameRequest):
+    """Rename a VM."""
+    try:
+        bs.rename_vm(vm_id, req.name)
+        return {"status": "renamed", "name": req.name}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="VM not found")
+    except Exception as e:
+        logger.error(f"Failed to rename VM {vm_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/vms/{vm_id}/files")

@@ -150,6 +150,12 @@
                         class="w-full bg-black border border-zinc-800 rounded-lg px-4 py-3 text-white placeholder-zinc-700 focus:ring-1 focus:ring-white focus:border-white outline-none transition-all font-mono text-sm">
                 </div>
 
+                <div>
+                    <label class="block text-xs uppercase text-zinc-500 font-medium mb-1.5">Metadata (optional JSON)</label>
+                    <textarea id="snapshot-metadata" rows="3" placeholder='e.g., {"description": "Before applying updates", "tags": ["backup", "stable"]}'
+                        class="w-full bg-black border border-zinc-800 rounded-lg px-4 py-3 text-white placeholder-zinc-700 focus:ring-1 focus:ring-white focus:border-white outline-none transition-all font-mono text-xs resize-none"></textarea>
+                </div>
+
                 <div class="flex justify-end gap-3 pt-2">
                     <button onclick="closeModal()"
                         class="px-4 py-2 text-zinc-400 hover:text-white text-sm transition-colors">Cancel</button>
@@ -166,14 +172,14 @@
         <div
             class="bg-zinc-900 p-8 rounded-xl border border-zinc-800 w-full max-w-md shadow-2xl transform transition-all scale-100">
             <h3 class="text-xl font-medium text-white mb-2">Restore Snapshot</h3>
-            <p class="text-zinc-500 text-sm mb-6">Create a new VM from this snapshot. Resources will match the snapshot state.</p>
+            <p class="text-zinc-500 text-sm mb-6">Create a new VM from this snapshot. Resources will match to snapshot state.</p> 
 
             <div class="space-y-4">
                 <div>
                     <label class="block text-xs uppercase text-zinc-500 font-medium mb-1.5">New VM Name</label>
                     <input type="text" id="restore-vm-name" placeholder="e.g., restored-service-1"
                         class="w-full bg-black border border-zinc-800 rounded-lg px-4 py-3 text-white placeholder-zinc-700 focus:ring-1 focus:ring-white focus:border-white outline-none transition-all font-mono text-sm">
-                </div>
+                </div> 
 
                 <div class="flex justify-end gap-3 pt-2">
                     <button onclick="closeRestoreModal()"
@@ -181,6 +187,108 @@
                     <button id="restore-save-btn" type="button" onclick="confirmRestore()"
                         class="bg-white hover:bg-zinc-200 text-black px-6 py-2 rounded-lg text-sm font-medium transition-colors">Restore & Start</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+
+
+    <!-- Rename VM Modal -->
+    <div id="rename-vm-modal"
+        class="fixed inset-0 bg-black/90 hidden items-center justify-center z-50 backdrop-blur-sm transition-opacity">
+        <div
+            class="bg-zinc-900 p-8 rounded-xl border border-zinc-800 w-full max-w-md shadow-2xl transform transition-all scale-100">
+            <h3 class="text-xl font-medium text-white mb-2">Rename VM</h3>
+            <p class="text-zinc-500 text-sm mb-6">Change the display name of this VM.</p> 
+
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-xs uppercase text-zinc-500 font-medium mb-1.5">VM ID</label>
+                    <p id="rename-vm-id" class="text-zinc-400 font-mono text-sm mb-2"></p>
+                </div> 
+                <div>
+                    <label class="block text-xs uppercase text-zinc-500 font-medium mb-1.5">New Name</label>
+                    <input type="text" id="rename-vm-name" placeholder="e.g., production-server-1"
+                        class="w-full bg-black border border-zinc-800 rounded-lg px-4 py-3 text-white placeholder-zinc-700 focus:ring-1 focus:ring-white focus:border-white outline-none transition-all font-mono text-sm">
+                </div> 
+
+                <div class="flex justify-end gap-3 pt-2">
+                    <button onclick="closeRenameVmModal()"
+                        class="px-4 py-2 text-zinc-400 hover:text-white text-sm transition-colors">Cancel</button>
+                    <button id="rename-vm-save-btn" type="button" onclick="confirmRenameVm()"
+                        class="bg-white hover:bg-zinc-200 text-black px-6 py-2 rounded-lg text-sm font-medium transition-colors">Rename</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Snapshot Metadata Modal -->
+    <div id="edit-snapshot-metadata-modal"
+        class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div class="glass rounded-xl w-full max-w-2xl max-h-[80vh] flex flex-col shadow-2xl">
+            <div class="p-6 border-b border-zinc-800">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 rounded-full bg-zinc-900 flex items-center justify-center border border-zinc-800">
+                        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                        </svg>
+                    </div>
+                    <div>
+                        <h2 class="text-xl font-medium text-white">Edit Snapshot</h2>
+                        <p class="text-xs text-zinc-500 mt-0.5">Change the name or edit metadata</p>
+                    </div>
+                </div>
+                <div class="mt-4 px-3 py-2 bg-zinc-900/50 rounded-lg border border-zinc-800">
+                    <p class="text-xs uppercase text-zinc-600 font-medium mb-1">Snapshot ID</p>
+                    <p id="edit-snapshot-id" class="text-zinc-400 font-mono text-sm"></p>
+                </div>
+            </div>
+
+            <div class="p-6 flex-1 overflow-y-auto">
+                <!-- Name field -->
+                <div class="mb-6">
+                    <label class="block text-xs uppercase text-zinc-500 font-medium mb-2">Snapshot Name</label>
+                    <input type="text" id="edit-snapshot-name" placeholder="e.g., backup-before-update"
+                        class="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-4 py-3 text-white placeholder-zinc-600 focus:outline-none focus:border-white focus:ring-1 focus:ring-white transition-all font-mono text-sm">
+                </div>
+
+                <!-- Metadata section -->
+                <div class="border-t border-zinc-800 pt-6">
+                    <label class="block text-xs uppercase text-zinc-500 font-medium mb-4">Metadata</label>
+                    
+                    <!-- Add new entry form -->
+                    <div class="flex gap-3 mb-4">
+                        <input type="text" id="new-snapshot-metadata-key" placeholder="Key"
+                            class="flex-1 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-zinc-300 text-sm focus:outline-none focus:border-white focus:ring-1 focus:ring-white transition-colors">
+                        <input type="text" id="new-snapshot-metadata-value" placeholder="Value"
+                            class="flex-1 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-zinc-300 text-sm focus:outline-none focus:border-white focus:ring-1 focus:ring-white transition-colors">
+                        <button onclick="addSnapshotMetadataEntry()"
+                            class="px-4 py-2 bg-white hover:bg-zinc-200 text-black text-sm font-medium rounded-lg transition-all flex items-center gap-2">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
+                            </svg>
+                            Add
+                        </button>
+                    </div>
+
+                    <!-- Existing metadata entries -->
+                    <div id="snapshot-metadata-entries" class="space-y-2">
+                        <!-- Entries will be rendered here -->
+                    </div>
+                </div>
+
+                <p id="snapshot-metadata-error" class="hidden text-red-400 text-sm mt-4"></p>
+            </div>
+
+            <div class="p-6 border-t border-zinc-800 flex justify-end gap-3 bg-zinc-900/30">
+                <button onclick="closeEditSnapshotMetadataModal()"
+                    class="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-sm font-medium rounded-lg transition-all border border-zinc-700">
+                    Cancel
+                </button>
+                <button id="edit-snapshot-save-btn" onclick="confirmEditSnapshotMetadata()"
+                    class="px-6 py-2 bg-white hover:bg-zinc-200 text-black text-sm font-medium rounded-lg transition-all">
+                    Save Changes
+                </button>
             </div>
         </div>
     </div>
@@ -212,6 +320,13 @@
     </div>
 
     <script>
+        // Escape HTML to prevent XSS
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
         let currentVmId = null;
 
         let currentSnapshotId = null;
@@ -516,6 +631,11 @@
                                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
                                     <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Snapshot</span>
                                 </button>
+                                <button onclick="openRenameVmModal('${vm.id}')" 
+                                    class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-blue-500 text-zinc-400 hover:text-blue-400 transition-all bg-transparent ml-2">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                                    <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Rename</span>
+                                </button>
                             </div>
                         </td>
                     `;
@@ -538,17 +658,34 @@
                 snaps.forEach(snap => {
                     const row = document.createElement('tr');
                     row.className = 'group hover:bg-zinc-900/50 transition-colors';
+
+                    // Format metadata for display
+                    let metadataDisplay = '';
+                    if (snap.metadata && Object.keys(snap.metadata).length > 0) {
+                        const metadataStr = JSON.stringify(snap.metadata);
+                        const truncated = metadataStr.length > 60 ? metadataStr.substring(0, 57) + '...' : metadataStr;
+                        metadataDisplay = `<div class="text-xs text-zinc-500 font-mono mt-1 truncate" title="${metadataStr.replace(/"/g, '&quot;')}">${truncated}</div>`;
+                    }
+
                     row.innerHTML = `
-                        <td class="px-6 py-4 font-medium text-white">${snap.id}</td>
+                        <td class="px-6 py-4">
+                            <div class="font-medium text-white">${snap.id}</div>
+                            ${metadataDisplay}
+                        </td>
                         <td class="px-6 py-4 text-zinc-500 font-mono text-xs truncate max-w-xs">${snap.path}</td>
                         <td class="px-6 py-4 text-right">
                             <div class="flex justify-end items-center gap-2">
-                                <button onclick="openRestoreModal('${snap.id}')" 
+                                <button onclick="openRestoreModal('${snap.id}')"
                                     class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-emerald-500 text-zinc-400 hover:text-emerald-400 transition-all bg-transparent">
                                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
                                     <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Restore</span>
                                 </button>
-                                <button id="btn-delete-snap-${snap.id}" onclick="deleteSnapshot('${snap.id}')" 
+                                <button onclick="openEditSnapshotMetadataModal('${snap.id}')"
+                                    class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-white text-zinc-400 hover:text-white transition-all bg-transparent">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                                    <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Edit</span>
+                                </button>
+                                <button id="btn-delete-snap-${snap.id}" onclick="deleteSnapshot('${snap.id}')"
                                     class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-red-900/50 text-zinc-400 hover:text-red-400 transition-all bg-transparent hover:bg-red-950/10">
                                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                                     <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Delete</span>
@@ -664,6 +801,305 @@
             );
         }
 
+        // Edit Snapshot Metadata Functions
+        let currentEditSnapshotId = null;
+        let editingSnapshotMetadata = {};
+        let editingSnapshotName = '';
+
+        async function openEditSnapshotMetadataModal(snapshotId) {
+            currentEditSnapshotId = snapshotId;
+            const keyInput = document.getElementById('new-snapshot-metadata-key');
+            const valueInput = document.getElementById('new-snapshot-metadata-value');
+            const nameInput = document.getElementById('edit-snapshot-name');
+
+            // Show the snapshot ID (read-only)
+            document.getElementById('edit-snapshot-id').textContent = snapshotId;
+
+            // Fetch current snapshot data
+            try {
+                const res = await fetch('/api/snapshots');
+                if (!res.ok) throw new Error(`API Error: ${res.status}`);
+                const snapshots = await res.json();
+
+                const snapshot = snapshots.find(s => s.id === snapshotId);
+                if (snapshot) {
+                    // Copy current metadata to editing object
+                    editingSnapshotMetadata = { ...(snapshot.metadata || {}) };
+                    // Set current name
+                    editingSnapshotName = snapshot.id || '';
+                    nameInput.value = editingSnapshotName;
+                } else {
+                    editingSnapshotMetadata = {};
+                    editingSnapshotName = '';
+                    nameInput.value = '';
+                }
+            } catch (e) {
+                console.error('Failed to fetch snapshot data', e);
+                editingSnapshotMetadata = {};
+                editingSnapshotName = '';
+                nameInput.value = '';
+            }
+
+            // Render entries
+            renderSnapshotMetadataEntries();
+
+            // Clear inputs and error
+            keyInput.value = '';
+            valueInput.value = '';
+            document.getElementById('snapshot-metadata-error').classList.add('hidden');
+
+            // Show modal
+            const modal = document.getElementById('edit-snapshot-metadata-modal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            setTimeout(() => nameInput.focus(), 50);
+        }
+
+        function closeEditSnapshotMetadataModal() {
+            const modal = document.getElementById('edit-snapshot-metadata-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            currentEditSnapshotId = null;
+            editingSnapshotName = '';
+        }
+
+        function renderSnapshotMetadataEntries() {
+            const container = document.getElementById('snapshot-metadata-entries');
+            const entries = Object.entries(editingSnapshotMetadata);
+
+            if (entries.length === 0) {
+                container.innerHTML = '<p class="text-zinc-600 text-sm text-center py-8">No metadata entries. Add some using the form above.</p>';
+                return;
+            }
+
+            container.innerHTML = entries.map(([key, value]) => `
+                <div class="flex items-center gap-3 bg-zinc-900/50 rounded-lg px-4 py-3 border border-zinc-800 hover:border-zinc-700 transition-colors">
+                    <input type="text" value="${escapeHtml(key)}"
+                        class="flex-1 bg-transparent text-zinc-200 text-sm font-medium focus:outline-none min-w-[120px]"
+                        onchange="updateSnapshotMetadataKey('${escapeHtml(key)}', this.value)"
+                        placeholder="Key">
+                    <span class="text-zinc-600 font-light">:</span>
+                    <input type="text" value="${escapeHtml(String(value))}"
+                        class="flex-1 bg-transparent text-zinc-400 text-sm font-mono focus:outline-none"
+                        onchange="updateSnapshotMetadataValue('${escapeHtml(key)}', this.value)"
+                        placeholder="Value">
+                    <button onclick="removeSnapshotMetadataEntry('${escapeHtml(key)}')"
+                        class="p-2 text-zinc-500 hover:text-red-400 hover:bg-red-950/30 rounded-lg transition-all"
+                        title="Remove entry">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                        </svg>
+                    </button>
+                </div>
+            `).join('');
+        }
+
+        function addSnapshotMetadataEntry() {
+            const keyInput = document.getElementById('new-snapshot-metadata-key');
+            const valueInput = document.getElementById('new-snapshot-metadata-value');
+            const errorMsg = document.getElementById('snapshot-metadata-error');
+
+            const key = keyInput.value.trim();
+            const value = valueInput.value.trim();
+
+            if (!key) {
+                errorMsg.textContent = 'Key is required';
+                errorMsg.classList.remove('hidden');
+                return;
+            }
+
+            if (key in editingSnapshotMetadata) {
+                errorMsg.textContent = 'Key already exists. Edit the existing entry or use a different key.';
+                errorMsg.classList.remove('hidden');
+                return;
+            }
+
+            // Add entry
+            editingSnapshotMetadata[key] = value;
+
+            // Clear inputs
+            keyInput.value = '';
+            valueInput.value = '';
+            errorMsg.classList.add('hidden');
+
+            // Re-render
+            renderSnapshotMetadataEntries();
+
+            // Focus back on key input for rapid entry
+            keyInput.focus();
+        }
+
+        function updateSnapshotMetadataKey(oldKey, newKey) {
+            if (!newKey.trim()) {
+                renderSnapshotMetadataEntries(); // Revert
+                return;
+            }
+
+            if (newKey !== oldKey && newKey in editingSnapshotMetadata) {
+                renderSnapshotMetadataEntries(); // Revert - key already exists
+                return;
+            }
+
+            const value = editingSnapshotMetadata[oldKey];
+            delete editingSnapshotMetadata[oldKey];
+            editingSnapshotMetadata[newKey] = value;
+        }
+
+        function updateSnapshotMetadataValue(key, newValue) {
+            editingSnapshotMetadata[key] = newValue;
+        }
+
+        function removeSnapshotMetadataEntry(key) {
+            delete editingSnapshotMetadata[key];
+            renderSnapshotMetadataEntries();
+        }
+
+        async function confirmEditSnapshotMetadata() {
+            if (!currentEditSnapshotId) return;
+
+            const errorMsg = document.getElementById('snapshot-metadata-error');
+            const saveBtn = document.getElementById('edit-snapshot-save-btn');
+
+            const newName = document.getElementById('edit-snapshot-name').value.trim();
+
+            // Disable button and show loading
+            saveBtn.disabled = true;
+            saveBtn.innerHTML = '<svg class="animate-spin h-4 w-4 mr-2 inline" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>Saving...';
+            errorMsg.classList.add('hidden');
+
+            try {
+                // Update name if changed
+                if (newName && newName !== editingSnapshotName) {
+                    const nameRes = await fetch(`/api/snapshots/${currentEditSnapshotId}/name`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name: newName })
+                    });
+
+                    if (!nameRes.ok) {
+                        const detail = await nameRes.text().catch(() => '');
+                        throw new Error(detail || `Name update failed with status ${nameRes.status}`);
+                    }
+                }
+
+                // Update metadata
+                const res = await fetch(`/api/snapshots/${currentEditSnapshotId}/metadata`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ metadata: editingSnapshotMetadata })
+                });
+
+                if (!res.ok) {
+                    const detail = await res.text().catch(() => '');
+                    throw new Error(detail || `Metadata update failed with status ${res.status}`);
+                }
+
+                closeEditSnapshotMetadataModal();
+                refreshData();
+            } catch (e) {
+                console.error('Failed to save changes', e);
+                errorMsg.textContent = 'Failed to save: ' + e.message;
+                errorMsg.classList.remove('hidden');
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = 'Save Changes';
+            }
+        } 
+        
+        // Rename VM Functions
+        let currentRenameVmId = null;
+        
+        function openRenameVmModal(vmId) {
+            currentRenameVmId = vmId;
+            const modal = document.getElementById('rename-vm-modal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            document.getElementById('rename-vm-id').textContent = vmId.substring(0, 16);
+            document.getElementById('rename-vm-name').value = '';
+            setTimeout(() => document.getElementById('rename-vm-name').focus(), 50);
+        }
+        
+        function closeRenameVmModal() {
+            const modal = document.getElementById('rename-vm-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            currentRenameVmId = null;
+        }
+        
+        async function confirmRenameVm() {
+            const newName = document.getElementById('rename-vm-name').value.trim();
+            
+            if (!newName) {
+                alert('Please enter a name.');
+                return;
+            }
+            
+            if (!currentRenameVmId) return;
+            
+            setLoading('rename-vm-save-btn', true);
+            
+            try {
+                const res = await fetch(`/api/vms/${currentRenameVmId}/name`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: newName })
+                });
+                
+                if (!res.ok) {
+                    throw new Error(`Rename failed with status ${res.status}`);
+                }
+                
+                closeRenameVmModal();
+                refreshData();
+            } catch (e) {
+                alert('Rename failed: ' + e.message);
+            } finally {
+                setLoading('rename-vm-save-btn', false);
+            }
+        }
+
+        // Handle Enter key in rename modals
+        document.addEventListener('DOMContentLoaded', () => {
+            const vmNameInput = document.getElementById('rename-vm-name');
+            vmNameInput?.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') confirmRenameVm();
+            });
+        });
+
+        // Close modals when clicking outside
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('rename-vm-modal').addEventListener('click', (e) => {
+                if (e.target.id === 'rename-vm-modal') closeRenameVmModal();
+            });
+        });
+        
+        // Handle Enter key in add form
+        document.addEventListener('DOMContentLoaded', () => {
+            const keyInput = document.getElementById('new-snapshot-metadata-key');
+            const valueInput = document.getElementById('new-snapshot-metadata-value');
+
+            keyInput?.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    valueInput.focus();
+                }
+            });
+
+            valueInput?.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    addSnapshotMetadataEntry();
+                }
+            });
+        });
+
+        // Close modal when clicking outside
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('edit-snapshot-metadata-modal').addEventListener('click', (e) => {
+                if (e.target.id === 'edit-snapshot-metadata-modal') {
+                    closeEditSnapshotMetadataModal();
+                }
+            });
+        });
+
         // Confirmation Modal Functions
         let confirmCallback = null;
 
@@ -709,10 +1145,13 @@
             modal.classList.remove('flex');
             currentVmId = null;
             document.getElementById('snapshot-name').value = '';
+            document.getElementById('snapshot-metadata').value = '';
         }
 
         async function confirmSnapshot() {
             const name = document.getElementById('snapshot-name').value.trim();
+            const metadataStr = document.getElementById('snapshot-metadata').value.trim();
+
             if (!name) {
                 alert('Please enter a snapshot name.');
                 return;
@@ -722,13 +1161,29 @@
                 return;
             }
 
+            // Validate metadata JSON if provided
+            let metadata = null;
+            if (metadataStr) {
+                try {
+                    metadata = JSON.parse(metadataStr);
+                } catch (e) {
+                    alert('Invalid JSON in metadata field: ' + e.message);
+                    return;
+                }
+            }
+
             setLoading('snapshot-save-btn', true);
 
             try {
+                const requestBody = { name };
+                if (metadata !== null) {
+                    requestBody.metadata = metadata;
+                }
+
                 const res = await fetch(`/api/vms/${currentVmId}/snapshot`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name })
+                    body: JSON.stringify(requestBody)
                 });
                 if (!res.ok) {
                     const detail = await res.text().catch(() => '');
@@ -750,6 +1205,8 @@
                 closeModal();
                 closeConfirmModal();
                 closeRestoreModal();
+                closeEditSnapshotMetadataModal();
+                closeRenameVmModal();
             }
         });
 
