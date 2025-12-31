@@ -119,6 +119,23 @@
                     <p id="vm-rootfs" class="text-zinc-500 text-xs font-mono truncate">-</p>
                 </div>
             </div>
+
+            <!-- Metadata Section -->
+            <div class="mt-6 pt-6 border-t border-zinc-800">
+                <div class="flex justify-between items-center mb-3">
+                    <h3 class="text-sm font-medium text-zinc-400">Metadata</h3>
+                    <button onclick="openMetadataEditor()"
+                        class="group flex items-center gap-1.5 px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white text-xs font-medium rounded transition-colors border border-zinc-800">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                        </svg>
+                        Edit
+                    </button>
+                </div>
+                <div id="vm-metadata" class="space-y-2">
+                    <p class="text-zinc-600 text-sm">No metadata</p>
+                </div>
+            </div>
         </section>
 
         <!-- File Manager Section -->
@@ -309,6 +326,31 @@
                 ${statusDot}
                 <span class="text-${statusColor}-500 text-sm font-medium uppercase tracking-wide">${statusText}</span>
             `;
+
+            // Metadata
+            const metadataEl = document.getElementById('vm-metadata');
+            if (vmInfo.metadata && Object.keys(vmInfo.metadata).length > 0) {
+                let metadataHtml = '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">';
+                for (const [key, value] of Object.entries(vmInfo.metadata)) {
+                    metadataHtml += `
+                        <div class="flex items-baseline gap-2">
+                            <span class="text-xs uppercase text-zinc-500 font-medium">${escapeHtml(key)}:</span>
+                            <span class="text-zinc-300 text-sm font-mono">${escapeHtml(String(value))}</span>
+                        </div>
+                    `;
+                }
+                metadataHtml += '</div>';
+                metadataEl.innerHTML = metadataHtml;
+            } else {
+                metadataEl.innerHTML = '<p class="text-zinc-600 text-sm">No metadata</p>';
+            }
+        }
+
+        // Escape HTML to prevent XSS
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
         }
 
         // Load files in current directory
@@ -557,7 +599,230 @@
             loadVmInfo();
             loadFiles('/');
         });
+
+        // Metadata Editor Functions
+        let editingMetadata = {};
+
+        function openMetadataEditor() {
+            const modal = document.getElementById('metadata-modal');
+            const keyInput = document.getElementById('new-metadata-key');
+            const valueInput = document.getElementById('new-metadata-value');
+
+            // Copy current metadata
+            editingMetadata = { ...(vmInfo.metadata || {}) };
+
+            // Render entries
+            renderMetadataEntries();
+
+            // Clear inputs
+            keyInput.value = '';
+            valueInput.value = '';
+
+            modal.classList.remove('hidden');
+            keyInput.focus();
+        }
+
+        function closeMetadataModal() {
+            document.getElementById('metadata-modal').classList.add('hidden');
+        }
+
+        function renderMetadataEntries() {
+            const container = document.getElementById('metadata-entries');
+            const entries = Object.entries(editingMetadata);
+
+            if (entries.length === 0) {
+                container.innerHTML = '<p class="text-zinc-600 text-sm text-center py-4">No metadata entries. Add some using the form above.</p>';
+                return;
+            }
+
+            container.innerHTML = entries.map(([key, value]) => `
+                <div class="flex items-center gap-3 bg-zinc-900/50 rounded-lg px-3 py-2 border border-zinc-800">
+                    <input type="text" value="${escapeHtml(key)}"
+                        class="flex-1 bg-transparent text-zinc-300 text-sm font-medium focus:outline-none"
+                        onchange="updateMetadataKey('${escapeHtml(key)}', this.value)"
+                        placeholder="Key">
+                    <span class="text-zinc-600">:</span>
+                    <input type="text" value="${escapeHtml(String(value))}"
+                        class="flex-1 bg-transparent text-zinc-400 text-sm font-mono focus:outline-none"
+                        onchange="updateMetadataValue('${escapeHtml(key)}', this.value)"
+                        placeholder="Value">
+                    <button onclick="removeMetadataEntry('${escapeHtml(key)}')"
+                        class="p-1.5 text-zinc-500 hover:text-red-400 hover:bg-red-950/30 rounded transition-colors"
+                        title="Remove entry">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                        </svg>
+                    </button>
+                </div>
+            `).join('');
+        }
+
+        function addMetadataEntry() {
+            const keyInput = document.getElementById('new-metadata-key');
+            const valueInput = document.getElementById('new-metadata-value');
+            const errorMsg = document.getElementById('metadata-error');
+
+            const key = keyInput.value.trim();
+            const value = valueInput.value.trim();
+
+            if (!key) {
+                errorMsg.textContent = 'Key is required';
+                errorMsg.classList.remove('hidden');
+                return;
+            }
+
+            if (editingMetadata[key] !== undefined) {
+                errorMsg.textContent = 'Key already exists. Edit the existing entry instead.';
+                errorMsg.classList.remove('hidden');
+                return;
+            }
+
+            editingMetadata[key] = value;
+            renderMetadataEntries();
+
+            // Clear inputs
+            keyInput.value = '';
+            valueInput.value = '';
+            keyInput.focus();
+            errorMsg.classList.add('hidden');
+        }
+
+        function updateMetadataKey(oldKey, newKey) {
+            if (!newKey.trim() || newKey === oldKey) return;
+
+            if (editingMetadata[newKey] !== undefined) {
+                alert('Key already exists');
+                renderMetadataEntries();
+                return;
+            }
+
+            const value = editingMetadata[oldKey];
+            delete editingMetadata[oldKey];
+            editingMetadata[newKey] = value;
+            renderMetadataEntries();
+        }
+
+        function updateMetadataValue(key, newValue) {
+            editingMetadata[key] = newValue;
+        }
+
+        function removeMetadataEntry(key) {
+            delete editingMetadata[key];
+            renderMetadataEntries();
+        }
+
+        async function saveMetadata() {
+            const errorMsg = document.getElementById('metadata-error');
+            const saveBtn = document.getElementById('save-metadata-btn');
+
+            // Disable button and show loading
+            saveBtn.disabled = true;
+            saveBtn.innerHTML = '<svg class="animate-spin h-4 w-4 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>Saving...';
+            errorMsg.classList.add('hidden');
+
+            try {
+                const res = await fetch(`/api/vms/${vmId}/metadata`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ metadata: editingMetadata })
+                });
+
+                if (!res.ok) {
+                    throw new Error(`Failed to save: ${res.status}`);
+                }
+
+                // Update local vmInfo and re-render
+                vmInfo.metadata = editingMetadata;
+                renderVmInfo();
+
+                closeMetadataModal();
+            } catch (e) {
+                console.error('Failed to save metadata', e);
+                errorMsg.textContent = 'Failed to save: ' + e.message;
+                errorMsg.classList.remove('hidden');
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = 'Save Metadata';
+            }
+        }
+
+        // Handle Enter key in add form
+        document.addEventListener('DOMContentLoaded', () => {
+            const keyInput = document.getElementById('new-metadata-key');
+            const valueInput = document.getElementById('new-metadata-value');
+
+            keyInput?.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    valueInput.focus();
+                }
+            });
+
+            valueInput?.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    addMetadataEntry();
+                }
+            });
+        });
+
+        // Close modal on escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeMetadataModal();
+            }
+        });
+
+        // Close modal when clicking outside
+        document.getElementById('metadata-modal').addEventListener('click', (e) => {
+            if (e.target.id === 'metadata-modal') {
+                closeMetadataModal();
+            }
+        });
     </script>
+
+    <!-- Metadata Editor Modal -->
+    <div id="metadata-modal" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div class="glass rounded-xl w-full max-w-2xl max-h-[80vh] flex flex-col">
+            <div class="p-6 border-b border-zinc-800">
+                <h2 class="text-xl font-medium text-white">Edit Metadata</h2>
+                <p class="text-sm text-zinc-500 mt-1">Add, edit, or remove metadata key-value pairs</p>
+            </div>
+
+            <div class="p-6 flex-1 overflow-y-auto">
+                <!-- Add new entry form -->
+                <div class="flex gap-3 mb-4">
+                    <input type="text" id="new-metadata-key" placeholder="Key"
+                        class="flex-1 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-zinc-300 text-sm focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500">
+                    <input type="text" id="new-metadata-value" placeholder="Value"
+                        class="flex-1 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-zinc-300 text-sm focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500">
+                    <button onclick="addMetadataEntry()"
+                        class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium rounded transition-colors flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
+                        </svg>
+                        Add
+                    </button>
+                </div>
+
+                <!-- Existing metadata entries -->
+                <div id="metadata-entries" class="space-y-2">
+                    <!-- Entries will be rendered here -->
+                </div>
+
+                <p id="metadata-error" class="hidden text-red-400 text-sm mt-4"></p>
+            </div>
+
+            <div class="p-6 border-t border-zinc-800 flex justify-end gap-3">
+                <button onclick="closeMetadataModal()"
+                    class="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-sm font-medium rounded transition-colors border border-zinc-700">
+                    Cancel
+                </button>
+                <button id="save-metadata-btn" onclick="saveMetadata()"
+                    class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium rounded transition-colors">
+                    Save Metadata
+                </button>
+            </div>
+        </div>
+    </div>
 </body>
 
 </html>

@@ -186,6 +186,21 @@ def get_vm_details(vm_id: str):
         raise HTTPException(status_code=404, detail="VM not found")
     return vm_info
 
+class UpdateMetadataRequest(BaseModel):
+    metadata: dict
+
+@app.put("/api/vms/{vm_id}/metadata")
+def update_vm_metadata(vm_id: str, req: UpdateMetadataRequest):
+    """Update the metadata of a VM."""
+    try:
+        updated_meta = bs.update_vm_metadata(vm_id, req.metadata)
+        return updated_meta
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="VM not found")
+    except Exception as e:
+        logger.error(f"Failed to update metadata for VM {vm_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/vms/{vm_id}/files")
 def list_directory(vm_id: str, path: str = "/"):
     """List files in a directory inside the VM."""
