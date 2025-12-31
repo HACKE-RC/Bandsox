@@ -105,6 +105,26 @@ Visit `http://localhost:8000` to access the dashboard.
 
 ## Installation
 
+### Install from PyPI (Recommended)
+
+Install BandSox directly using pip or uv:
+
+```bash
+# Using pip
+pip install bandsox
+
+# Using uv (faster)
+uv pip install bandsox
+```
+
+Then initialize the required artifacts:
+
+```bash
+bandsox init --rootfs-url ./bandsox-base.ext4
+```
+
+### Install from Source
+
 1. Clone the repository:
 
     ```bash
