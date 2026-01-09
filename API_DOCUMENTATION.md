@@ -143,10 +143,10 @@ else:
 
 ### File Operations
 
-**Important**: Native file operations (`upload_file`, `download_file`, `get_file_contents`) currently use `debugfs` to manipulate the filesystem image directly. **This requires the VM to be temporarily paused** to avoid corruption. This happens automatically but introduces a brief interruption.
+File operations use the guest agent for transfers.
 
 ```python
-# Upload a file
+# Upload a file (timeout scales with file size: 60s minimum + 30s per MB)
 vm.upload_file("./local_script.py", "/app/script.py")
 
 # Download a file
@@ -244,7 +244,7 @@ Static assets
 | `exec_python(code, cwd, packages, ...)` | Run Python code with isolated env using `uv`. |
 | `exec_python_capture(code, packages, ...)` | Run Python and return output dict (No Except). |
 | `start_session(cmd)` | Run a command (background). |
-| `upload_file(local, remote)` | Upload a file (Pauses VM). |
+| `upload_file(local, remote, timeout=None)` | Upload a file. Timeout scales with file size (60s + 30s/MB). |
 | `download_file(remote, local)` | Download a file (Pauses VM). |
 | `get_file_contents(remote)` | Read file content (Pauses VM). |
 

@@ -1312,8 +1312,14 @@ class MicroVM:
             return
         raise Exception(f"Failed to download {remote_path} via agent")
 
-    def upload_file(self, local_path: str, remote_path: str):
-        """Uploads a file from local filesystem to the VM."""
+    def upload_file(self, local_path: str, remote_path: str, timeout: int = None):
+        """Uploads a file from local filesystem to the VM.
+        
+        Args:
+            local_path: Path to local file
+            remote_path: Path in VM to write to
+            timeout: Optional timeout in seconds (default: scales with file size)
+        """
         if not os.path.exists(local_path):
             raise FileNotFoundError(f"Local file not found: {local_path}")
 
@@ -1325,8 +1331,13 @@ class MicroVM:
         import base64
 
         encoded = base64.b64encode(content).decode("utf-8")
+        
+        # Calculate timeout based on file size: minimum 60s, +30s per MB
+        if timeout is None:
+            file_size_mb = len(content) / (1024 * 1024)
+            timeout = max(60, int(60 + file_size_mb * 30))
 
-        self.send_request("write_file", {"path": remote_path, "content": encoded})
+        self.send_request("write_file", {"path": remote_path, "content": encoded}, timeout=timeout)
 
     def upload_folder(
         self,
