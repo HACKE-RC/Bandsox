@@ -1,6 +1,6 @@
 [project]
 name = "bandsox"
-version = "0.7.0"
+version = "1.1"
 description = "Fast Firecracker microVM manager"
 authors = [{name = "rc", email = "crretsim@gmail.com"}]
 readme = "README.md"
