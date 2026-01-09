@@ -174,7 +174,17 @@ This ensures compatibility with custom kernels that might not have vsock support
 
 ### "VM requires vsock support" Error
 
-This means the VM metadata doesn't contain vsock configuration. You must recreate the VM.
+This means VM metadata doesn't contain vsock configuration. You must recreate VM.
+
+### Snapshot Restoration Issues
+
+If you previously experienced "Address in use (os error 98)" errors when restoring VMs from snapshots with vsock, this has been fixed. The fix:
+
+- Automatically cleans up stale vsock sockets before loading snapshot
+- Reconnects vsock bridge after VM is resumed
+- Preserves vsock configuration from snapshot in restored VM metadata
+
+See [`VSOCK_RESTORATION_FIX.md`](VSOCK_RESTORATION_FIX.md) for technical details.
 
 ### "Vsock connection failed" Warning
 

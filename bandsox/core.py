@@ -4,6 +4,7 @@ import uuid
 import logging
 import shutil
 import json
+import threading
 from pathlib import Path
 from .vm import MicroVM, DEFAULT_KERNEL_PATH
 from .image import build_rootfs
@@ -527,6 +528,27 @@ class BandSox:
         if snap_rootfs and os.path.exists(snap_rootfs):
             self._clone_rootfs(snap_rootfs, instance_rootfs)
 
+        # Handle vsock socket cleanup before loading snapshot
+        # Firecracker will try to bind to the old socket path from the snapshot
+        vsock_config = snapshot_meta.get("vsock_config")
+        if vsock_config and vsock_config.get("enabled"):
+            old_vm_id = snapshot_meta.get("source_vm_id")
+            if old_vm_id:
+                old_socket_path = f"/tmp/bandsox/vsock_{old_vm_id}.sock"
+
+                # Clean up stale vsock socket to avoid "Address in use" error
+                if os.path.exists(old_socket_path):
+                    try:
+                        os.unlink(old_socket_path)
+                        logger.debug(f"Removed stale vsock socket: {old_socket_path}")
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to remove vsock socket {old_socket_path}: {e}"
+                        )
+
+                # Tell VM to expect the old socket path (Firecracker will recreate it)
+                vm.vsock_socket_path = old_socket_path
+
         # Try to load snapshot
         created_symlink = None
 
@@ -620,6 +642,54 @@ class BandSox:
 
         vm.resume()
 
+        # Re-establish vsock bridge if vsock was enabled in the snapshot
+        vsock_config = snapshot_meta.get("vsock_config")
+        if vsock_config and vsock_config.get("enabled"):
+            old_vm_id = snapshot_meta.get("source_vm_id", new_vm_id)
+            old_socket_path = f"/tmp/bandsox/vsock_{old_vm_id}.sock"
+
+            try:
+                # Firecracker should have recreated the socket after loading snapshot
+                max_wait = 50
+                for i in range(max_wait):
+                    if os.path.exists(old_socket_path):
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise Exception(
+                        f"Vsock socket not created after restore: {old_socket_path}"
+                    )
+
+                # Reconnect to vsock socket
+                import socket
+
+                vm.vsock_bridge_socket = socket.socket(
+                    socket.AF_UNIX, socket.SOCK_STREAM
+                )
+                vm.vsock_bridge_socket.connect(old_socket_path)
+                vm.vsock_bridge_socket.settimeout(30)
+
+                # Use SAME CID/port from snapshot (agent already has them)
+                vm.vsock_cid = vsock_config["cid"]
+                vm.vsock_port = vsock_config["port"]
+                vm.vsock_enabled = True
+                vm.vsock_bridge_running = True
+
+                # Restart vsock bridge thread
+                vm.vsock_bridge_thread = threading.Thread(
+                    target=vm._vsock_bridge_loop, daemon=True
+                )
+                vm.vsock_bridge_thread.start()
+
+                vm.env_vars["BANDSOX_VSOCK_PORT"] = str(vsock_config["port"])
+                logger.info(
+                    f"Vsock restored: CID={vsock_config['cid']}, port={vsock_config['port']}"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to restore vsock bridge: {e}")
+                # VM continues without vsock (falls back to serial)
+                vm.vsock_enabled = False
+
         if enable_networking and vm.agent_ready:
             # Check if we need to update IP
             current_guest_ip = vm.network_config.get("guest_ip")
@@ -672,6 +742,7 @@ class BandSox:
                 "metadata": metadata
                 if metadata is not None
                 else snapshot_meta.get("metadata", {}),
+                "vsock_config": vsock_config,
             },
         )
 
