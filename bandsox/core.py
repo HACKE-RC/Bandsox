@@ -767,6 +767,15 @@ class BandSox:
         meta = self._get_metadata(vm.vm_id) or {}
         was_paused = meta.get("status") == "paused"
 
+        # Disconnect vsock bridge before snapshot to avoid "Address in use" error on restore
+        # Firecracker saves vsock device state to snapshot file, so we need to release the socket
+        had_vsock = vm.vsock_enabled and vm.vsock_bridge_running
+        if had_vsock:
+            logger.info(f"Disconnecting vsock bridge before snapshot for {vm.vm_id}")
+            vm._cleanup_vsock_bridge()
+            # Don't reconnect after snapshot - let guest re-establish vsock connections
+            vm.vsock_enabled = False
+
         # Pause VM if it was running; keep paused VMs paused after snapshot
         if not was_paused:
             vm.pause()
