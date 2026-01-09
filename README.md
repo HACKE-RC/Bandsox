@@ -120,7 +120,7 @@ This is **100-10,000x faster** than traditional serial-based file transfers!
 - File operations automatically use vsock when available
 - Falls back gracefully to serial if vsock module is unavailable
 - No VM pause required during transfers
-- **Snapshot support**: Restored VMs automatically re-establish vsock connections
+- **Snapshot support**: Vsock bridge disconnected before snapshot, restored VMs detect vsock availability automatically
 
 ### Checking Vsock Status
 

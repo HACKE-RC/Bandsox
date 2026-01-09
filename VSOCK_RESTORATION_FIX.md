@@ -3,20 +3,44 @@
 ## Problem
 Restoring VMs from snapshots with vsock enabled was failing with:
 ```
-Firecracker API error: {"fault_message":"Load snapshot error: Failed to restore from snapshot: Failed to build microVM from snapshot: Failed to restore devices: Error restoring MMIO devices: VsockUnixBackend: Error binding to the host-side Unix socket: Address in use (os error 98)"}
+Firecracker API error: {"fault_message":"Load snapshot error: Failed to restore from snapshot: Failed to build microVM from snapshot: Failed to restore devices: Error restoring MMIO devices: VsockUnixBackend: Error binding to host-side Unix socket: Address in use (os error 98)"}
 ```
 
 ## Root Cause
 1. Snapshots save vsock configuration pointing to `/tmp/bandsox/vsock_{old_vm_id}.sock`
-2. Firecracker loads snapshot and tries to bind to the OLD socket path
+2. Firecracker loads snapshot and tries to bind to OLD socket path
 3. Old socket file from previous VM still exists (stale)
 4. "Address in use" error occurs
+
+**Critical Insight**: Firecracker's binary snapshot file saves vsock device state, not just metadata. Even if we don't save `vsock_config` to `metadata.json`, Firecracker's state file still contains vsock device information. This means:
+- Snapshot from vsock-enabled VM → New snapshot inherits vsock state
+- Restoring from new snapshot → Firecracker tries to restore vsock device
+- Socket file doesn't exist → "Address in use" error
 
 ## Solution
 
 ### Changes Made
 
-#### 1. `bandsox/core.py` - Import threading
+#### 1. `bandsox/core.py` - Disconnect vsock bridge before snapshot (FIX)
+
+Added vsock bridge disconnection in `snapshot_vm()` before taking snapshot:
+```python
+# Disconnect vsock bridge before snapshot to properly release socket
+had_vsock = vm.vsock_enabled and vm.vsock_bridge_running
+if had_vsock:
+    logger.info(f"Disconnecting vsock bridge before snapshot for {vm.vm_id}")
+    vm._cleanup_vsock_bridge()
+    # Don't reconnect after snapshot - let guest re-establish vsock connections
+    vm.vsock_enabled = False
+```
+
+**Why this fixes the issue**:
+- Vsock bridge holds the Unix socket file open
+- Firecracker can't bind to the socket while bridge has it
+- Disconnecting releases the socket, allowing Firecracker to save clean state
+- Guest agent will re-establish vsock connections after resume (dual-mode design)
+
+#### 2. `bandsox/core.py` - Import threading
 ```python
 import threading  # Added for vsock bridge thread
 ```
