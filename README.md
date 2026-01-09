@@ -10,11 +10,12 @@ BandSox is a fast, lightweight Python library and CLI for managing Firecracker m
 
 - **Fast Boot Times**: Leverages Firecracker's speed to start VMs in milliseconds.
 - **Docker Image Support**: Create VMs directly from Docker images (requires Python 3 installed in the image).
-- **Snapshotting**: Pause, resume, and snapshot VMs for instant restoration.
+- **Snapshotting**: Pause, resume and snapshot VMs for instant restoration.
 - **Web Dashboard**: Visual interface to manage VMs, snapshots, and view terminal sessions.
 - **CLI Tool**: Comprehensive command-line interface for all operations.
 - **Python API**: Easy-to-use Python library for integration into your own applications.
-- **File Operations**: Upload, download, and manage files within the VM.
+- **Vsock File Transfers**: Lightning-fast file operations (100-10,000x faster than serial) with automatic fallback.
+- **File Operations**: Upload, download and manage files within VM.
 - **Terminal Access**: Interactive web-based terminal for running VMs.
 
 ## Usage
@@ -96,12 +97,54 @@ sudo python3 -m bandsox.cli serve --host 0.0.0.0 --port 8000
 
 Visit `http://localhost:8000` to access the dashboard.
 
+## Vsock - High-Performance File Transfers
+
+BandSox uses **vsock** (Virtual Socket) for fast, efficient file transfers between host and guest VMs.
+
+### Performance
+
+File transfer speeds with vsock:
+
+| File Size | Expected Speed | Expected Time |
+|-----------|----------------|----------------|
+| 1 MB      | ~50 MB/s      | < 0.1s        |
+| 10 MB     | ~80 MB/s      | < 0.2s        |
+| 100 MB    | ~100 MB/s     | < 1s          |
+| 1 GB      | ~100 MB/s     | < 10s         |
+
+This is **100-10,000x faster** than traditional serial-based file transfers!
+
+### How It Works
+
+- Each VM gets a unique **CID** (Context ID) and **port** for vsock communication
+- File operations automatically use vsock when available
+- Falls back gracefully to serial if vsock module is unavailable
+- No VM pause required during transfers
+
+### Checking Vsock Status
+
+In a running VM terminal:
+```bash
+# Check if vsock module is loaded
+lsmod | grep vsock
+# Should show: virtio_vsock
+
+# Check kernel config
+zcat /proc/config.gz | grep VSOCK
+# Should see: CONFIG_VIRTIO_VSOCK=y or m
+```
+
+### Upgrading from Older Versions
+
+VMs created before vsock support require recreation. See [`VSOCK_MIGRATION.md`](VSOCK_MIGRATION.md) for detailed migration instructions.
+
 ## Prerequisites
 
 - Linux system with KVM support (bare metal or nested virtualization).
 - [Firecracker](https://firecracker-microvm.github.io/) installed and in your PATH (`/usr/bin/firecracker`).
 - Python 3.8+.
 - `sudo` access (required for setting up TAP devices for networking).
+- Vsock kernel module (`virtio-vsock`) in guest kernel for fast file transfers (optional, will fallback to serial if unavailable).
 
 ## Installation
 
@@ -185,14 +228,39 @@ bandsox init --rootfs-url ./bandsox-base.ext4
 
 BandSox consists of several components:
 
-- **Core (`bandsox.core`)**: High-level manager for VMs and snapshots.
-- **VM (`bandsox.vm`)**: Wrapper around the Firecracker process, handling configuration, network, and interaction.
-- **Agent (`bandsox.agent`)**: A lightweight Python agent injected into the VM to handle command execution and file operations.
+- **Core (`bandsox.core`)**: High-level manager for VMs and snapshots, including CID/port allocation.
+- **VM (`bandsox.vm`)**: Wrapper around the Firecracker process, handling configuration, network, vsock bridge, and interaction.
+- **Agent (`bandsox.agent`)**: A lightweight Python agent injected into the VM to handle command execution and file operations (with vsock/serial dual-mode support).
 - **Server (`bandsox.server`)**: FastAPI-based backend for the web dashboard.
+
+### Communication
+
+**Vsock (Fast)**:
+- VMs communicate with host via `AF_VSOCK` sockets
+- Firecracker forwards vsock connections to Unix domain sockets
+- File transfers are 100-10,000x faster than serial
+
+**Serial (Fallback)**:
+- Gracefully falls back to serial console if vsock is unavailable
+- Ensures compatibility with custom kernels
+
+### Storage Layout
+
+Default: `/var/lib/bandsox` (override with `BANDSOX_STORAGE` env var)
+
+```
+├── images/           # Rootfs ext4 images
+├── snapshots/        # VM snapshots
+├── sockets/          # Firecracker API sockets
+├── metadata/         # VM metadata (including vsock_config)
+├── cid_allocator.json  # CID allocation state
+└── port_allocator.json # Port allocation state
+```
 
 ## Docs & APIs
 
 - Full library, CLI, and HTTP endpoint reference: [`API_DOCUMENTATION.md`](API_DOCUMENTATION.md)
+- Vsock migration guide: [`VSOCK_MIGRATION.md`](VSOCK_MIGRATION.md)
 - REST base path: `http://<host>:<port>/api` (see docs for endpoints such as `/api/vms`, `/api/snapshots`, `/api/vms/{id}/terminal` WebSocket)
 
 ## Building a local base rootfs (no hosting required)

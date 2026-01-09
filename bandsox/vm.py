@@ -7,6 +7,7 @@ import uuid
 import threading
 import json
 import socket
+import errno
 from pathlib import Path
 from .firecracker import FirecrackerClient
 from .network import setup_tap_device, cleanup_tap_device
@@ -155,6 +156,14 @@ class MicroVM:
         self.agent_ready = False
         self.env_vars = {}
         self._uv_available = None  # Cache for uv availability check
+
+        self.vsock_enabled = False
+        self.vsock_cid = None
+        self.vsock_port = None
+        self.vsock_socket_path = None
+        self.vsock_bridge_socket = None
+        self.vsock_bridge_thread = None
+        self.vsock_bridge_running = False
 
     def start_process(self):
         """Starts the Firecracker process."""
@@ -793,45 +802,24 @@ class MicroVM:
         mem_mib: int,
         boot_args: str = None,
         enable_networking: bool = True,
+        enable_vsock: bool = True,
     ):
         """Configures the VM resources."""
-        self.rootfs_path = rootfs_path  # Store for file operations
+        self.rootfs_path = rootfs_path
 
         if not boot_args:
             boot_args = f"{DEFAULT_BOOT_ARGS} root=/dev/vda init=/init"
 
-        # 1. Boot Source
-        # We set boot source later if networking is enabled to add ip args
-        # But if disabled, we set it now or later?
-        # Firecracker allows multiple PUTs to boot-source? Yes.
-
-        # 2. Rootfs
         self.client.put_drives(
             "rootfs", rootfs_path, is_root_device=True, is_read_only=False
         )
 
-        # 3. Machine Config
         self.client.put_machine_config(vcpu, mem_mib)
 
-        # 4. Network
         if enable_networking:
-            # We need to set up the TAP device on the host first
-            # We'll use a simple IP allocation strategy for this prototype:
-            # 172.16.X.1 (host) <-> 172.16.X.2 (guest)
-            # We need a unique X. Let's hash the VM ID or just pick one.
-            # For simplicity, let's assume the user manages IP or we pick a random one in 172.16.0.0/16
-            # But wait, we need to pass the IP config to the guest via boot args or it needs to use DHCP.
-            # Firecracker doesn't provide DHCP. We usually set static IP in guest or use kernel boot args `ip=...`
-
-            # Let's use kernel boot args for IP configuration if possible, or assume the rootfs has init script.
-            # The user requirement says "Ability to use internet inside the microvm reliably".
-            # We'll setup the TAP here.
-
-            # Generate a semi-unique subnet based on last byte of VM ID (very naive collision avoidance)
-            # Try to allocate a free subnet loop
             base_idx = int(self.vm_id[-2:], 16)
             for i in range(50):
-                subnet_idx = (base_idx + i) % 253 + 1  # 1-253
+                subnet_idx = (base_idx + i) % 253 + 1
                 host_ip = f"172.16.{subnet_idx}.1"
                 guest_ip = f"172.16.{subnet_idx}.2"
                 guest_mac = f"AA:FC:00:00:{subnet_idx:02x}:02"
@@ -848,27 +836,28 @@ class MicroVM:
                     logger.info(f"Allocated network {host_ip} for {self.vm_id}")
                     break
                 except Exception:
-                    # Retry with next subnet
                     continue
             else:
                 raise Exception("Failed to allocate free network subnet after retries")
 
             self.client.put_network_interface("eth0", self.tap_name, guest_mac)
 
-            self.client.put_network_interface("eth0", self.tap_name, guest_mac)
-
-            # Update boot args to include IP config
-            # ip=<client-ip>:<server-ip>:<gw-ip>:<netmask>:<hostname>:<device>:<autoconf>:<dns0-ip>
-            # ip=172.16.X.2::172.16.X.1:255.255.255.0::eth0:off:8.8.8.8
             network_boot_args = (
                 f"ip={guest_ip}::{host_ip}:255.255.255.0::eth0:off:8.8.8.8"
             )
             full_boot_args = f"{boot_args} {network_boot_args}"
 
-            # Update boot source with new args
             self.client.put_boot_source(kernel_path, full_boot_args)
         else:
             self.client.put_boot_source(kernel_path, boot_args)
+
+        if enable_vsock:
+            from .core import BandSox
+
+            bs = BandSox()
+            cid = bs._allocate_cid()
+            port = bs._allocate_port()
+            self._setup_vsock_bridge(cid, port)
 
     def update_drive(self, drive_id: str, path_on_host: str):
         """Updates a drive's backing file path."""
@@ -955,9 +944,9 @@ class MicroVM:
                 self.process.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 self.process.kill()
-        # Clean up networking even if network_setup is False but we still have
-        # a remembered netns or network_config (e.g., after restore or server
-        # restart) to avoid leaking veth/netns devices.
+
+        self._cleanup_vsock_bridge()
+
         should_cleanup_net = (
             self.network_setup
             or getattr(self, "netns", None)
@@ -983,6 +972,272 @@ class MicroVM:
         if os.path.exists(self.socket_path):
             os.unlink(self.socket_path)
 
+    def _setup_vsock_bridge(self, cid: int, port: int):
+        """Sets up vsock bridge for high-speed file transfers.
+
+        Args:
+            cid: Guest Context ID
+            port: Host port to listen on
+        """
+        import threading
+        import json
+
+        self.vsock_socket_path = f"/tmp/bandsox/vsock_{self.vm_id}.sock"
+
+        # Pre-cleanup: Remove any stale socket file before Firecracker creates it
+        if os.path.exists(self.vsock_socket_path):
+            try:
+                os.unlink(self.vsock_socket_path)
+                logger.debug(f"Removed stale vsock socket: {self.vsock_socket_path}")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to remove stale socket {self.vsock_socket_path}: {e}"
+                )
+
+        try:
+            # Tell Firecracker to create vsock device with this socket path
+            # Firecracker will create and bind to Unix socket itself
+            logger.debug(
+                f"Configuring Firecracker vsock: CID={cid}, socket={self.vsock_socket_path}"
+            )
+            self.client.put_vsock("vsock0", cid, self.vsock_socket_path)
+
+            # Wait for Firecracker to create the socket
+            max_wait = 50  # 5 seconds
+            for i in range(max_wait):
+                if os.path.exists(self.vsock_socket_path):
+                    break
+                time.sleep(0.1)
+            else:
+                raise Exception(
+                    f"Firecracker vsock socket not created at {self.vsock_socket_path}"
+                )
+
+            # Now connect to the socket that Firecracker created
+            self.vsock_bridge_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.vsock_bridge_socket.connect(self.vsock_socket_path)
+            self.vsock_bridge_socket.settimeout(30)
+
+            self.vsock_bridge_running = True
+            self.vsock_bridge_thread = threading.Thread(
+                target=self._vsock_bridge_loop, daemon=True
+            )
+            self.vsock_bridge_thread.start()
+
+            # Set these AFTER successful setup
+            self.vsock_enabled = True
+            self.vsock_cid = cid
+            self.vsock_port = port
+
+            self.env_vars["BANDSOX_VSOCK_PORT"] = str(port)
+            logger.info(f"Vsock bridge enabled: CID={cid}, port={port}")
+
+        except Exception as e:
+            logger.error(f"Failed to setup vsock bridge: {e}")
+            # Ensure cleanup happens on ANY failure
+            self._cleanup_vsock_bridge()
+            raise Exception(f"Failed to setup vsock: {e}") from e
+
+    def _vsock_bridge_loop(self):
+        """Main loop that receives vsock messages from Firecracker.
+
+        Firecracker creates the Unix socket and forwards guest vsock connections.
+        We connect to the socket as a client to receive those forwarded messages.
+        """
+        import json
+
+        logger.info(f"Vsock bridge loop started for {self.vm_id}")
+        buffer = b""
+
+        try:
+            while self.vsock_bridge_running:
+                try:
+                    data = self.vsock_bridge_socket.recv(65536)
+                    if not data:
+                        logger.debug("Vsock socket closed by Firecracker")
+                        break
+                    buffer += data
+
+                    while b"\n" in buffer:
+                        line, buffer = buffer.split(b"\n", 1)
+                        try:
+                            msg = json.loads(line.decode("utf-8"))
+                            msg_type = msg.get("type")
+                            cmd_id = msg.get("cmd_id")
+                            path = msg.get("path")
+                            size = msg.get("size", 0)
+                            checksum = msg.get("checksum", "")
+
+                            if msg_type == "upload":
+                                self._vsock_handle_upload(
+                                    self.vsock_bridge_socket,
+                                    cmd_id,
+                                    path,
+                                    size,
+                                    checksum,
+                                )
+                            elif msg_type == "download":
+                                self._vsock_handle_download(
+                                    self.vsock_bridge_socket, cmd_id, path
+                                )
+                        except json.JSONDecodeError:
+                            logger.debug(f"Failed to decode vsock message: {line}")
+                        except Exception as e:
+                            logger.error(f"Error handling vsock message: {e}")
+                except socket.timeout:
+                    continue
+                except OSError as e:
+                    if e.errno == errno.EPIPE or e.errno == errno.ECONNRESET:
+                        logger.debug("Vsock connection closed")
+                        break
+                    else:
+                        logger.error(f"Vsock socket error: {e}")
+        except Exception as e:
+            logger.error(f"Vsock bridge loop error: {e}")
+        finally:
+            logger.info(f"Vsock bridge loop stopped for {self.vm_id}")
+
+    def _vsock_handle_upload(
+        self, client: socket.socket, cmd_id: str, path: str, size: int, checksum: str
+    ):
+        """Handles vsock file upload (host -> guest)."""
+        import hashlib
+        import base64
+
+        client.sendall(json.dumps({"type": "ready", "cmd_id": cmd_id}).encode() + b"\n")
+
+        received = 0
+        md5 = hashlib.md5()
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+        with open(path, "wb") as f:
+            while received < size:
+                try:
+                    data = client.recv(65536)
+                    if not data:
+                        break
+                    f.write(data)
+                    md5.update(data)
+                    received += len(data)
+                    client.sendall(
+                        json.dumps(
+                            {"type": "ack", "cmd_id": cmd_id, "bytes": received}
+                        ).encode()
+                        + b"\n"
+                    )
+                except socket.timeout:
+                    break
+
+        file_hash = md5.hexdigest()
+        if file_hash == checksum:
+            client.sendall(
+                json.dumps(
+                    {"type": "complete", "cmd_id": cmd_id, "size": received}
+                ).encode()
+                + b"\n"
+            )
+        else:
+            client.sendall(
+                json.dumps(
+                    {
+                        "type": "error",
+                        "cmd_id": cmd_id,
+                        "error": f"Checksum mismatch: expected {checksum}, got {file_hash}",
+                    }
+                ).encode()
+                + b"\n"
+            )
+
+    def _vsock_handle_download(self, client: socket.socket, cmd_id: str, path: str):
+        """Handles vsock file download (guest -> host)."""
+        import hashlib
+        import base64
+        import os
+
+        if not os.path.exists(path):
+            client.sendall(
+                json.dumps(
+                    {"type": "error", "cmd_id": cmd_id, "error": "File not found"}
+                ).encode()
+                + b"\n"
+            )
+            return
+
+        file_size = os.path.getsize(path)
+        md5 = hashlib.md5()
+
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                md5.update(chunk)
+                encoded = base64.b64encode(chunk).decode("utf-8")
+                client.sendall(
+                    json.dumps(
+                        {
+                            "type": "chunk",
+                            "cmd_id": cmd_id,
+                            "data": encoded,
+                            "size": len(chunk),
+                        }
+                    ).encode()
+                    + b"\n"
+                )
+
+        client.sendall(
+            json.dumps(
+                {
+                    "type": "complete",
+                    "cmd_id": cmd_id,
+                    "size": file_size,
+                    "checksum": md5.hexdigest(),
+                }
+            ).encode()
+            + b"\n"
+        )
+
+    def _cleanup_vsock_bridge(self):
+        """Cleans up vsock bridge resources."""
+        logger.debug(f"Cleaning up vsock bridge for {self.vm_id}")
+
+        self.vsock_bridge_running = False
+
+        # Close socket first
+        if self.vsock_bridge_socket:
+            try:
+                self.vsock_bridge_socket.close()
+                logger.debug("Closed vsock bridge socket")
+            except Exception as e:
+                logger.debug(f"Error closing vsock socket: {e}")
+            self.vsock_bridge_socket = None
+
+        # Wait for thread to stop (briefly)
+        if self.vsock_bridge_thread and self.vsock_bridge_thread.is_alive():
+            try:
+                self.vsock_bridge_thread.join(timeout=2)
+                logger.debug("Vsock bridge thread stopped")
+            except Exception:
+                pass
+            self.vsock_bridge_thread = None
+
+        # Remove socket file
+        socket_path = self.vsock_socket_path
+        if socket_path and os.path.exists(socket_path):
+            try:
+                os.unlink(socket_path)
+                logger.debug(f"Removed vsock socket: {socket_path}")
+            except Exception as e:
+                logger.warning(f"Failed to remove vsock socket {socket_path}: {e}")
+
+        self.vsock_socket_path = None
+        self.vsock_enabled = False
+        self.vsock_cid = None
+        self.vsock_port = None
+
+        if "BANDSOX_VSOCK_PORT" in self.env_vars:
+            del self.env_vars["BANDSOX_VSOCK_PORT"]
+
     @classmethod
     def create_from_snapshot(
         cls,
@@ -999,341 +1254,79 @@ class MicroVM:
         )
         return vm
 
-    def _run_debugfs(self, commands: list[str], write: bool = False):
-        """Runs debugfs commands on the rootfs."""
-        if not hasattr(self, "rootfs_path"):
-            raise Exception("VM not configured, rootfs_path unknown")
-
-        # Pause VM to prevent corruption if writing or reading inconsistent state
-        # We check status first?
-        # For simplicity, always pause/resume if process is running
-        was_running = False
-        if self.process and self.process.poll() is None:
-            # Check if already paused?
-            # We can just call pause(), it's idempotent-ish (Firecracker API might complain if already paused)
-            try:
-                self.pause()
-                was_running = True
-            except Exception:
-                pass  # Maybe already paused or not started fully
-
-        try:
-            # Construct debugfs command
-            # -w for write access
-            cmd = ["debugfs"]
-            if write:
-                cmd.append("-w")
-
-            # Join commands with ;
-            request = "; ".join(commands)
-            cmd.extend(["-R", request, self.rootfs_path])
-
-            logger.debug(f"Running debugfs: {cmd}")
-            result = subprocess.run(
-                cmd, capture_output=True, text=True
-            )  # debugfs output might be binary-ish?
-            # debugfs 'cat' dumps to stdout. If file is binary, text=True might fail or corrupt.
-            # For 'cat', we might need bytes.
-
-            if result.returncode != 0:
-                raise Exception(f"debugfs failed: {result.stderr}")
-
-            return result.stdout
-
-        finally:
-            if was_running:
-                try:
-                    self.resume()
-                except Exception:
-                    pass
-
     def get_file_contents(self, path: str) -> str:
         """Reads the contents of a file inside the VM."""
-        if self.agent_ready:
-            result = {}
+        if not self.agent_ready:
+            raise Exception("Agent not ready")
 
-            def on_file_content(c):
-                result["content"] = c
+        result = {}
 
-            self.send_request(
-                "read_file", {"path": path}, on_file_content=on_file_content
-            )
+        def on_file_content(c):
+            result["content"] = c
 
-            if "content" in result:
-                import base64
+        self.send_request("read_file", {"path": path}, on_file_content=on_file_content)
 
-                return base64.b64decode(result["content"]).decode("utf-8")
-            raise Exception(f"Failed to read {path} via agent")
+        if "content" in result:
+            import base64
 
-        # debugfs fallback
-        if not hasattr(self, "rootfs_path"):
-            raise Exception("VM not configured")
-
-        was_running = False
-        if self.process and self.process.poll() is None:
-            try:
-                self.pause()
-                was_running = True
-            except Exception:
-                pass
-
-        try:
-            cmd = ["debugfs", "-R", f"cat {path}", self.rootfs_path]
-            # Use bytes for output
-            result = subprocess.run(cmd, capture_output=True)
-            if result.returncode != 0:
-                # debugfs might print error to stderr
-                err = result.stderr.decode("utf-8", errors="ignore")
-                raise FileNotFoundError(f"Failed to read {path}: {err}")
-
-            return result.stdout.decode("utf-8")
-        finally:
-            if was_running:
-                try:
-                    self.resume()
-                except Exception:
-                    pass
+            return base64.b64decode(result["content"]).decode("utf-8")
+        raise Exception(f"Failed to read {path} via agent")
 
     def list_dir(self, path: str) -> list:
         """Lists directory contents."""
-        # Try agent first
-        if hasattr(self, "wait_for_agent"):
-            try:
-                if self.wait_for_agent(timeout=1):
-                    result = {}
+        if not self.agent_ready:
+            raise Exception("Agent not ready")
 
-                    def on_dir_list(files):
-                        result["files"] = files
+        result = {}
 
-                    self.send_request(
-                        "list_dir", {"path": path}, on_dir_list=on_dir_list
-                    )
-                    return result.get("files", [])
-            except Exception:
-                pass  # Fallback to debugfs
+        def on_dir_list(files):
+            result["files"] = files
 
-        # Fallback to debugfs
-        if not hasattr(self, "rootfs_path"):
-            raise Exception("VM not configured")
-
-        # Need to pause for debugfs safety if running
-        was_running = False
-        if self.process and self.process.poll() is None:
-            try:
-                self.pause()
-                was_running = True
-            except Exception:
-                pass
-
-        try:
-            # list directory with debugfs
-            cmd = ["debugfs", "-R", f"ls -l {path}", self.rootfs_path]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                try:
-                    # Retry without -l if it fails? No, simpler ls provides less info.
-                    pass
-                except:
-                    pass
-
-            # Parse output
-            files = []
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                if not line or line.startswith("/"):
-                    continue
-
-                # Format: inode mode (links) uid gid size date time name
-                # Example:   2  40755 (2)      0      0    4096  6-Dec-2025 14:26 .
-                parts = line.split()
-                if len(parts) >= 8:
-                    try:
-                        # Depending on debugfs version/output, fields might vary slightly.
-                        # Assuming: inode, mode, (links), uid, gid, size, date, time, name
-                        # mode is octal usually
-
-                        # Find indices
-                        # Mode is 2nd usually
-                        mode_oct = parts[1]
-                        mode = int(mode_oct, 8)
-
-                        # Size is usually 6th (index 5) if links is split?
-                        # (2) might be one token or split. line.split() handles spaces.
-                        # (2) -> "(2)" is one token
-                        # so: 0:inode, 1:mode, 2:(links), 3:uid, 4:gid, 5:size, 6:date, 7:time, 8:name
-
-                        size = int(parts[5])
-                        name = " ".join(parts[8:])  # Handle spaces in filename?
-
-                        is_dir = (mode & 0o40000) == 0o40000
-                        is_file = (mode & 0o100000) == 0o100000
-
-                        if name == "." or name == "..":
-                            continue
-
-                        files.append(
-                            {
-                                "name": name,
-                                "type": "directory" if is_dir else "file",
-                                "size": size,
-                                "mode": mode,
-                                "mtime": 0,  # TODO: Parse date/time
-                            }
-                        )
-                    except (ValueError, IndexError):
-                        pass
-
-            return files
-
-        finally:
-            if was_running:
-                try:
-                    self.resume()
-                except Exception:
-                    pass
+        self.send_request("list_dir", {"path": path}, on_dir_list=on_dir_list)
+        return result.get("files", [])
 
     def download_file(self, remote_path: str, local_path: str):
         """Downloads a file from the VM to the local filesystem."""
-        if self.agent_ready:
-            result = {}
+        if not self.agent_ready:
+            raise Exception("Agent not ready")
 
-            def on_file_content(c):
-                result["content"] = c
+        result = {}
 
-            self.send_request(
-                "read_file", {"path": remote_path}, on_file_content=on_file_content
-            )
+        def on_file_content(c):
+            result["content"] = c
 
-            if "content" in result:
-                import base64
+        self.send_request(
+            "read_file", {"path": remote_path}, on_file_content=on_file_content
+        )
 
-                data = base64.b64decode(result["content"])
+        if "content" in result:
+            import base64
 
-                local_path = os.path.abspath(local_path)
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            data = base64.b64decode(result["content"])
 
-                with open(local_path, "wb") as f:
-                    f.write(data)
-                return
-            raise Exception(f"Failed to download {remote_path} via agent")
+            local_path = os.path.abspath(local_path)
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
-        if not hasattr(self, "rootfs_path"):
-            raise Exception("VM not configured")
-
-        was_running = False
-        if self.process and self.process.poll() is None:
-            try:
-                self.pause()
-                was_running = True
-            except Exception:
-                pass
-
-        try:
-            # debugfs dump command: dump remote_path local_path
-            # But local_path must be absolute or relative to cwd?
-            # debugfs writes to filesystem directly.
-
-            # Ensure local directory exists
-            local_dir = os.path.dirname(os.path.abspath(local_path))
-            os.makedirs(local_dir, exist_ok=True)
-
-            # debugfs 'dump' might not overwrite?
-            if os.path.exists(local_path):
-                os.unlink(local_path)
-
-            cmd = [
-                "debugfs",
-                "-R",
-                f"dump {remote_path} {local_path}",
-                self.rootfs_path,
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-
-            if result.returncode != 0:
-                raise Exception(f"Failed to download {remote_path}: {result.stderr}")
-
-            if not os.path.exists(local_path):
-                raise FileNotFoundError(f"File not downloaded: {remote_path}")
-
-        finally:
-            if was_running:
-                try:
-                    self.resume()
-                except Exception:
-                    pass
+            with open(local_path, "wb") as f:
+                f.write(data)
+            return
+        raise Exception(f"Failed to download {remote_path} via agent")
 
     def upload_file(self, local_path: str, remote_path: str):
         """Uploads a file from local filesystem to the VM."""
         if not os.path.exists(local_path):
             raise FileNotFoundError(f"Local file not found: {local_path}")
 
-        if self.agent_ready:
-            with open(local_path, "rb") as f:
-                content = f.read()
-            import base64
+        if not self.agent_ready:
+            raise Exception("Agent not ready")
 
-            encoded = base64.b64encode(content).decode("utf-8")
+        with open(local_path, "rb") as f:
+            content = f.read()
+        import base64
 
-            self.send_request("write_file", {"path": remote_path, "content": encoded})
-            return
+        encoded = base64.b64encode(content).decode("utf-8")
 
-        if not hasattr(self, "rootfs_path"):
-            raise Exception("VM not configured")
-
-        was_running = False
-        if self.process and self.process.poll() is None:
-            try:
-                self.pause()
-                was_running = True
-            except Exception:
-                pass
-
-        try:
-            # debugfs write command: write local_path remote_path
-            # It creates the file. If it exists, does it overwrite?
-            # We might need to rm first.
-
-            # Ensure remote directory exists? debugfs mkdir?
-            remote_dir = os.path.dirname(remote_path)
-            if remote_dir and remote_dir != "/":
-                # Recursive mkdir is hard with debugfs.
-                # We can try to make it.
-                # debugfs doesn't have mkdir -p.
-                # We'll assume parent dirs exist or try to create immediate parent.
-                # Or we can iterate path components.
-                parts = remote_dir.strip("/").split("/")
-                current = ""
-                for part in parts:
-                    current += f"/{part}"
-                    subprocess.run(
-                        ["debugfs", "-w", "-R", f"mkdir {current}", self.rootfs_path],
-                        capture_output=True,
-                    )
-
-            # Remove existing file to ensure overwrite
-            subprocess.run(
-                ["debugfs", "-w", "-R", f"rm {remote_path}", self.rootfs_path],
-                capture_output=True,
-            )
-
-            cmd = [
-                "debugfs",
-                "-w",
-                "-R",
-                f"write {local_path} {remote_path}",
-                self.rootfs_path,
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-
-            if result.returncode != 0:
-                raise Exception(f"Failed to upload {local_path}: {result.stderr}")
-
-        finally:
-            if was_running:
-                try:
-                    self.resume()
-                except Exception:
-                    pass
+        self.send_request("write_file", {"path": remote_path, "content": encoded})
 
     def upload_folder(
         self,
@@ -1343,150 +1336,62 @@ class MicroVM:
         skip_pattern: list[str] = None,
     ):
         """
-        Uploads a folder recursively.
+        Uploads a folder recursively using agent file operations.
         """
         import fnmatch
+        from pathlib import Path
 
         local_path = Path(local_path)
         if not local_path.is_dir():
             raise NotADirectoryError(f"Local path is not a directory: {local_path}")
 
-        # We can't easily batch this in one debugfs session without complex logic,
-        # so we'll just call upload_file for each file.
-        # This will pause/resume for EACH file, which is slow.
-        # Optimization: Pause ONCE here, then run raw debugfs commands, then resume.
+        if not self.agent_ready:
+            raise Exception("Agent not ready")
 
-        if not hasattr(self, "rootfs_path"):
-            raise Exception("VM not configured")
+        for root, dirs, files in os.walk(local_path):
+            rel_root = Path(root).relative_to(local_path)
+            remote_root = Path(remote_path) / rel_root
 
-        was_running = False
-        if self.process and self.process.poll() is None:
-            try:
-                self.pause()
-                was_running = True
-            except Exception:
-                pass
+            if skip_pattern:
+                for d in list(dirs):
+                    if any(fnmatch.fnmatch(d, sp) for sp in skip_pattern):
+                        dirs.remove(d)
 
-        try:
-            # Create remote root dir
-            subprocess.run(
-                ["debugfs", "-w", "-R", f"mkdir {remote_path}", self.rootfs_path],
-                capture_output=True,
-            )
+            for d in dirs:
+                r_dir = remote_root / d
+                logger.debug(f"Creating remote dir: {r_dir}")
+                self.send_request(
+                    "exec",
+                    {
+                        "command": f"mkdir -p {r_dir}",
+                        "background": False,
+                        "env": self.env_vars,
+                    },
+                )
 
-            for root, dirs, files in os.walk(local_path):
-                rel_root = Path(root).relative_to(local_path)
-                remote_root = Path(remote_path) / rel_root
+            for file in files:
+                if pattern and not fnmatch.fnmatch(file, pattern):
+                    continue
+                if skip_pattern and any(
+                    fnmatch.fnmatch(file, sp) for sp in skip_pattern
+                ):
+                    continue
 
-                if skip_pattern:
-                    for d in list(dirs):
-                        if any(fnmatch.fnmatch(d, sp) for sp in skip_pattern):
-                            dirs.remove(d)
+                local_file_path = str(Path(root) / file)
+                remote_file_path = str(remote_root / file)
 
-                # Create subdirs
-                for d in dirs:
-                    r_dir = remote_root / d
-                    logger.debug(f"Creating remote dir: {r_dir}")
-                    subprocess.run(
-                        ["debugfs", "-w", "-R", f"mkdir {r_dir}", self.rootfs_path],
-                        capture_output=True,
-                    )
-
-                for file in files:
-                    if pattern and not fnmatch.fnmatch(file, pattern):
-                        continue
-                    if skip_pattern and any(
-                        fnmatch.fnmatch(file, sp) for sp in skip_pattern
-                    ):
-                        continue
-
-                    local_file_path = str(Path(root) / file)
-                    remote_file_path = str(remote_root / file)
-
-                    logger.debug(f"Uploading {local_file_path} to {remote_file_path}")
-
-                    # Remove existing
-                    subprocess.run(
-                        [
-                            "debugfs",
-                            "-w",
-                            "-R",
-                            f"rm {remote_file_path}",
-                            self.rootfs_path,
-                        ],
-                        capture_output=True,
-                    )
-
-                    # Write
-                    cmd = [
-                        "debugfs",
-                        "-w",
-                        "-R",
-                        f"write {local_file_path} {remote_file_path}",
-                        self.rootfs_path,
-                    ]
-                    res = subprocess.run(cmd, capture_output=True, text=True)
-                    if res.returncode != 0:
-                        logger.warning(
-                            f"Failed to upload {local_file_path}: {res.stderr}"
-                        )
-                    else:
-                        logger.debug(f"Uploaded {local_file_path}")
-
-        finally:
-            if was_running:
-                try:
-                    self.resume()
-                except Exception:
-                    pass
+                logger.debug(f"Uploading {local_file_path} to {remote_file_path}")
+                self.upload_file(local_file_path, remote_file_path)
 
     def get_file_info(self, path: str) -> dict:
         """Gets file information (size, mtime, etc.) from the VM."""
-        # debugfs 'stat' command
-        output = self._run_debugfs([f"stat {path}"])
+        if not self.agent_ready:
+            raise Exception("Agent not ready")
 
-        info = {}
-        # Parse stat output
-        # Inode: 101   Type: directory    Mode:  0755   Flags: 0x80000
-        # User:     0   Group:     0   Project:     0   Size: 4096
-        # ...
+        result = {}
 
-        import re
+        def on_file_info(info):
+            result["info"] = info
 
-        # Parse Type field
-        type_match = re.search(r"Type:\s+(\w+)", output)
-        if type_match:
-            file_type = type_match.group(1).lower()
-            info["is_dir"] = file_type == "directory"
-            info["is_file"] = file_type in ["regular", "file"]
-        else:
-            # Fallback to mode parsing if Type not found
-            mode_match = re.search(r"Mode:\s+(\\d+)", output)
-            if mode_match:
-                mode_oct = int(mode_match.group(1), 8)
-                info["mode"] = mode_oct
-                info["is_dir"] = (mode_oct & 0o40000) != 0
-                info["is_file"] = (mode_oct & 0o100000) != 0
-            else:
-                info["is_dir"] = False
-                info["is_file"] = True
-
-        size_match = re.search(r"Size:\s+(\d+)", output)
-        if size_match:
-            info["size"] = int(size_match.group(1))
-
-        # Time parsing
-        # mtime: 0x6752c0d5:b34c0000 -- Thu Dec  5 14:35:33 2024
-        # Extract the hex timestamp
-
-        def parse_time(label):
-            m = re.search(f"{label}: 0x([0-9a-fA-F]+)", output)
-            if m:
-                return int(m.group(1), 16)
-            return 0
-
-        info["mtime"] = parse_time("mtime")
-        info["ctime"] = parse_time("ctime")
-        info["atime"] = parse_time("atime")
-
-        return info
+        self.send_request("file_info", {"path": path}, on_file_info=on_file_info)
+        return result.get("info", {})
