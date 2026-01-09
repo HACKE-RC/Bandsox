@@ -768,30 +768,15 @@ def main():
                     content = req.get("content")
                     append = req.get("append", False)
 
-                    # Try vsock connection first
-                    vsock_port = int(os.environ.get("BANDSOX_VSOCK_PORT", "9000"))
-                    if vsock_connect(vsock_port):
-                        # Vsock connected, use vsock handler
-                        size = len(base64.b64decode(content))
-                        checksum = hashlib.md5(base64.b64decode(content)).hexdigest()
-                        t = threading.Thread(
-                            target=handle_vsock_upload,
-                            args=(cmd_id, path, size, checksum),
-                            daemon=True,
-                        )
-                        t.start()
-                    else:
-                        # Fall back to serial
-                        sys.stderr.write(
-                            f"WARNING: Vsock connection failed for write_file, using serial\n"
-                        )
-                        sys.stderr.flush()
-                        t = threading.Thread(
-                            target=handle_write_file,
-                            args=(cmd_id, path, content, "wb", append),
-                            daemon=True,
-                        )
-                        t.start()
+                    # Content is already in the request (sent via serial/multiplexer)
+                    # Use handle_write_file directly - vsock upload is only for
+                    # explicit vsock_upload requests where data streams via vsock
+                    t = threading.Thread(
+                        target=handle_write_file,
+                        args=(cmd_id, path, content, "wb", append),
+                        daemon=True,
+                    )
+                    t.start()
 
                 elif req_type == "list_dir":
                     path = req.get("path")
