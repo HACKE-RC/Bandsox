@@ -3,6 +3,7 @@ import subprocess
 import uuid
 import logging
 import shutil
+import json
 from pathlib import Path
 from .vm import MicroVM, DEFAULT_KERNEL_PATH
 from .image import build_rootfs
@@ -26,6 +27,17 @@ class BandSox:
         self.metadata_dir.mkdir(exist_ok=True)
 
         self.active_vms = {}  # vm_id -> MicroVM instance
+
+        self.cid_allocator_path = self.storage_dir / "cid_allocator.json"
+        self.port_allocator_path = self.storage_dir / "port_allocator.json"
+
+        if not self.cid_allocator_path.exists():
+            with open(self.cid_allocator_path, "w") as f:
+                json.dump({"free_cids": [], "next_cid": 3}, f)
+
+        if not self.port_allocator_path.exists():
+            with open(self.port_allocator_path, "w") as f:
+                json.dump({"next_port": 9000, "used_ports": []}, f)
 
         # Ensure kernel exists or warn with remediation steps
         if not os.path.exists(DEFAULT_KERNEL_PATH):
@@ -78,86 +90,102 @@ class BandSox:
         logger.info(f"Cloned rootfs to {dest.name} via {method} in {elapsed:.2f}s")
         return method
 
+    def _allocate_cid(self) -> int:
+        """Allocates a unique CID for a VM using free-list approach."""
+        with open(self.cid_allocator_path, "r") as f:
+            state = json.load(f)
+
+        free_cids = state.get("free_cids", [])
+        if free_cids:
+            cid = free_cids.pop(0)
+            state["free_cids"] = free_cids
+        else:
+            cid = state["next_cid"]
+            state["next_cid"] = cid + 1
+
+        with open(self.cid_allocator_path, "w") as f:
+            json.dump(state, f)
+
+        logger.debug(f"Allocated CID: {cid}")
+        return cid
+
+    def _release_cid(self, cid: int):
+        """Releases a CID back to the pool using free-list."""
+        logger.debug(f"Released CID: {cid}")
+        with open(self.cid_allocator_path, "r") as f:
+            state = json.load(f)
+
+        if "free_cids" not in state:
+            state["free_cids"] = []
+
+        if cid not in state["free_cids"] and cid >= 3:
+            state["free_cids"].append(cid)
+            state["free_cids"].sort()
+
+        with open(self.cid_allocator_path, "w") as f:
+            json.dump(state, f)
+
+    def _allocate_port(self) -> int:
+        """Allocates a unique port for vsock communication."""
+        with open(self.port_allocator_path, "r") as f:
+            state = json.load(f)
+
+        # Allocate next port and add to used_ports
+        port = state["next_port"]
+        if port < 10000:
+            state["next_port"] = port + 1
+        else:
+            # Wrap around to 9000
+            port = 9000
+            state["next_port"] = 9001
+
+        # Track this port as in-use
+        if "used_ports" not in state:
+            state["used_ports"] = []
+        state["used_ports"].append(port)
+
+        with open(self.port_allocator_path, "w") as f:
+            json.dump(state, f)
+
+        logger.debug(f"Allocated port: {port}")
+        return port
+
+    def _release_port(self, port: int):
+        """Releases a port back to the pool."""
+        with open(self.port_allocator_path, "r") as f:
+            state = json.load(f)
+
+        if "used_ports" in state and port in state["used_ports"]:
+            state["used_ports"].remove(port)
+            with open(self.port_allocator_path, "w") as f:
+                json.dump(state, f)
+            logger.debug(f"Released port: {port}")
+
+    def _check_vsock_compatibility(self, vm_id: str):
+        """Check if VM metadata has vsock_config for compatibility.
+
+        Args:
+            vm_id: VM ID to check
+
+        Raises:
+            Exception: If VM doesn't have vsock_config (old VM)
+        """
+        meta = self._get_metadata(vm_id)
+        if not meta.get("vsock_config"):
+            raise Exception(
+                f"VM '{vm_id}' requires vsock support. "
+                "This VM was created before vsock was enabled. "
+                "Please recreate the VM using the create command. "
+                "See VSOCK_MIGRATION.md for detailed migration instructions."
+            )
+        return meta
+
     def update_vm_status(self, vm_id: str, status: str):
         """Updates the status field in the VM metadata."""
         meta = self._get_metadata(vm_id)
         if meta:
             meta["status"] = status
             self._save_metadata(vm_id, meta)
-
-    def _inject_agent(self, rootfs_path: str):
-        """Injects the current agent.py into the rootfs."""
-        agent_path = Path(os.path.dirname(__file__)) / "agent.py"
-        if not agent_path.exists():
-            logger.warning("Agent script not found, cannot inject.")
-            return
-
-        import subprocess
-
-        try:
-            # Remove existing agent
-            # We don't check output as it might not exist
-            subprocess.run(
-                ["debugfs", "-w", "-R", "rm /usr/local/bin/agent.py", rootfs_path],
-                capture_output=True,
-            )
-
-            # Write new agent
-            cmd = [
-                "debugfs",
-                "-w",
-                "-R",
-                f"write {agent_path} /usr/local/bin/agent.py",
-                rootfs_path,
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-
-            if result.returncode != 0:
-                logger.error(f"Failed to inject agent: {result.stderr}")
-            else:
-                # Set permissions? debugfs write creates with root owner 0644 or similar?
-                # We need it executable 0755
-                # debugfs doesn't support chmod easily?
-                # It copies mode from source? No.
-                # debugfs 'sif' set inode field? 'sif /usr/local/bin/agent.py mode 0100755'
-                subprocess.run(
-                    [
-                        "debugfs",
-                        "-w",
-                        "-R",
-                        "sif /usr/local/bin/agent.py mode 0100755",
-                        rootfs_path,
-                    ],
-                    capture_output=True,
-                )
-
-                logger.debug(f"Injected agent into {rootfs_path}")
-        except Exception as e:
-            logger.error(f"Failed to inject agent: {e}")
-
-    def _agent_up_to_date(self, rootfs_path: str) -> bool:
-        """Check if the agent in rootfs matches the current agent.py file."""
-        import hashlib
-
-        agent_path = Path(os.path.dirname(__file__)) / "agent.py"
-        if not agent_path.exists():
-            return False
-
-        try:
-            result = subprocess.run(
-                ["debugfs", "-R", "cat /usr/local/bin/agent.py", rootfs_path],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0 or not result.stdout:
-                return False
-
-            current_hash = hashlib.sha256(agent_path.read_bytes()).hexdigest()
-            rootfs_hash = hashlib.sha256(result.stdout.encode()).hexdigest()
-            return current_hash == rootfs_hash
-        except Exception as e:
-            logger.debug(f"Failed to check agent version: {e}")
-            return False
 
     def create_vm(
         self,
@@ -167,6 +195,7 @@ class BandSox:
         mem_mib: int = 128,
         kernel_path: str = DEFAULT_KERNEL_PATH,
         enable_networking: bool = True,
+        enable_vsock: bool = True,
         force_rebuild: bool = False,
         disk_size_mib: int = 4096,
         env_vars: dict = None,
@@ -194,10 +223,6 @@ class BandSox:
         # Copy to instance specific path
         instance_rootfs = self.images_dir / f"{vm_id}.ext4"
         self._clone_rootfs(base_rootfs, instance_rootfs)
-
-        # Inject latest agent (skip if base rootfs already has up-to-date agent)
-        if not self._agent_up_to_date(str(base_rootfs)):
-            self._inject_agent(str(instance_rootfs))
 
         # Resize if needed
         # Check current size
@@ -241,30 +266,36 @@ class BandSox:
             vcpu,
             mem_mib,
             enable_networking=enable_networking,
+            enable_vsock=enable_vsock,
         )
 
         if env_vars:
             vm.env_vars = env_vars
 
-        # 4. Start VM
         vm.start()
 
-        # Save metadata
         import time
+
+        vsock_config = None
+        if enable_vsock and vm.vsock_enabled:
+            vsock_config = {
+                "enabled": True,
+                "cid": vm.vsock_cid,
+                "port": vm.vsock_port,
+            }
 
         self._save_metadata(
             vm_id,
             {
                 "id": vm_id,
-                "name": name,  # Store name as-is, None if not provided
+                "name": name,
                 "image": docker_image,
                 "vcpu": vcpu,
                 "mem_mib": mem_mib,
                 "disk_size_mib": disk_size_mib,
-                "rootfs_path": str(
-                    instance_rootfs
-                ),  # Save rootfs path for file operations
+                "rootfs_path": str(instance_rootfs),
                 "network_config": getattr(vm, "network_config", None),
+                "vsock_config": vsock_config,
                 "created_at": time.time(),
                 "status": "running",
                 "pid": vm.process.pid,
@@ -495,7 +526,6 @@ class BandSox:
 
         if snap_rootfs and os.path.exists(snap_rootfs):
             self._clone_rootfs(snap_rootfs, instance_rootfs)
-            self._inject_agent(str(instance_rootfs))
 
         # Try to load snapshot
         created_symlink = None
@@ -648,7 +678,9 @@ class BandSox:
         self.active_vms[new_vm_id] = vm
         return vm
 
-    def snapshot_vm(self, vm: MicroVM, snapshot_name: str = None, metadata: dict = None) -> str:
+    def snapshot_vm(
+        self, vm: MicroVM, snapshot_name: str = None, metadata: dict = None
+    ) -> str:
         """Snapshot a VM without changing its pre-snapshot running/paused state."""
         if not snapshot_name:
             snapshot_name = (
@@ -697,7 +729,9 @@ class BandSox:
                 source_rootfs
             ),  # Original path for reference/symlink matching
             "network_config": vm_meta.get("network_config"),
-            "metadata": metadata if metadata is not None else vm_meta.get("metadata", {}),
+            "metadata": metadata
+            if metadata is not None
+            else vm_meta.get("metadata", {}),
             "created_at": os.path.getmtime(str(snapshot_path))
             if os.path.exists(str(snapshot_path))
             else None,
@@ -1014,7 +1048,13 @@ class ManagedMicroVM(MicroVM):
             raise e
 
     def stop(self):
-        # Try to kill by PID if available
+        if self.vsock_enabled:
+            if hasattr(self, "bandsox") and self.bandsox:
+                if self.vsock_cid:
+                    self.bandsox._release_cid(self.vsock_cid)
+                if self.vsock_port:
+                    self.bandsox._release_port(self.vsock_port)
+
         meta = self.bandsox._get_metadata(self.vm_id)
         pid = meta.get("pid")
 
@@ -1023,19 +1063,16 @@ class ManagedMicroVM(MicroVM):
 
             try:
                 os.kill(pid, signal.SIGTERM)
-                # Wait a bit? We can't waitpid on non-child easily without loop
-                # Just send kill if it doesn't die
                 time.sleep(0.5)
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
-                pass  # Already dead
+                pass
             except PermissionError:
                 logger.error(f"Permission denied killing PID {pid}")
 
         super().stop()
         self.bandsox.update_vm_status(self.vm_id, "stopped")
 
-        # Also clear agent_ready in metadata
         meta = self.bandsox._get_metadata(self.vm_id)
         if meta.get("agent_ready"):
             meta["agent_ready"] = False
