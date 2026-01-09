@@ -11,6 +11,10 @@ BandSox has switched from debugfs to vsock-based file transfers, providing 100-1
 VMs created before this update **will not start** because they lack vsock configuration metadata. You will see an error like:
 
 ```
+VM requires vsock support. Please recreate VM to enable vsock.
+```
+
+**Solution**: Use the automated migration tool to add vsock_config to existing VMs (see Step 2). This is the recommended approach as it preserves all your data and requires no rebuild.
 VM requires vsock support. Please recreate the VM to enable vsock.
 ```
 
@@ -38,7 +42,27 @@ sudo python3 -m bandsox.cli download <old_vm_id> /path/in/vm /local/path
 sudo python3 -m bandsox.cli stop <old_vm_id>
 ```
 
-### Step 2: Remove Old VMs
+### Step 2: Migrate Existing VMs (Recommended)
+
+**Use the automated migration tool** to add vsock_config to all existing VMs:
+
+```bash
+# Migrate all stopped VMs and snapshots
+sudo python3 add_vsock_to_existing.py
+```
+
+The migration tool will:
+- ✓ Add vsock_config to all stopped VMs
+- ✓ Add vsock_config to all snapshots
+- ✓ Allocate unique CIDs and ports automatically
+- ✓ Skip running VMs (to avoid corruption)
+- ✓ Preserve all existing metadata
+
+After running the migration tool, stopped VMs and snapshots will have vsock support. Running VMs will get vsock_config when stopped and restarted.
+
+### Step 3: Remove Old VMs (Optional)
+
+If you prefer to manually recreate VMs instead of using the migration tool:
 
 ```bash
 # List VMs
