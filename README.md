@@ -120,6 +120,7 @@ This is **100-10,000x faster** than traditional serial-based file transfers!
 - File operations automatically use vsock when available
 - Falls back gracefully to serial if vsock module is unavailable
 - No VM pause required during transfers
+- **Snapshot support**: Restored VMs automatically re-establish vsock connections
 
 ### Checking Vsock Status
 
@@ -261,6 +262,7 @@ Default: `/var/lib/bandsox` (override with `BANDSOX_STORAGE` env var)
 
 - Full library, CLI, and HTTP endpoint reference: [`API_DOCUMENTATION.md`](API_DOCUMENTATION.md)
 - Vsock migration guide: [`VSOCK_MIGRATION.md`](VSOCK_MIGRATION.md)
+- Vsock restoration fix: [`VSOCK_RESTORATION_FIX.md`](VSOCK_RESTORATION_FIX.md)
 - REST base path: `http://<host>:<port>/api` (see docs for endpoints such as `/api/vms`, `/api/snapshots`, `/api/vms/{id}/terminal` WebSocket)
 
 ## Building a local base rootfs (no hosting required)
