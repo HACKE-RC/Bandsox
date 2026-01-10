@@ -223,7 +223,7 @@ def handle_command(cmd_id, command, background=False, env=None):
             t_mon = threading.Thread(target=monitor_exit, daemon=True)
             t_mon.start()
 
-            send_event("status", {"cmd_id": cmd_id, "status": "started"})
+            send_event("status", {"cmd_id": cmd_id, "status": "started", "pid": process.pid})
 
         else:
             # Blocking execution (legacy)
@@ -400,17 +400,14 @@ def handle_write_file(cmd_id, path, content, mode="wb", append=False):
 
 
 def handle_vsock_upload(cmd_id, path: str, size: int, checksum: str):
-    """Handles vsock-based file upload.
+    """Handles vsock-based file upload (raw binary).
 
     Protocol:
-    1. Guest receives upload request from host
-    2. Guest sends "ready" response
-    3. Guest receives file data chunks
-    4. Guest writes chunks to disk
-    5. Guest acknowledges each chunk
-    6. Guest receives verify request
-    7. Guest verifies checksum
-    8. Guest sends "complete" response
+    1. Guest receives upload request with path, size, checksum
+    2. Guest sends "ready" response via vsock
+    3. Guest receives raw binary data until size bytes received
+    4. Guest verifies checksum
+    5. Guest sends "complete" or "error" response
 
     Args:
         cmd_id: Command ID for responses
@@ -418,123 +415,62 @@ def handle_vsock_upload(cmd_id, path: str, size: int, checksum: str):
         size: File size in bytes
         checksum: MD5 checksum for verification
     """
+    global vsock_socket
+    
     try:
         # Ensure directory exists
         dirname = os.path.dirname(path)
         if dirname:
             os.makedirs(dirname, exist_ok=True)
 
-        # Send ready response
-        vsock_send_json(
-            {
-                "type": "status",
-                "payload": {"cmd_id": cmd_id, "type": "ready", "path": path},
-            }
-        )
+        # Send ready response via vsock
+        ready_msg = json.dumps({"type": "ready", "cmd_id": cmd_id}).encode() + b"\n"
+        vsock_socket.sendall(ready_msg)
 
-        # Receive file data
+        # Receive raw binary file data
         received_bytes = 0
+        md5 = hashlib.md5()
+        
         with open(path, "wb") as f:
             while received_bytes < size:
-                # Read line from vsock
-                try:
-                    line = vsock_read_line()
+                remaining = size - received_bytes
+                chunk_size = min(65536, remaining)
+                chunk = vsock_socket.recv(chunk_size)
+                if not chunk:
+                    raise Exception("Connection closed during upload")
+                f.write(chunk)
+                md5.update(chunk)
+                received_bytes += len(chunk)
 
-                    # Try to parse as JSON first
-                    try:
-                        data = json.loads(line)
-                        if data.get("type") == "verify":
-                            # Verify request received
-                            # Need to verify the checksum
-                            # We have the file handle, so let's verify
-                            f.flush()
-                            f.seek(0)
-                            file_content = f.read()
-                            file_checksum = hashlib.md5(file_content).hexdigest()
-
-                            if file_checksum == checksum:
-                                vsock_send_json(
-                                    {
-                                        "type": "status",
-                                        "payload": {
-                                            "cmd_id": cmd_id,
-                                            "type": "complete",
-                                            "size": size,
-                                        },
-                                    }
-                                )
-                                vsock_disconnect()
-                                send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
-                                return
-                            else:
-                                vsock_send_json(
-                                    {
-                                        "type": "error",
-                                        "payload": {
-                                            "cmd_id": cmd_id,
-                                            "error": f"Checksum mismatch: expected {checksum}, got {file_checksum}",
-                                        },
-                                    }
-                                )
-                                vsock_disconnect()
-                                send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
-                                return
-                        # Other JSON metadata ignored
-                        continue
-                    except json.JSONDecodeError:
-                        # Binary data - decode and write to file
-                        chunk = base64.b64decode(line)
-                        f.write(chunk)
-                        received_bytes += len(chunk)
-
-                        # Send acknowledgment
-                        vsock_send_json(
-                            {
-                                "type": "status",
-                                "payload": {
-                                    "cmd_id": cmd_id,
-                                    "type": "ack",
-                                    "bytes": received_bytes,
-                                },
-                            }
-                        )
-
-                except Exception as e:
-                    vsock_send_json(
-                        {
-                            "type": "error",
-                            "payload": {
-                                "cmd_id": cmd_id,
-                                "error": f"Vsock upload failed: {e}",
-                            },
-                        }
-                    )
-                    vsock_disconnect()
-                    send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
-                    return
-
-        # If complete request not received, assume done
-        vsock_send_json(
-            {
-                "type": "status",
-                "payload": {
-                    "cmd_id": cmd_id,
-                    "type": "complete",
-                    "size": received_bytes,
-                },
-            }
-        )
-        vsock_disconnect()
-        send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
+        # Verify checksum
+        file_checksum = md5.hexdigest()
+        if file_checksum == checksum:
+            complete_msg = json.dumps({
+                "type": "complete",
+                "cmd_id": cmd_id,
+                "size": received_bytes
+            }).encode() + b"\n"
+            vsock_socket.sendall(complete_msg)
+            send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
+        else:
+            error_msg = json.dumps({
+                "type": "error",
+                "cmd_id": cmd_id,
+                "error": f"Checksum mismatch: expected {checksum}, got {file_checksum}"
+            }).encode() + b"\n"
+            vsock_socket.sendall(error_msg)
+            send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
 
     except Exception as e:
-        vsock_send_json(
-            {
+        try:
+            error_msg = json.dumps({
                 "type": "error",
-                "payload": {"cmd_id": cmd_id, "error": f"Vsock upload failed: {e}"},
-            }
-        )
-        vsock_disconnect()
+                "cmd_id": cmd_id,
+                "error": str(e)
+            }).encode() + b"\n"
+            vsock_socket.sendall(error_msg)
+        except:
+            pass
         send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
 
 

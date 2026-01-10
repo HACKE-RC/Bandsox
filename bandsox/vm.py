@@ -270,9 +270,18 @@ class MicroVM:
             evt_type = event.get("type")
             payload = event.get("payload")
 
-            if evt_type == "status" and payload.get("status") == "ready":
-                self.agent_ready = True
-                logger.info("Agent is ready")
+            if evt_type == "status":
+                status = payload.get("status")
+                if status == "ready":
+                    self.agent_ready = True
+                    logger.info("Agent is ready")
+                elif status == "started":
+                    cmd_id = payload.get("cmd_id")
+                    pid = payload.get("pid")
+                    if cmd_id in self.event_callbacks:
+                        cb = self.event_callbacks[cmd_id].get("on_started")
+                        if cb:
+                            cb(pid)
 
             elif evt_type == "output":
                 cmd_id = payload.get("cmd_id")
@@ -670,8 +679,13 @@ class MicroVM:
 
     def start_session(
         self, command: str, on_stdout=None, on_stderr=None, on_exit=None
-    ) -> str:
-        """Starts a background session in the VM."""
+    ) -> tuple[str, int | None]:
+        """Starts a background session in the VM.
+        
+        Returns:
+            tuple: (session_id, pid) where pid is the process ID of the started command,
+                   or None if the PID could not be retrieved within 5 seconds.
+        """
         if not self.agent_ready:
             if not self.process and not self.console_conn:
                 self.connect_to_console()
@@ -679,11 +693,20 @@ class MicroVM:
                 raise Exception("Agent not ready")
 
         session_id = str(uuid.uuid4())
+        
+        # Event to signal when we receive the started status with PID
+        started_event = threading.Event()
+        pid_result = {"pid": None}
+        
+        def on_started(pid):
+            pid_result["pid"] = pid
+            started_event.set()
 
         self.event_callbacks[session_id] = {
             "on_stdout": on_stdout,
             "on_stderr": on_stderr,
             "on_exit": on_exit,
+            "on_started": on_started,
         }
 
         req = json.dumps(
@@ -696,8 +719,11 @@ class MicroVM:
             }
         )
         self._write_to_agent(req + "\n")
+        
+        # Wait for the started event with PID (max 5 seconds)
+        started_event.wait(timeout=5)
 
-        return session_id
+        return (session_id, pid_result["pid"])
 
     def start_pty_session(
         self, command: str, cols: int = 80, rows: int = 24, on_stdout=None, on_exit=None
@@ -1315,6 +1341,8 @@ class MicroVM:
     def upload_file(self, local_path: str, remote_path: str, timeout: int = None):
         """Uploads a file from local filesystem to the VM.
         
+        Uses chunked uploads for large files to avoid serial buffer overflows.
+        
         Args:
             local_path: Path to local file
             remote_path: Path in VM to write to
@@ -1328,16 +1356,40 @@ class MicroVM:
 
         with open(local_path, "rb") as f:
             content = f.read()
-        import base64
-
-        encoded = base64.b64encode(content).decode("utf-8")
+        
+        file_size = len(content)
         
         # Calculate timeout based on file size: minimum 60s, +30s per MB
         if timeout is None:
-            file_size_mb = len(content) / (1024 * 1024)
+            file_size_mb = file_size / (1024 * 1024)
             timeout = max(60, int(60 + file_size_mb * 30))
 
-        self.send_request("write_file", {"path": remote_path, "content": encoded}, timeout=timeout)
+        # For files larger than 2KB, use chunked uploads to avoid serial buffer overflows
+        # Serial console typically has ~4KB buffer, base64 encoding adds 33% overhead
+        # So 2KB raw = ~2.7KB base64 = safe for serial
+        CHUNK_SIZE = 2 * 1024  # 2KB chunks
+        
+        if file_size <= CHUNK_SIZE:
+            # Small file - send in one request
+            import base64
+            encoded = base64.b64encode(content).decode("utf-8")
+            self.send_request("write_file", {"path": remote_path, "content": encoded}, timeout=timeout)
+        else:
+            # Large file - send in chunks with append mode
+            import base64
+            
+            # First chunk creates the file
+            first_chunk = content[:CHUNK_SIZE]
+            encoded = base64.b64encode(first_chunk).decode("utf-8")
+            self.send_request("write_file", {"path": remote_path, "content": encoded, "append": False}, timeout=timeout)
+            
+            # Remaining chunks append
+            offset = CHUNK_SIZE
+            while offset < file_size:
+                chunk = content[offset:offset + CHUNK_SIZE]
+                encoded = base64.b64encode(chunk).decode("utf-8")
+                self.send_request("write_file", {"path": remote_path, "content": encoded, "append": True}, timeout=timeout)
+                offset += CHUNK_SIZE
 
     def upload_folder(
         self,
