@@ -107,7 +107,8 @@
                 <div class="space-y-1">
                     <p class="text-xs uppercase text-zinc-500 font-medium">Source Image</p>
                     <p id="vm-image"
-                        class="text-zinc-300 text-sm font-mono px-2 py-1 bg-zinc-900 rounded border border-zinc-800 inline-block">
+                        class="text-zinc-300 text-sm font-mono px-2 py-1 bg-zinc-900 rounded border border-zinc-800 inline-block max-w-full truncate"
+                        title="">
                         -</p>
                 </div>
                 <div class="space-y-1">
@@ -127,7 +128,9 @@
                     <button onclick="openMetadataEditor()"
                         class="group flex items-center gap-1.5 px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white text-xs font-medium rounded transition-colors border border-zinc-800">
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z">
+                            </path>
                         </svg>
                         Edit
                     </button>
@@ -283,6 +286,7 @@
             document.getElementById('vm-name').textContent = vmInfo.name || vmInfo.image || 'Unknown';
             document.getElementById('vm-id').textContent = vmInfo.id.substring(0, 16);
             document.getElementById('vm-image').textContent = vmInfo.image || 'Unknown';
+            document.getElementById('vm-image').title = vmInfo.image || 'Unknown';
             document.getElementById('vm-resources').textContent = `${vmInfo.vcpu || 1} vCPU / ${vmInfo.mem_mib || 128} MiB`;
 
             // IP Address
@@ -452,7 +456,7 @@
 
                 // Check if file is markdown
                 const isMarkdown = !isDir && /\.(md|markdown|mdown|mkd)$/i.test(file.name);
-                
+
                 const viewBtn = isMarkdown
                     ? `<button onclick="viewMarkdown('${file.path.replace(/'/g, "\\'")}'); event.stopPropagation();"
                         class="px-3 py-1.5 rounded border border-zinc-700 hover:border-amber-500 text-zinc-400 hover:text-amber-400 text-xs font-medium transition-all bg-transparent flex items-center gap-2">
@@ -771,16 +775,23 @@
             }
         });
 
-        // Close modal when clicking outside
-        document.getElementById('metadata-modal').addEventListener('click', (e) => {
-            if (e.target.id === 'metadata-modal') {
-                closeMetadataModal();
+        // Close modal when clicking outside - wrapped in DOMContentLoaded because 
+        // the metadata-modal element is defined after this script tag
+        document.addEventListener('DOMContentLoaded', () => {
+            const metadataModal = document.getElementById('metadata-modal');
+            if (metadataModal) {
+                metadataModal.addEventListener('click', (e) => {
+                    if (e.target.id === 'metadata-modal') {
+                        closeMetadataModal();
+                    }
+                });
             }
         });
     </script>
 
     <!-- Metadata Editor Modal -->
-    <div id="metadata-modal" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div id="metadata-modal"
+        class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
         <div class="glass rounded-xl w-full max-w-2xl max-h-[80vh] flex flex-col">
             <div class="p-6 border-b border-zinc-800">
                 <h2 class="text-xl font-medium text-white">Edit Metadata</h2>
@@ -797,7 +808,8 @@
                     <button onclick="addMetadataEntry()"
                         class="px-4 py-2 bg-white hover:bg-zinc-200 text-black text-sm font-medium rounded transition-colors flex items-center gap-2">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4">
+                            </path>
                         </svg>
                         Add
                     </button>
