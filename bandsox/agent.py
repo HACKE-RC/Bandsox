@@ -382,7 +382,7 @@ def handle_read_file(cmd_id, path):
             send_event("file_content", {"cmd_id": cmd_id, "path": path, "content": encoded})
             send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
         else:
-            # Large file - send in chunks
+            # Large file - send in chunks with throttling for serial console
             md5 = hashlib.md5()
             offset = 0
             
@@ -404,6 +404,11 @@ def handle_read_file(cmd_id, path):
                     })
                     
                     offset += len(chunk)
+                    
+                    # Throttle output to prevent serial buffer overflow
+                    # Serial console is slow (~115200 baud = ~11KB/s max)
+                    # 2KB chunk + base64 overhead = ~2.7KB, needs ~250ms to transmit
+                    time.sleep(0.2)  # 200ms delay between chunks for serial safety
             
             # Send completion event with checksum
             send_event("file_complete", {
