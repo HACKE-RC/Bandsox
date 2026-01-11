@@ -1234,5 +1234,16 @@ class ManagedMicroVM(MicroVM):
             raise Exception("Agent not ready")
         return super().exec_python_capture(*args, **kwargs)
 
+    def list_dir(self, *args, **kwargs):
+        if not self.wait_for_agent():
+            raise Exception("Agent not ready")
+        return super().list_dir(*args, **kwargs)
+
+    def download_file(self, *args, **kwargs):
+        if not self.wait_for_agent():
+            raise Exception("Agent not ready")
+        return super().download_file(*args, **kwargs)
+
+
     def delete(self):
         self.bandsox.delete_vm(self.vm_id)
