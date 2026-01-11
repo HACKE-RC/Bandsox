@@ -595,28 +595,24 @@ def handle_vsock_upload(cmd_id, path: str, size: int, checksum: str):
 
 
 def handle_vsock_download(cmd_id, path: str):
-    """Handles sending a file from guest to host via vsock (guest-initiated).
+    """Sends a file from guest to host via vsock (guest-initiated upload).
 
-    This is called when the host requests a file from the guest.
-    The guest initiates a vsock connection and sends the file.
+    This function is triggered by a read_file request from the host. The guest
+    connects to the host's vsock listener and uploads the requested file.
 
-    Protocol (guest-initiated):
-    1. Guest receives read_file request from host (via serial)
-    2. Guest connects to host vsock listener
-    3. Guest sends "download" request with file path
-    4. Host reads the file and sends chunks back
-    5. Wait - that's wrong! The host doesn't have the file, the guest does!
+    Protocol:
+    1. Host sends read_file request via serial console
+    2. Guest connects to host vsock listener at BANDSOX_VSOCK_PORT
+    3. Guest sends "upload" request with path, size, checksum, cmd_id
+    4. Host sends "ready" response
+    5. Guest sends raw binary file data
+    6. Host verifies checksum and sends "complete" or "error"
 
-    Actually for guest->host file transfer:
-    1. Guest connects to host vsock listener
-    2. Guest sends "upload" request with path, size, checksum
-    3. Host sends "ready"
-    4. Guest sends raw binary data
-    5. Host verifies and responds
+    If vsock connection fails, falls back to serial console transfer.
 
     Args:
-        cmd_id: Command ID for responses
-        path: Source file path (in guest)
+        cmd_id: Command ID for responses (used by host to route file to correct destination)
+        path: Source file path in guest
     """
     vsock_port = int(os.environ.get("BANDSOX_VSOCK_PORT", "9000"))
     sock = None

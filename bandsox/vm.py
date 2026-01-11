@@ -274,16 +274,21 @@ class MicroVM:
 
             if evt_type == "status":
                 status = payload.get("status")
+                cmd_id = payload.get("cmd_id")
                 if status == "ready":
                     self.agent_ready = True
                     logger.info("Agent is ready")
                 elif status == "started":
-                    cmd_id = payload.get("cmd_id")
                     pid = payload.get("pid")
                     if cmd_id in self.event_callbacks:
                         cb = self.event_callbacks[cmd_id].get("on_started")
                         if cb:
                             cb(pid)
+                # Generic status handler for other status types (e.g., "uploaded")
+                if cmd_id and cmd_id in self.event_callbacks:
+                    cb = self.event_callbacks[cmd_id].get("on_status")
+                    if cb:
+                        cb(payload)
 
             elif evt_type == "output":
                 cmd_id = payload.get("cmd_id")
@@ -1222,8 +1227,8 @@ class MicroVM:
     def download_file(self, remote_path: str, local_path: str, timeout: int = 300):
         """Downloads a file from the VM to the local filesystem.
 
-        Handles both small files (single file_content event) and large files
-        (chunked via file_chunk/file_complete events).
+        For vsock-enabled VMs, the transfer happens via vsock for better performance.
+        Falls back to serial console for non-vsock VMs or on vsock failure.
 
         Args:
             remote_path: Path to file in VM
@@ -1239,21 +1244,30 @@ class MicroVM:
         local_path = os.path.abspath(local_path)
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
+        # Generate cmd_id for this request
+        cmd_id = str(uuid.uuid4())
+
+        # If vsock is enabled, register the pending upload so the listener knows
+        # where to write the file when the guest uploads it
+        if self.vsock_enabled and self.vsock_listener:
+            self.vsock_listener.register_pending_upload(cmd_id, local_path)
+
         result = {
             "mode": None,
             "content": None,
             "file_handle": None,
             "md5": None,
             "error": None,
+            "vsock_success": False,
         }
 
         def on_file_content(content):
-            """Handle small file (single shot transfer)."""
+            """Handle small file (single shot transfer via serial)."""
             result["mode"] = "single"
             result["content"] = content
 
         def on_file_chunk(data, offset, size):
-            """Handle file chunk (streaming transfer)."""
+            """Handle file chunk (streaming transfer via serial)."""
             if result["mode"] is None:
                 result["mode"] = "chunked"
                 result["file_handle"] = open(local_path, "wb")
@@ -1271,15 +1285,32 @@ class MicroVM:
             result["checksum"] = checksum
             result["total_size"] = total_size
 
+        def on_status(status_data):
+            """Handle status events (including vsock upload completion)."""
+            if status_data.get("status") == "uploaded":
+                result["vsock_success"] = True
+                result["mode"] = "vsock"
+
         try:
-            self.send_request(
+            self._send_request_with_id(
+                cmd_id,
                 "read_file",
                 {"path": remote_path},
                 on_file_content=on_file_content,
                 on_file_chunk=on_file_chunk,
                 on_file_complete=on_file_complete,
+                on_status=on_status,
                 timeout=timeout,
             )
+
+            if result["mode"] == "vsock" and result["vsock_success"]:
+                # File was transferred via vsock and written by the listener
+                # Verify it exists
+                if not os.path.exists(local_path):
+                    raise Exception(
+                        f"Vsock transfer reported success but file not found: {local_path}"
+                    )
+                return
 
             if result["mode"] == "single" and result["content"] is not None:
                 # Small file - decode and write
@@ -1304,6 +1335,78 @@ class MicroVM:
             # Ensure file handle is closed on any error
             if result.get("file_handle"):
                 result["file_handle"].close()
+            # Unregister pending upload if still registered (e.g., on timeout/error)
+            if self.vsock_enabled and self.vsock_listener:
+                self.vsock_listener.unregister_pending_upload(cmd_id)
+
+    def _send_request_with_id(
+        self,
+        cmd_id: str,
+        req_type: str,
+        payload: dict,
+        on_stdout=None,
+        on_stderr=None,
+        on_file_content=None,
+        on_file_chunk=None,
+        on_file_complete=None,
+        on_dir_list=None,
+        on_file_info=None,
+        on_status=None,
+        timeout=30,
+    ):
+        """Sends a JSON request to the agent with a pre-defined cmd_id.
+
+        This is like send_request but allows specifying the cmd_id, which is needed
+        for vsock transfers where we need to register the cmd_id with the listener
+        before sending the request.
+        """
+        if not self.agent_ready:
+            # If we are client, try to connect
+            if not self.process and not self.console_conn:
+                self.connect_to_console()
+
+            start = time.time()
+            while not self.agent_ready:
+                if time.time() - start > 10:
+                    raise Exception("Agent not ready")
+                time.sleep(0.1)
+
+        payload["id"] = cmd_id
+        payload["type"] = req_type
+
+        completion_event = threading.Event()
+        result = {"code": -1, "error": None}
+
+        def on_exit(code):
+            result["code"] = code
+            completion_event.set()
+
+        def on_error(msg):
+            result["error"] = msg
+
+        self.event_callbacks[cmd_id] = {
+            "on_stdout": on_stdout,
+            "on_stderr": on_stderr,
+            "on_file_content": on_file_content,
+            "on_file_chunk": on_file_chunk,
+            "on_file_complete": on_file_complete,
+            "on_dir_list": on_dir_list,
+            "on_file_info": on_file_info,
+            "on_status": on_status,
+            "on_exit": on_exit,
+            "on_error": on_error,
+        }
+
+        req_str = json.dumps(payload)
+        self._write_to_agent(req_str + "\n")
+
+        if not completion_event.wait(timeout):
+            raise TimeoutError("Command timed out")
+
+        if result["error"]:
+            raise Exception(f"Agent error: {result['error']}")
+
+        return result["code"]
 
     def upload_file(self, local_path: str, remote_path: str, timeout: int = None):
         """Uploads a file from local filesystem to the VM.

@@ -71,6 +71,12 @@ class VsockHostListener:
         self.running = False
         self._lock = threading.Lock()
 
+        # Pending uploads: maps cmd_id -> local_path for download_file operations
+        # When VM.download_file() is called, it registers the expected upload here
+        # so we know where to write the file when the guest sends it
+        self._pending_uploads: dict[str, str] = {}
+        self._pending_uploads_lock = threading.Lock()
+
     def start(self):
         """Start listening for guest connections."""
         with self._lock:
@@ -151,6 +157,35 @@ class VsockHostListener:
                 logger.warning(f"Failed to remove socket {self.listener_path}: {e}")
 
         logger.info(f"VsockHostListener stopped on {self.listener_path}")
+
+    def register_pending_upload(self, cmd_id: str, local_path: str):
+        """Register an expected upload from the guest.
+
+        When VM.download_file() is called, it registers the expected upload here
+        before sending the read_file request to the guest. This way, when the
+        guest connects via vsock to upload the file, we know where to write it.
+
+        Args:
+            cmd_id: The command ID that will be sent with the upload request
+            local_path: Where to write the file on the host
+        """
+        with self._pending_uploads_lock:
+            self._pending_uploads[cmd_id] = local_path
+            logger.debug(
+                f"Registered pending upload: cmd_id={cmd_id}, path={local_path}"
+            )
+
+    def unregister_pending_upload(self, cmd_id: str):
+        """Unregister a pending upload (e.g., on timeout or cancellation)."""
+        with self._pending_uploads_lock:
+            if cmd_id in self._pending_uploads:
+                del self._pending_uploads[cmd_id]
+                logger.debug(f"Unregistered pending upload: cmd_id={cmd_id}")
+
+    def get_pending_upload_path(self, cmd_id: str) -> Optional[str]:
+        """Get the local path for a pending upload, if registered."""
+        with self._pending_uploads_lock:
+            return self._pending_uploads.get(cmd_id)
 
     def _accept_loop(self):
         """Accept incoming connections and spawn handler threads."""
@@ -260,12 +295,24 @@ class VsockHostListener:
         """Handle file upload from guest to host.
 
         Protocol:
-        1. Guest sends UploadRequest with path, size, checksum
+        1. Guest sends UploadRequest with path, size, checksum, cmd_id
         2. Host sends ReadyResponse
         3. Guest sends raw binary data (size bytes)
         4. Host verifies checksum and sends CompleteResponse or ErrorResponse
+
+        The destination path is determined by:
+        1. If cmd_id is registered via register_pending_upload(), use that path
+        2. Else if on_upload callback is set, call it with the data
+        3. Else write to request.path (legacy behavior, not recommended)
         """
-        logger.info(f"Handling upload: {request.path} ({request.size} bytes)")
+        # Determine destination path - check pending uploads first
+        dest_path = self.get_pending_upload_path(request.cmd_id)
+        if dest_path:
+            logger.info(
+                f"Handling upload: {request.path} -> {dest_path} ({request.size} bytes)"
+            )
+        else:
+            logger.info(f"Handling upload: {request.path} ({request.size} bytes)")
 
         # Send ready response
         self._send_message(
@@ -307,27 +354,37 @@ class VsockHostListener:
             )
             return
 
-        # Write file or call callback
+        # Write file
         data = b"".join(chunks)
 
-        if self.on_upload:
-            try:
+        try:
+            if dest_path:
+                # Write to registered destination path (from download_file)
+                Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
+                with open(dest_path, "wb") as f:
+                    f.write(data)
+                # Unregister after successful write
+                self.unregister_pending_upload(request.cmd_id)
+                final_path = dest_path
+            elif self.on_upload:
+                # Use callback
                 success = self.on_upload(request.path, data, request.checksum)
                 if not success:
                     self._send_error(client, request.cmd_id, "Upload callback failed")
                     return
-            except Exception as e:
-                self._send_error(client, request.cmd_id, f"Upload error: {e}")
-                return
-        else:
-            # Default: write to path
-            try:
+                final_path = request.path
+            else:
+                # Default: write to request.path (legacy, not recommended)
+                logger.warning(
+                    f"Upload with no registered path or callback - writing to {request.path}"
+                )
                 Path(request.path).parent.mkdir(parents=True, exist_ok=True)
                 with open(request.path, "wb") as f:
                     f.write(data)
-            except Exception as e:
-                self._send_error(client, request.cmd_id, f"Failed to write file: {e}")
-                return
+                final_path = request.path
+        except Exception as e:
+            self._send_error(client, request.cmd_id, f"Failed to write file: {e}")
+            return
 
         # Send success
         self._send_message(
@@ -339,7 +396,7 @@ class VsockHostListener:
             },
         )
 
-        logger.info(f"Upload complete: {request.path} ({received} bytes)")
+        logger.info(f"Upload complete: {final_path} ({received} bytes)")
 
     def _handle_download(self, client: socket.socket, request: DownloadRequest):
         """Handle file download from host to guest.
