@@ -65,12 +65,15 @@ class FakeBandSox:
         self.vm = DummyVM("vm-123")
         self.vms = [{"id": self.vm.vm_id}]
         self.snapshots = [{"id": "snap-1"}]
-        self.vm_info = {"id": self.vm.vm_id, "rootfs_path": str(tmp_path / "rootfs.ext4")}
+        self.vm_info = {
+            "id": self.vm.vm_id,
+            "rootfs_path": str(tmp_path / "rootfs.ext4"),
+        }
         self.deleted_snapshot = None
         self.deleted_vm = None
         self.last_status = None
 
-    def list_vms(self):
+    def list_vms(self, limit: int = None, metadata_equals: dict = None):
         return self.vms
 
     def list_snapshots(self):
@@ -79,7 +82,15 @@ class FakeBandSox:
     def create_vm(self, *_, **__):
         return self.vm
 
-    def restore_vm(self, snapshot_id, name=None, enable_networking=True):
+    def restore_vm(
+        self,
+        snapshot_id,
+        name=None,
+        enable_networking=True,
+        env_vars=None,
+        metadata=None,
+        vsock_isolation="namespace",
+    ):
         if snapshot_id == "missing":
             raise FileNotFoundError("snapshot missing")
         return self.vm
@@ -95,7 +106,7 @@ class FakeBandSox:
     def update_vm_status(self, vm_id, status):
         self.last_status = (vm_id, status)
 
-    def snapshot_vm(self, vm, snapshot_name=None):
+    def snapshot_vm(self, vm, snapshot_name=None, metadata=None):
         return snapshot_name or "snapshot-auto"
 
     def delete_vm(self, vm_id):
@@ -167,7 +178,10 @@ def test_create_vm_failure(client, fake_bs, monkeypatch):
 
 
 def test_restore_snapshot_success(client, fake_bs):
-    resp = client.post("/api/snapshots/snap-1/restore", json={"name": "restored", "enable_networking": False})
+    resp = client.post(
+        "/api/snapshots/snap-1/restore",
+        json={"name": "restored", "enable_networking": False},
+    )
     assert resp.status_code == 200
     assert resp.json() == {"id": fake_bs.vm.vm_id, "status": "restored"}
 
@@ -177,7 +191,10 @@ def test_restore_snapshot_not_found(client, fake_bs, monkeypatch):
         raise FileNotFoundError("missing")
 
     monkeypatch.setattr(fake_bs, "restore_vm", missing)
-    resp = client.post("/api/snapshots/missing/restore", json={"name": "test", "enable_networking": True})
+    resp = client.post(
+        "/api/snapshots/missing/restore",
+        json={"name": "test", "enable_networking": True},
+    )
     assert resp.status_code == 404
 
 
@@ -245,7 +262,9 @@ def test_delete_vm(client, fake_bs):
 
 
 def test_snapshot_vm_success(client, fake_bs):
-    resp = client.post(f"/api/vms/{fake_bs.vm.vm_id}/snapshot", json={"name": "snap-new"})
+    resp = client.post(
+        f"/api/vms/{fake_bs.vm.vm_id}/snapshot", json={"name": "snap-new"}
+    )
     assert resp.status_code == 200
     assert resp.json() == {"snapshot_id": "snap-new"}
 
@@ -276,17 +295,20 @@ def test_list_directory(client, fake_bs):
 
 
 def test_download_file(client, fake_bs):
-    resp = client.get(f"/api/vms/{fake_bs.vm.vm_id}/download", params={"path": "/tmp/out.txt"})
+    resp = client.get(
+        f"/api/vms/{fake_bs.vm.vm_id}/download", params={"path": "/tmp/out.txt"}
+    )
     assert resp.status_code == 200
     assert resp.content == fake_bs.vm.download_content
     assert "attachment" in resp.headers["content-disposition"]
 
 
 def test_terminal_websocket(client, fake_bs):
-    with client.websocket_connect(f"/api/vms/{fake_bs.vm.vm_id}/terminal?cols=80&rows=24") as ws:
+    with client.websocket_connect(
+        f"/api/vms/{fake_bs.vm.vm_id}/terminal?cols=80&rows=24"
+    ) as ws:
         message = ws.receive_text()
         assert message == "output"
         ws.send_text(json.dumps({"type": "input", "data": "Zm9v"}))
     assert fake_bs.vm.inputs == [("session-1", "Zm9v", "base64")]
     assert fake_bs.vm.killed_sessions == ["session-1"]
-

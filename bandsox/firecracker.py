@@ -128,7 +128,7 @@ class FirecrackerClient:
         Args:
             vsock_id: Identifier for the vsock device (e.g., "vsock0")
             guest_cid: Context ID for the guest VM (must be >= 3)
-            uds_path: Unix domain socket path on host (e.g., "/tmp/bandsox/vsock_abc123.sock")
+            uds_path: Unix domain socket path on host (e.g., "/var/lib/bandsox/vsock/vsock_abc123.sock")
 
         Firecracker API: PUT /vsock
         {

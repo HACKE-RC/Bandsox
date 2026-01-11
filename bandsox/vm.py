@@ -132,12 +132,17 @@ class ConsoleMultiplexer:
 
 
 class MicroVM:
+    # Default vsock directory - can be overridden per-instance
+    DEFAULT_VSOCK_DIR = "/var/lib/bandsox/vsock"
+
     def __init__(
         self,
         vm_id: str,
         socket_path: str,
         firecracker_bin: str = FIRECRACKER_BIN,
         netns: str = None,
+        vsock_isolation: str = "namespace",
+        vsock_dir: str = None,
     ):
         self.vm_id = vm_id
         self.socket_path = socket_path
@@ -146,6 +151,8 @@ class MicroVM:
         )
         self.firecracker_bin = firecracker_bin
         self.netns = netns
+        self.vsock_isolation = vsock_isolation  # "namespace" or "none"
+        self.vsock_dir = vsock_dir or self.DEFAULT_VSOCK_DIR
         self.process = None
         self.multiplexer = None
         self.client = FirecrackerClient(socket_path)
@@ -173,6 +180,43 @@ class MicroVM:
             os.unlink(self.socket_path)
 
         cmd = [self.firecracker_bin, "--api-sock", self.socket_path]
+
+        # If vsock isolation is enabled, wrap with unshare to create private mount namespace
+        # This allows multiple VMs restored from the same snapshot to use the same
+        # vsock socket path without collision (each gets its own private /tmp)
+        if self.vsock_isolation == "namespace":
+            # Validate unshare is available
+            if not shutil.which("unshare"):
+                raise Exception(
+                    "vsock_isolation='namespace' requires 'unshare' command. "
+                    "Install util-linux package or set vsock_isolation='none'."
+                )
+
+            # Build the firecracker command as a string for sh -c
+            # Use shlex.join for safe quoting of paths with spaces/special chars
+            import shlex
+
+            fc_cmd_str = shlex.join(cmd)
+
+            # Wrap with unshare: create user+mount namespace so we can mount without root,
+            # mount tmpfs on /tmp, then exec firecracker.
+            # --user --map-root-user: create user namespace where we're root (allows mount)
+            # --mount --propagation private: isolate mount namespace
+            # Note: vsock sockets are now in storage_dir/vsock/ (not /tmp), so they're
+            # visible to the host even with the private /tmp mount.
+            unshare_cmd = [
+                "unshare",
+                "--user",
+                "--map-root-user",
+                "--mount",
+                "--propagation",
+                "private",
+                "--",
+                "sh",
+                "-c",
+                f"mount -t tmpfs tmpfs /tmp && exec {fc_cmd_str}",
+            ]
+            cmd = unshare_cmd
 
         # If running in NetNS, wrap command
         if self.netns:
@@ -1044,7 +1088,11 @@ class MicroVM:
         """
         from .vsock import VsockHostListener
 
-        self.vsock_socket_path = f"/tmp/bandsox/vsock_{self.vm_id}.sock"
+        # Use vsock_dir instead of /tmp/bandsox to avoid mount namespace isolation issues
+        os.makedirs(self.vsock_dir, exist_ok=True)
+        self.vsock_socket_path = os.path.join(
+            self.vsock_dir, f"vsock_{self.vm_id}.sock"
+        )
 
         # Pre-cleanup: Remove any stale socket files
         if os.path.exists(self.vsock_socket_path):

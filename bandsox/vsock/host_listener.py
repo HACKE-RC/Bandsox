@@ -37,8 +37,8 @@ class VsockHostListener:
     Firecracker routes guest AF_VSOCK connections to Unix sockets at:
     {uds_path}_{port}
 
-    For example, if uds_path="/tmp/bandsox/vsock_vm123.sock" and port=9000,
-    the listener socket will be at "/tmp/bandsox/vsock_vm123.sock_9000"
+    For example, if uds_path="/var/lib/bandsox/vsock/vsock_vm123.sock" and port=9000,
+    the listener socket will be at "/var/lib/bandsox/vsock/vsock_vm123.sock_9000"
 
     When the guest connects via socket.connect((2, 9000)), Firecracker
     forwards to our listener socket.
@@ -54,7 +54,7 @@ class VsockHostListener:
         """Initialize the vsock host listener.
 
         Args:
-            uds_path: Base path for the Firecracker vsock device (e.g., /tmp/bandsox/vsock_vm.sock)
+            uds_path: Base path for the Firecracker vsock device (e.g., /var/lib/bandsox/vsock/vsock_vm.sock)
             port: Port number to listen on (will create socket at uds_path_port)
             on_upload: Callback for uploads (path, data, checksum) -> success
             on_download: Callback for downloads (path) -> data or None
@@ -499,7 +499,7 @@ class VsockListenerManager:
         """Initialize the manager.
 
         Args:
-            uds_path: Base path for vsock (e.g., /tmp/bandsox/vsock_vm123.sock)
+            uds_path: Base path for vsock (e.g., /var/lib/bandsox/vsock/vsock_vm123.sock)
         """
         self.uds_path = uds_path
         self.listeners: dict[int, VsockHostListener] = {}

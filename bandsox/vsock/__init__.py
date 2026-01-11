@@ -14,7 +14,7 @@ Usage:
 
     # Create listener for a VM
     listener = VsockHostListener(
-        uds_path="/tmp/bandsox/vsock_vm123.sock",
+        uds_path="/var/lib/bandsox/vsock/vsock_vm123.sock",
         port=9000,
     )
     listener.start()

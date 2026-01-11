@@ -26,6 +26,8 @@ class BandSox:
         self.sockets_dir.mkdir(exist_ok=True)
         self.metadata_dir = self.storage_dir / "metadata"
         self.metadata_dir.mkdir(exist_ok=True)
+        self.vsock_dir = self.storage_dir / "vsock"
+        self.vsock_dir.mkdir(exist_ok=True)
 
         self.active_vms = {}  # vm_id -> MicroVM instance
 
@@ -61,6 +63,35 @@ class BandSox:
             with open(meta_path, "r") as f:
                 return json.load(f)
         return {}
+
+    def get_vsock_socket_path(self, vm_id: str) -> str:
+        """Get the vsock socket path for a VM.
+
+        Uses storage_dir/vsock/ to avoid conflicts with mount namespace isolation.
+        """
+        return str(self.vsock_dir / f"vsock_{vm_id}.sock")
+
+    def migrate_vsock_path(self, old_path: str, vm_id: str) -> str:
+        """Migrate an old /tmp/bandsox vsock path to the new location.
+
+        Args:
+            old_path: Original vsock socket path (may be /tmp/bandsox/...)
+            vm_id: VM ID to use for the new path
+
+        Returns:
+            New vsock socket path under storage_dir/vsock/
+        """
+        if old_path and "/tmp/bandsox/" in old_path:
+            # Extract just the filename and use new base
+            filename = os.path.basename(old_path)
+            return str(self.vsock_dir / filename)
+        elif old_path:
+            # Already using a non-tmp path, keep it but ensure it's under vsock_dir
+            filename = os.path.basename(old_path)
+            return str(self.vsock_dir / filename)
+        else:
+            # No path, generate new one
+            return self.get_vsock_socket_path(vm_id)
 
     def _clone_rootfs(self, src: Path, dest: Path) -> str:
         """
@@ -127,40 +158,16 @@ class BandSox:
             json.dump(state, f)
 
     def _allocate_port(self) -> int:
-        """Allocates a unique port for vsock communication."""
-        with open(self.port_allocator_path, "r") as f:
-            state = json.load(f)
+        """Returns the vsock port to use.
 
-        # Allocate next port and add to used_ports
-        port = state["next_port"]
-        if port < 10000:
-            state["next_port"] = port + 1
-        else:
-            # Wrap around to 9000
-            port = 9000
-            state["next_port"] = 9001
-
-        # Track this port as in-use
-        if "used_ports" not in state:
-            state["used_ports"] = []
-        state["used_ports"].append(port)
-
-        with open(self.port_allocator_path, "w") as f:
-            json.dump(state, f)
-
-        logger.debug(f"Allocated port: {port}")
-        return port
+        Always returns 9000 since each VM has its own vsock socket path,
+        so there's no collision. The guest agent defaults to 9000.
+        """
+        return 9000
 
     def _release_port(self, port: int):
-        """Releases a port back to the pool."""
-        with open(self.port_allocator_path, "r") as f:
-            state = json.load(f)
-
-        if "used_ports" in state and port in state["used_ports"]:
-            state["used_ports"].remove(port)
-            with open(self.port_allocator_path, "w") as f:
-                json.dump(state, f)
-            logger.debug(f"Released port: {port}")
+        """No-op since we always use port 9000."""
+        pass
 
     def _check_vsock_compatibility(self, vm_id: str):
         """Check if VM metadata has vsock_config for compatibility.
@@ -201,6 +208,7 @@ class BandSox:
         disk_size_mib: int = 4096,
         env_vars: dict = None,
         metadata: dict = None,
+        vsock_isolation: str = "namespace",
     ) -> MicroVM:
         """Creates and starts a new VM from a Docker image."""
         vm_id = str(uuid.uuid4())
@@ -257,7 +265,7 @@ class BandSox:
 
         # 2. Create VM instance
         socket_path = str(self.sockets_dir / f"{vm_id}.sock")
-        vm = ManagedMicroVM(vm_id, socket_path, self)
+        vm = ManagedMicroVM(vm_id, socket_path, self, vsock_isolation=vsock_isolation)
 
         # 3. Start Process & Configure
         vm.start_process()
@@ -283,6 +291,7 @@ class BandSox:
                 "enabled": True,
                 "cid": vm.vsock_cid,
                 "port": vm.vsock_port,
+                "uds_path": vm.vsock_socket_path,  # Save path for snapshot restore
             }
 
         self._save_metadata(
@@ -352,6 +361,7 @@ class BandSox:
         detach: bool = True,
         env_vars: dict = None,
         metadata: dict = None,
+        vsock_isolation: str = "namespace",
     ) -> MicroVM:
         """Restores a VM from a snapshot."""
         # Snapshot ID should point to a folder containing snapshot file and mem file
@@ -424,7 +434,13 @@ class BandSox:
                 pass
 
         # Instantiate VM
-        vm = ManagedMicroVM(new_vm_id, socket_path, self, netns=netns_name)
+        vm = ManagedMicroVM(
+            new_vm_id,
+            socket_path,
+            self,
+            netns=netns_name,
+            vsock_isolation=vsock_isolation,
+        )
 
         if netns_name:
             vm.tap_name = old_tap_name
@@ -442,6 +458,82 @@ class BandSox:
         log_dir = self.storage_dir / "logs"
         log_dir.mkdir(exist_ok=True)
         log_file = log_dir / f"{new_vm_id}.log"
+
+        # Handle vsock configuration for restored VM BEFORE starting the process
+        # IMPORTANT: Firecracker's vsock device is configured in the snapshot with the
+        # original uds_path. After restore, Firecracker routes guest AF_VSOCK connections
+        # to {original_uds_path}_{port}. We MUST use the same path, not a new one.
+        # See: https://github.com/firecracker-microvm/firecracker/blob/main/docs/snapshotting/snapshot-support.md
+        vsock_config = snapshot_meta.get("vsock_config")
+
+        # Check if snapshot uses old /tmp/bandsox path (incompatible with namespace isolation)
+        if vsock_config and vsock_config.get("enabled"):
+            original_uds_path = vsock_config.get("uds_path")
+            if original_uds_path and "/tmp/bandsox/" in original_uds_path:
+                # Migrate the path to the new location
+                old_filename = os.path.basename(original_uds_path)
+                new_uds_path = str(self.vsock_dir / old_filename)
+
+                logger.warning(
+                    f"Snapshot uses old vsock path ({original_uds_path}). "
+                    f"Migrating to {new_uds_path}. "
+                    f"Please re-create the snapshot for full namespace isolation support."
+                )
+
+                # Update vsock_config with new path
+                vsock_config["uds_path"] = new_uds_path
+
+                # Update snapshot metadata on disk so future restores use new path
+                snapshot_meta["vsock_config"] = vsock_config
+                try:
+                    with open(meta_file, "w") as f:
+                        json.dump(snapshot_meta, f)
+                    logger.info(f"Updated snapshot metadata with new vsock path")
+                except Exception as e:
+                    logger.warning(f"Failed to update snapshot metadata: {e}")
+
+        # Use the vsock socket path from config (possibly migrated)
+        if vsock_config and vsock_config.get("enabled"):
+            vsock_socket_path = vsock_config.get("uds_path")
+            if not vsock_socket_path:
+                # Fallback for old snapshots without uds_path: use source VM ID
+                source_vm_id = snapshot_meta.get("source_vm_id")
+                if source_vm_id:
+                    vsock_socket_path = str(
+                        self.vsock_dir / f"vsock_{source_vm_id}.sock"
+                    )
+                else:
+                    # Last resort: use new VM ID
+                    vsock_socket_path = str(self.vsock_dir / f"vsock_{new_vm_id}.sock")
+                    logger.warning(
+                        f"No original vsock path found in snapshot, using new path. "
+                        f"Vsock may not work for restored VM."
+                    )
+                # Update vsock_config with resolved path for passing to runner
+                vsock_config["uds_path"] = vsock_socket_path
+        else:
+            vsock_socket_path = str(self.vsock_dir / f"vsock_{new_vm_id}.sock")
+
+        # Ensure vsock directory exists
+        self.vsock_dir.mkdir(parents=True, exist_ok=True)
+
+        # Pre-cleanup: remove stale socket files
+        if os.path.exists(vsock_socket_path):
+            try:
+                os.unlink(vsock_socket_path)
+            except Exception:
+                pass
+
+        # Also clean up listener socket if exists
+        if vsock_config and vsock_config.get("enabled"):
+            listener_path = f"{vsock_socket_path}_{vsock_config.get('port', 9000)}"
+            if os.path.exists(listener_path):
+                try:
+                    os.unlink(listener_path)
+                except Exception:
+                    pass
+
+        vm.vsock_socket_path = vsock_socket_path
 
         def _ensure_netns():
             """Recreate netns/tap if it was cleaned up between runs (e.g., previous VM shutdown)."""
@@ -486,9 +578,17 @@ class BandSox:
                     new_vm_id,
                     "--socket-path",
                     socket_path,
+                    "--vsock-isolation",
+                    vsock_isolation,
+                    "--vsock-dir",
+                    str(self.vsock_dir),
                 ]
                 if netns_name:
                     runner_cmd.extend(["--netns", netns_name])
+
+                # Pass vsock config to runner so it can start the listener
+                if vsock_config and vsock_config.get("enabled"):
+                    runner_cmd.extend(["--vsock-config", json.dumps(vsock_config)])
 
                 logger.info(f"Spawning detached runner for VM {new_vm_id}")
                 with open(log_file, "w") as f:
@@ -527,32 +627,6 @@ class BandSox:
 
         if snap_rootfs and os.path.exists(snap_rootfs):
             self._clone_rootfs(snap_rootfs, instance_rootfs)
-
-        # Handle vsock configuration for restored VM
-        # With guest-initiated connections, we just need to:
-        # 1. Set up our listener socket at uds_path_PORT (done after VM starts)
-        # 2. The guest agent already has BANDSOX_VSOCK_PORT in its environment (from snapshot)
-        vsock_config = snapshot_meta.get("vsock_config")
-        new_socket_path = f"/tmp/bandsox/vsock_{new_vm_id}.sock"
-
-        # Pre-cleanup: remove stale socket files for this VM
-        os.makedirs("/tmp/bandsox", exist_ok=True)
-        if os.path.exists(new_socket_path):
-            try:
-                os.unlink(new_socket_path)
-            except Exception:
-                pass
-
-        # Also clean up listener socket if exists
-        if vsock_config and vsock_config.get("enabled"):
-            listener_path = f"{new_socket_path}_{vsock_config.get('port', 9000)}"
-            if os.path.exists(listener_path):
-                try:
-                    os.unlink(listener_path)
-                except Exception:
-                    pass
-
-        vm.vsock_socket_path = new_socket_path
 
         # Try to load snapshot
         created_symlink = None
@@ -648,13 +722,14 @@ class BandSox:
         vm.resume()
 
         # Set up vsock listener for guest-initiated connections
-        # With the new architecture, we just start our listener - the guest will connect to us
-        if vsock_config and vsock_config.get("enabled"):
+        # For detached VMs, the runner process handles this (it received vsock_config)
+        # For non-detached VMs, we set it up here in the calling process
+        if not detach and vsock_config and vsock_config.get("enabled"):
             try:
                 vsock_port = vsock_config.get("port", 9000)
                 vm.vsock_cid = vsock_config.get("cid")
                 vm.vsock_port = vsock_port
-                vm.vsock_socket_path = new_socket_path
+                # vm.vsock_socket_path was already set earlier to the original path
 
                 # Start the listener for guest-initiated connections
                 vm.setup_vsock_listener(vsock_port)
@@ -666,6 +741,12 @@ class BandSox:
             except Exception as e:
                 logger.warning(f"Failed to setup vsock listener: {e}")
                 vm.vsock_enabled = False
+        elif detach and vsock_config and vsock_config.get("enabled"):
+            # For detached VMs, just set the vsock attributes (runner handles the listener)
+            vm.vsock_cid = vsock_config.get("cid")
+            vm.vsock_port = vsock_config.get("port", 9000)
+            vm.vsock_enabled = True
+            logger.info(f"Vsock config passed to runner for detached VM")
 
         if enable_networking and vm.agent_ready:
             # Check if we need to update IP
@@ -1041,9 +1122,20 @@ class BandSox:
 
 class ManagedMicroVM(MicroVM):
     def __init__(
-        self, vm_id: str, socket_path: str, bandsox: "BandSox", netns: str = None
+        self,
+        vm_id: str,
+        socket_path: str,
+        bandsox: "BandSox",
+        netns: str = None,
+        vsock_isolation: str = "namespace",
     ):
-        super().__init__(vm_id, socket_path, netns=netns)
+        super().__init__(
+            vm_id,
+            socket_path,
+            netns=netns,
+            vsock_isolation=vsock_isolation,
+            vsock_dir=str(bandsox.vsock_dir),
+        )
         self.bandsox = bandsox
 
     def _handle_stdout_line(self, line):

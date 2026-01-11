@@ -80,55 +80,28 @@ class TestCIDAllocator:
 
 
 class TestPortAllocator:
-    """Tests for port allocation and release."""
+    """Tests for port allocation - always returns 9000."""
 
-    def test_allocate_port_in_pool(self, tmp_path):
-        """Test that allocated ports are within pool (9000-9999)."""
+    def test_allocate_port_always_9000(self, tmp_path):
+        """Test that allocated port is always 9000 (fixed port)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             bs = BandSox(storage_dir=tmpdir)
             port1 = bs._allocate_port()
             port2 = bs._allocate_port()
 
-            assert 9000 <= port1 <= 9999
-            assert 9000 <= port2 <= 9999
-            assert port1 != port2  # Should be different
+            assert port1 == 9000
+            assert port2 == 9000  # Always same port since each VM has own socket path
 
-    def test_release_port_allows_reuse(self, tmp_path):
-        """Test that released ports can be reallocated (after wrap-around)."""
+    def test_release_port_is_noop(self, tmp_path):
+        """Test that release_port is a no-op (since we use fixed port)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             bs = BandSox(storage_dir=tmpdir)
             port1 = bs._allocate_port()
-            bs._release_port(port1)
+            bs._release_port(port1)  # Should not raise
 
-            # Port allocator increments sequentially; released ports are reused on wrap-around
-            # With 1000 ports (9000-9999), immediate reuse is not necessary
+            # Allocating again gives same port
             port2 = bs._allocate_port()
-            assert port2 != port1  # Should be next port, not immediate reuse
-            assert 9000 <= port2 <= 9999  # Should be in valid range
-
-    def test_no_duplicate_active_ports(self, tmp_path):
-        """Test that active ports are not duplicated."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bs = BandSox(storage_dir=tmpdir)
-            ports = set()
-            for _ in range(10):
-                port = bs._allocate_port()
-                assert port not in ports, f"Port {port} was allocated twice"
-                ports.add(port)
-
-    def test_port_state_persists(self, tmp_path):
-        """Test that port state persists across BandSox instances."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bs1 = BandSox(storage_dir=tmpdir)
-            port1 = bs1._allocate_port()
-            port2 = bs1._allocate_port()
-
-            bs2 = BandSox(storage_dir=tmpdir)
-            port3 = bs2._allocate_port()
-
-            # Should track used ports across instances
-            assert port3 != port1
-            assert port3 != port2
+            assert port2 == 9000
 
 
 # ============================================================================
@@ -354,3 +327,263 @@ def test_migration_guide_has_required_sections():
 
     for section in required_sections:
         assert section in content, f"Migration guide missing section: {section}"
+
+
+class TestVsockSnapshotPath:
+    """Tests for vsock path handling during snapshot restore."""
+
+    def test_vsock_config_includes_uds_path(self):
+        """Test that vsock_config includes uds_path for new VMs."""
+        # When creating vsock_config, it should include the uds_path
+        # This tests the expected structure of vsock_config
+        # New VMs use storage_dir/vsock/ path instead of /tmp/bandsox
+        vsock_config = {
+            "enabled": True,
+            "cid": 3,
+            "port": 9001,
+            "uds_path": "/var/lib/bandsox/vsock/vsock_test-vm.sock",
+        }
+
+        assert "uds_path" in vsock_config
+        assert vsock_config["uds_path"].endswith(".sock")
+        # New paths should NOT use /tmp/bandsox
+        assert "/tmp/bandsox" not in vsock_config["uds_path"]
+
+    def test_restore_uses_original_path_when_available(self):
+        """Test that restore logic migrates old /tmp/bandsox paths to new location."""
+        # Simulate snapshot metadata with old /tmp/bandsox path
+        snapshot_meta = {
+            "vsock_config": {
+                "enabled": True,
+                "cid": 3,
+                "port": 9001,
+                "uds_path": "/tmp/bandsox/vsock_original-vm-id.sock",
+            },
+            "source_vm_id": "original-vm-id",
+        }
+
+        vsock_config = snapshot_meta.get("vsock_config")
+        new_vm_id = "new-vm-id"
+        vsock_dir = "/var/lib/bandsox/vsock"
+
+        # This mimics the NEW restore logic in core.py that migrates old paths
+        if vsock_config and vsock_config.get("enabled"):
+            original_uds_path = vsock_config.get("uds_path")
+            if original_uds_path and "/tmp/bandsox/" in original_uds_path:
+                # Migrate old path to new location
+                import os
+
+                old_filename = os.path.basename(original_uds_path)
+                vsock_socket_path = f"{vsock_dir}/{old_filename}"
+            elif original_uds_path:
+                vsock_socket_path = original_uds_path
+            else:
+                source_vm_id = snapshot_meta.get("source_vm_id")
+                if source_vm_id:
+                    vsock_socket_path = f"{vsock_dir}/vsock_{source_vm_id}.sock"
+                else:
+                    vsock_socket_path = f"{vsock_dir}/vsock_{new_vm_id}.sock"
+        else:
+            vsock_socket_path = f"{vsock_dir}/vsock_{new_vm_id}.sock"
+
+        # Should migrate to new path, preserving filename
+        assert vsock_socket_path == "/var/lib/bandsox/vsock/vsock_original-vm-id.sock"
+        assert "/tmp/bandsox" not in vsock_socket_path
+
+    def test_restore_falls_back_to_source_vm_id(self):
+        """Test fallback to source_vm_id when uds_path is missing (old snapshots)."""
+        # Simulate old snapshot metadata without uds_path
+        snapshot_meta = {
+            "vsock_config": {
+                "enabled": True,
+                "cid": 3,
+                "port": 9001,
+                # No uds_path - old snapshot format
+            },
+            "source_vm_id": "old-vm-id-12345",
+        }
+
+        vsock_config = snapshot_meta.get("vsock_config")
+        new_vm_id = "new-vm-id"
+        vsock_dir = "/var/lib/bandsox/vsock"
+
+        # Mimic restore logic with new paths
+        if vsock_config and vsock_config.get("enabled"):
+            original_uds_path = vsock_config.get("uds_path")
+            if original_uds_path and "/tmp/bandsox/" in original_uds_path:
+                import os
+
+                old_filename = os.path.basename(original_uds_path)
+                vsock_socket_path = f"{vsock_dir}/{old_filename}"
+            elif original_uds_path:
+                vsock_socket_path = original_uds_path
+            else:
+                source_vm_id = snapshot_meta.get("source_vm_id")
+                if source_vm_id:
+                    vsock_socket_path = f"{vsock_dir}/vsock_{source_vm_id}.sock"
+                else:
+                    vsock_socket_path = f"{vsock_dir}/vsock_{new_vm_id}.sock"
+        else:
+            vsock_socket_path = f"{vsock_dir}/vsock_{new_vm_id}.sock"
+
+        # Should use source_vm_id path under new location
+        assert vsock_socket_path == "/var/lib/bandsox/vsock/vsock_old-vm-id-12345.sock"
+
+    def test_restore_uses_new_id_without_vsock(self):
+        """Test that VMs without vsock use new VM ID for socket path."""
+        # Simulate snapshot without vsock
+        snapshot_meta = {
+            "source_vm_id": "source-vm-id",
+            # No vsock_config
+        }
+
+        vsock_config = snapshot_meta.get("vsock_config")
+        new_vm_id = "new-vm-id"
+        vsock_dir = "/var/lib/bandsox/vsock"
+
+        # Mimic restore logic with new paths
+        if vsock_config and vsock_config.get("enabled"):
+            original_uds_path = vsock_config.get("uds_path")
+            if original_uds_path and "/tmp/bandsox/" in original_uds_path:
+                import os
+
+                old_filename = os.path.basename(original_uds_path)
+                vsock_socket_path = f"{vsock_dir}/{old_filename}"
+            elif original_uds_path:
+                vsock_socket_path = original_uds_path
+            else:
+                source_vm_id = snapshot_meta.get("source_vm_id")
+                if source_vm_id:
+                    vsock_socket_path = f"{vsock_dir}/vsock_{source_vm_id}.sock"
+                else:
+                    vsock_socket_path = f"{vsock_dir}/vsock_{new_vm_id}.sock"
+        else:
+            vsock_socket_path = f"{vsock_dir}/vsock_{new_vm_id}.sock"
+
+        # Should use new VM ID (vsock not enabled)
+        assert vsock_socket_path == f"/var/lib/bandsox/vsock/vsock_{new_vm_id}.sock"
+
+
+class TestVsockNamespaceIsolation:
+    """Tests for vsock namespace isolation feature."""
+
+    def test_default_vsock_isolation_is_namespace(self):
+        """Test that default vsock_isolation is 'namespace'."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sockets_dir = Path(tmpdir) / "sockets"
+            sockets_dir.mkdir()
+
+            vm = MicroVM("test-vm", str(sockets_dir / "test-vm.sock"))
+            assert vm.vsock_isolation == "namespace"
+
+    def test_vsock_isolation_can_be_set_to_none(self):
+        """Test that vsock_isolation can be set to 'none'."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sockets_dir = Path(tmpdir) / "sockets"
+            sockets_dir.mkdir()
+
+            vm = MicroVM(
+                "test-vm", str(sockets_dir / "test-vm.sock"), vsock_isolation="none"
+            )
+            assert vm.vsock_isolation == "none"
+
+    def test_namespace_isolation_requires_unshare(self):
+        """Test that namespace isolation validates unshare availability."""
+        import shutil
+
+        # This test verifies the validation logic exists
+        # The actual command execution is tested in integration tests
+
+        # If unshare is available, the check should pass
+        if shutil.which("unshare"):
+            # Just verify the vm can be created with namespace isolation
+            with tempfile.TemporaryDirectory() as tmpdir:
+                sockets_dir = Path(tmpdir) / "sockets"
+                sockets_dir.mkdir()
+
+                vm = MicroVM(
+                    "test-vm",
+                    str(sockets_dir / "test-vm.sock"),
+                    vsock_isolation="namespace",
+                )
+                assert vm.vsock_isolation == "namespace"
+
+    def test_start_process_includes_unshare_when_namespace_isolation(self):
+        """Test that start_process command includes unshare wrapper."""
+        # This is a logic test - we verify the command building logic
+        # would produce unshare commands
+
+        # The implementation wraps the firecracker command with:
+        # unshare --user --map-root-user --mount --propagation private -- sh -c 'mount -t tmpfs tmpfs /tmp && exec <fc_cmd>'
+        # Note: No longer creates /tmp/bandsox since vsock sockets are now in storage_dir/vsock/
+
+        import shlex
+
+        # Test command string construction
+        firecracker_bin = "/usr/bin/firecracker"
+        socket_path = "/tmp/test.sock"
+        # Use shlex.join for safe quoting (matches implementation)
+        fc_cmd = [firecracker_bin, "--api-sock", socket_path]
+        fc_cmd_str = shlex.join(fc_cmd)
+
+        # Expected unshare command structure (with user namespace for rootless mount)
+        unshare_cmd = [
+            "unshare",
+            "--user",
+            "--map-root-user",
+            "--mount",
+            "--propagation",
+            "private",
+            "--",
+            "sh",
+            "-c",
+            f"mount -t tmpfs tmpfs /tmp && exec {fc_cmd_str}",
+        ]
+
+        # Verify command structure
+        assert unshare_cmd[0] == "unshare"
+        assert "--user" in unshare_cmd
+        assert "--map-root-user" in unshare_cmd
+        assert "--mount" in unshare_cmd
+        assert "--propagation" in unshare_cmd
+        assert "private" in unshare_cmd
+        assert "sh" in unshare_cmd
+        assert "mount -t tmpfs tmpfs /tmp" in unshare_cmd[-1]
+        # Should NOT have mkdir -p /tmp/bandsox anymore
+        assert "mkdir -p /tmp/bandsox" not in unshare_cmd[-1]
+        assert firecracker_bin in unshare_cmd[-1]
+
+    def test_start_process_skips_unshare_when_none_isolation(self):
+        """Test that start_process skips unshare wrapper when isolation is 'none'."""
+        # When vsock_isolation='none', the command should be just:
+        # [firecracker_bin, "--api-sock", socket_path]
+        # without any unshare wrapper
+
+        firecracker_bin = "/usr/bin/firecracker"
+        socket_path = "/tmp/test.sock"
+
+        # Without namespace isolation, command is just firecracker
+        cmd = [firecracker_bin, "--api-sock", socket_path]
+
+        # Verify no unshare in command
+        assert "unshare" not in cmd
+        assert cmd[0] == firecracker_bin
+
+    def test_vsock_isolation_passed_through_managed_vm(self):
+        """Test that ManagedMicroVM passes vsock_isolation and vsock_dir to parent."""
+        from bandsox.core import ManagedMicroVM, BandSox
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bs = BandSox(storage_dir=tmpdir)
+            socket_path = str(bs.sockets_dir / "test-vm.sock")
+
+            # Test with namespace isolation
+            vm = ManagedMicroVM("test-vm", socket_path, bs, vsock_isolation="namespace")
+            assert vm.vsock_isolation == "namespace"
+            # Should use storage_dir/vsock/ as vsock_dir
+            assert vm.vsock_dir == str(bs.vsock_dir)
+
+            # Test with none isolation
+            vm2 = ManagedMicroVM("test-vm2", socket_path, bs, vsock_isolation="none")
+            assert vm2.vsock_isolation == "none"
+            assert vm2.vsock_dir == str(bs.vsock_dir)

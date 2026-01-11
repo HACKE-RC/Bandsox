@@ -11,6 +11,7 @@ BandSox is a fast, lightweight Python library and CLI for managing Firecracker m
 - **Fast Boot Times**: Leverages Firecracker's speed to start VMs in milliseconds.
 - **Docker Image Support**: Create VMs directly from Docker images (requires Python 3 installed in the image).
 - **Snapshotting**: Pause, resume and snapshot VMs for instant restoration.
+- **Concurrent Snapshot Restores**: Run multiple VMs from the same snapshot simultaneously using mount namespace isolation.
 - **Web Dashboard**: Visual interface to manage VMs, snapshots, and view terminal sessions.
 - **CLI Tool**: Comprehensive command-line interface for all operations.
 - **Python API**: Easy-to-use Python library for integration into your own applications.
@@ -121,6 +122,42 @@ This is **100-10,000x faster** than traditional serial-based file transfers!
 - Falls back gracefully to serial if vsock module is unavailable
 - No VM pause required during transfers
 - **Snapshot support**: Vsock bridge disconnected before snapshot, restored VMs detect vsock availability automatically
+
+### Namespace Isolation for Snapshots
+
+When restoring multiple VMs from the same snapshot, they would normally conflict on the vsock socket path. BandSox solves this with **mount namespace isolation**:
+
+- Each Firecracker process runs in its own mount namespace with a private `/tmp`
+- Multiple VMs restored from the same snapshot can run concurrently without collision
+- Uses `unshare` with user namespace mapping (no root required)
+
+**Configuration:**
+
+```python
+# Default: namespace isolation enabled
+vm = bs.restore_vm("my-snapshot")
+
+# Disable isolation (for debugging or single-VM scenarios)
+vm = bs.restore_vm("my-snapshot", vsock_isolation="none")
+```
+
+**API:**
+
+```bash
+# Restore with default namespace isolation
+curl -X POST http://localhost:8000/api/snapshots/my-snapshot/restore \
+  -H "Content-Type: application/json" \
+  -d '{"name": "restored-vm"}'
+
+# Disable isolation
+curl -X POST http://localhost:8000/api/snapshots/my-snapshot/restore \
+  -H "Content-Type: application/json" \
+  -d '{"name": "restored-vm", "vsock_isolation": "none"}'
+```
+
+**Requirements:**
+- `unshare` command (from `util-linux` package) must be available
+- User namespaces must be enabled in the kernel
 
 ### Checking Vsock Status
 
@@ -253,6 +290,7 @@ Default: `/var/lib/bandsox` (override with `BANDSOX_STORAGE` env var)
 ├── images/           # Rootfs ext4 images
 ├── snapshots/        # VM snapshots
 ├── sockets/          # Firecracker API sockets
+├── vsock/            # Vsock Unix domain sockets
 ├── metadata/         # VM metadata (including vsock_config)
 ├── cid_allocator.json  # CID allocation state
 └── port_allocator.json # Port allocation state
