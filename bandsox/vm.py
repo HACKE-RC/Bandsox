@@ -1390,7 +1390,7 @@ class MicroVM:
                 timeout=timeout
             )
 
-            if result["mode"] == "single" and result["content"]:
+            if result["mode"] == "single" and result["content"] is not None:
                 # Small file - decode and write
                 data = base64.b64decode(result["content"])
                 with open(local_path, "wb") as f:
