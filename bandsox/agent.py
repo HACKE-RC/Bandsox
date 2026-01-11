@@ -358,19 +358,61 @@ def handle_kill(cmd_id):
 
 
 def handle_read_file(cmd_id, path):
+    """Reads a file and sends content in chunks to avoid buffer overflows.
+    
+    Uses 2KB chunks (safe for serial buffer after base64 encoding).
+    Sends file_chunk events for each chunk, then file_complete at end.
+    """
     try:
         if not os.path.exists(path):
             send_event("error", {"cmd_id": cmd_id, "error": f"File not found: {path}"})
             send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
             return
 
-        with open(path, "rb") as f:
-            content = f.read()
-
-        encoded = base64.b64encode(content).decode("utf-8")
-
-        send_event("file_content", {"cmd_id": cmd_id, "path": path, "content": encoded})
-        send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
+        file_size = os.path.getsize(path)
+        
+        # For small files (<= 2KB), use single-shot transfer for efficiency
+        CHUNK_SIZE = 2 * 1024  # 2KB chunks
+        
+        if file_size <= CHUNK_SIZE:
+            # Small file - send all at once (backward compatible)
+            with open(path, "rb") as f:
+                content = f.read()
+            encoded = base64.b64encode(content).decode("utf-8")
+            send_event("file_content", {"cmd_id": cmd_id, "path": path, "content": encoded})
+            send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
+        else:
+            # Large file - send in chunks
+            md5 = hashlib.md5()
+            offset = 0
+            
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    
+                    md5.update(chunk)
+                    encoded = base64.b64encode(chunk).decode("utf-8")
+                    
+                    send_event("file_chunk", {
+                        "cmd_id": cmd_id,
+                        "path": path,
+                        "data": encoded,
+                        "offset": offset,
+                        "size": len(chunk)
+                    })
+                    
+                    offset += len(chunk)
+            
+            # Send completion event with checksum
+            send_event("file_complete", {
+                "cmd_id": cmd_id,
+                "path": path,
+                "total_size": file_size,
+                "checksum": md5.hexdigest()
+            })
+            send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
 
     except Exception as e:
         send_event("error", {"cmd_id": cmd_id, "error": str(e)})
