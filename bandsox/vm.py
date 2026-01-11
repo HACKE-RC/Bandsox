@@ -161,6 +161,8 @@ class MicroVM:
         self.vsock_cid = None
         self.vsock_port = None
         self.vsock_socket_path = None
+        self.vsock_listener = None  # New: VsockHostListener instance
+        # Legacy bridge vars (to be removed, kept for compatibility during transition)
         self.vsock_bridge_socket = None
         self.vsock_bridge_thread = None
         self.vsock_bridge_running = False
@@ -704,7 +706,7 @@ class MicroVM:
         self, command: str, on_stdout=None, on_stderr=None, on_exit=None
     ) -> tuple[str, int | None]:
         """Starts a background session in the VM.
-        
+
         Returns:
             tuple: (session_id, pid) where pid is the process ID of the started command,
                    or None if the PID could not be retrieved within 5 seconds.
@@ -716,11 +718,11 @@ class MicroVM:
                 raise Exception("Agent not ready")
 
         session_id = str(uuid.uuid4())
-        
+
         # Event to signal when we receive the started status with PID
         started_event = threading.Event()
         pid_result = {"pid": None}
-        
+
         def on_started(pid):
             pid_result["pid"] = pid
             started_event.set()
@@ -742,7 +744,7 @@ class MicroVM:
             }
         )
         self._write_to_agent(req + "\n")
-        
+
         # Wait for the started event with PID (max 5 seconds)
         started_event.wait(timeout=5)
 
@@ -1022,18 +1024,24 @@ class MicroVM:
             os.unlink(self.socket_path)
 
     def _setup_vsock_bridge(self, cid: int, port: int):
-        """Sets up vsock bridge for high-speed file transfers.
+        """Sets up vsock for high-speed file transfers using guest-initiated connections.
+
+        This method:
+        1. Configures Firecracker to create a vsock device with uds_path
+        2. Starts a VsockHostListener on uds_path_PORT for guest connections
+
+        The guest connects to us via AF_VSOCK(CID=2, port), and Firecracker
+        routes the connection to our listener socket at uds_path_PORT.
 
         Args:
-            cid: Guest Context ID
-            port: Host port to listen on
+            cid: Guest Context ID (for Firecracker config)
+            port: Port number for guest to connect to
         """
-        import threading
-        import json
+        from .vsock import VsockHostListener
 
         self.vsock_socket_path = f"/tmp/bandsox/vsock_{self.vm_id}.sock"
 
-        # Pre-cleanup: Remove any stale socket file before Firecracker creates it
+        # Pre-cleanup: Remove any stale socket files
         if os.path.exists(self.vsock_socket_path):
             try:
                 os.unlink(self.vsock_socket_path)
@@ -1043,35 +1051,33 @@ class MicroVM:
                     f"Failed to remove stale socket {self.vsock_socket_path}: {e}"
                 )
 
+        # Also clean up listener socket if it exists
+        listener_path = f"{self.vsock_socket_path}_{port}"
+        if os.path.exists(listener_path):
+            try:
+                os.unlink(listener_path)
+                logger.debug(f"Removed stale listener socket: {listener_path}")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to remove stale listener socket {listener_path}: {e}"
+                )
+
         try:
-            # Tell Firecracker to create vsock device with this socket path
-            # Firecracker will create and bind to Unix socket itself
+            # Tell Firecracker to create vsock device
+            # Firecracker creates a Unix socket at uds_path for host-initiated connections
+            # For guest-initiated connections, it routes to uds_path_PORT
             logger.debug(
                 f"Configuring Firecracker vsock: CID={cid}, socket={self.vsock_socket_path}"
             )
             self.client.put_vsock("vsock0", cid, self.vsock_socket_path)
 
-            # Wait for Firecracker to create the socket
-            max_wait = 50  # 5 seconds
-            for i in range(max_wait):
-                if os.path.exists(self.vsock_socket_path):
-                    break
-                time.sleep(0.1)
-            else:
-                raise Exception(
-                    f"Firecracker vsock socket not created at {self.vsock_socket_path}"
-                )
-
-            # Now connect to the socket that Firecracker created
-            self.vsock_bridge_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self.vsock_bridge_socket.connect(self.vsock_socket_path)
-            self.vsock_bridge_socket.settimeout(30)
-
-            self.vsock_bridge_running = True
-            self.vsock_bridge_thread = threading.Thread(
-                target=self._vsock_bridge_loop, daemon=True
+            # Create and start our listener for guest-initiated connections
+            # Guest connects to AF_VSOCK(CID=2, port) -> Firecracker routes to our listener
+            self.vsock_listener = VsockHostListener(
+                uds_path=self.vsock_socket_path,
+                port=port,
             )
-            self.vsock_bridge_thread.start()
+            self.vsock_listener.start()
 
             # Set these AFTER successful setup
             self.vsock_enabled = True
@@ -1079,205 +1085,45 @@ class MicroVM:
             self.vsock_port = port
 
             self.env_vars["BANDSOX_VSOCK_PORT"] = str(port)
-            logger.info(f"Vsock bridge enabled: CID={cid}, port={port}")
+            logger.info(
+                f"Vsock enabled: CID={cid}, port={port}, listener={listener_path}"
+            )
 
         except Exception as e:
-            logger.error(f"Failed to setup vsock bridge: {e}")
-            # Ensure cleanup happens on ANY failure
+            logger.error(f"Failed to setup vsock: {e}")
             self._cleanup_vsock_bridge()
             raise Exception(f"Failed to setup vsock: {e}") from e
 
-    def _vsock_bridge_loop(self):
-        """Main loop that receives vsock messages from Firecracker.
-
-        Firecracker creates the Unix socket and forwards guest vsock connections.
-        We connect to the socket as a client to receive those forwarded messages.
-        """
-        import json
-
-        logger.info(f"Vsock bridge loop started for {self.vm_id}")
-        buffer = b""
-
-        try:
-            while self.vsock_bridge_running:
-                try:
-                    data = self.vsock_bridge_socket.recv(65536)
-                    if not data:
-                        logger.debug("Vsock socket closed by Firecracker")
-                        break
-                    buffer += data
-
-                    while b"\n" in buffer:
-                        line, buffer = buffer.split(b"\n", 1)
-                        try:
-                            msg = json.loads(line.decode("utf-8"))
-                            msg_type = msg.get("type")
-                            cmd_id = msg.get("cmd_id")
-                            path = msg.get("path")
-                            size = msg.get("size", 0)
-                            checksum = msg.get("checksum", "")
-
-                            if msg_type == "upload":
-                                self._vsock_handle_upload(
-                                    self.vsock_bridge_socket,
-                                    cmd_id,
-                                    path,
-                                    size,
-                                    checksum,
-                                )
-                            elif msg_type == "download":
-                                self._vsock_handle_download(
-                                    self.vsock_bridge_socket, cmd_id, path
-                                )
-                        except json.JSONDecodeError:
-                            logger.debug(f"Failed to decode vsock message: {line}")
-                        except Exception as e:
-                            logger.error(f"Error handling vsock message: {e}")
-                except socket.timeout:
-                    continue
-                except OSError as e:
-                    if e.errno == errno.EPIPE or e.errno == errno.ECONNRESET:
-                        logger.debug("Vsock connection closed")
-                        break
-                    else:
-                        logger.error(f"Vsock socket error: {e}")
-        except Exception as e:
-            logger.error(f"Vsock bridge loop error: {e}")
-        finally:
-            logger.info(f"Vsock bridge loop stopped for {self.vm_id}")
-
-    def _vsock_handle_upload(
-        self, client: socket.socket, cmd_id: str, path: str, size: int, checksum: str
-    ):
-        """Handles vsock file upload (host -> guest)."""
-        import hashlib
-        import base64
-
-        client.sendall(json.dumps({"type": "ready", "cmd_id": cmd_id}).encode() + b"\n")
-
-        received = 0
-        md5 = hashlib.md5()
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-
-        with open(path, "wb") as f:
-            while received < size:
-                try:
-                    data = client.recv(65536)
-                    if not data:
-                        break
-                    f.write(data)
-                    md5.update(data)
-                    received += len(data)
-                    client.sendall(
-                        json.dumps(
-                            {"type": "ack", "cmd_id": cmd_id, "bytes": received}
-                        ).encode()
-                        + b"\n"
-                    )
-                except socket.timeout:
-                    break
-
-        file_hash = md5.hexdigest()
-        if file_hash == checksum:
-            client.sendall(
-                json.dumps(
-                    {"type": "complete", "cmd_id": cmd_id, "size": received}
-                ).encode()
-                + b"\n"
-            )
-        else:
-            client.sendall(
-                json.dumps(
-                    {
-                        "type": "error",
-                        "cmd_id": cmd_id,
-                        "error": f"Checksum mismatch: expected {checksum}, got {file_hash}",
-                    }
-                ).encode()
-                + b"\n"
-            )
-
-    def _vsock_handle_download(self, client: socket.socket, cmd_id: str, path: str):
-        """Handles vsock file download (guest -> host)."""
-        import hashlib
-        import base64
-        import os
-
-        if not os.path.exists(path):
-            client.sendall(
-                json.dumps(
-                    {"type": "error", "cmd_id": cmd_id, "error": "File not found"}
-                ).encode()
-                + b"\n"
-            )
-            return
-
-        file_size = os.path.getsize(path)
-        md5 = hashlib.md5()
-
-        with open(path, "rb") as f:
-            while True:
-                chunk = f.read(65536)
-                if not chunk:
-                    break
-                md5.update(chunk)
-                encoded = base64.b64encode(chunk).decode("utf-8")
-                client.sendall(
-                    json.dumps(
-                        {
-                            "type": "chunk",
-                            "cmd_id": cmd_id,
-                            "data": encoded,
-                            "size": len(chunk),
-                        }
-                    ).encode()
-                    + b"\n"
-                )
-
-        client.sendall(
-            json.dumps(
-                {
-                    "type": "complete",
-                    "cmd_id": cmd_id,
-                    "size": file_size,
-                    "checksum": md5.hexdigest(),
-                }
-            ).encode()
-            + b"\n"
-        )
-
     def _cleanup_vsock_bridge(self):
-        """Cleans up vsock bridge resources."""
-        logger.debug(f"Cleaning up vsock bridge for {self.vm_id}")
+        """Cleans up vsock resources."""
+        logger.debug(f"Cleaning up vsock for {self.vm_id}")
 
+        # Stop the listener
+        if self.vsock_listener:
+            try:
+                self.vsock_listener.stop()
+                logger.debug("Vsock listener stopped")
+            except Exception as e:
+                logger.debug(f"Error stopping vsock listener: {e}")
+            self.vsock_listener = None
+
+        # Legacy cleanup for bridge (if any)
         self.vsock_bridge_running = False
-
-        # Close socket first
         if self.vsock_bridge_socket:
             try:
                 self.vsock_bridge_socket.close()
-                logger.debug("Closed vsock bridge socket")
-            except Exception as e:
-                logger.debug(f"Error closing vsock socket: {e}")
+            except Exception:
+                pass
             self.vsock_bridge_socket = None
-
-        # Wait for thread to stop (briefly)
         if self.vsock_bridge_thread and self.vsock_bridge_thread.is_alive():
             try:
-                self.vsock_bridge_thread.join(timeout=2)
-                logger.debug("Vsock bridge thread stopped")
+                self.vsock_bridge_thread.join(timeout=1)
             except Exception:
                 pass
             self.vsock_bridge_thread = None
 
-        # Remove socket file
-        socket_path = self.vsock_socket_path
-        if socket_path and os.path.exists(socket_path):
-            try:
-                os.unlink(socket_path)
-                logger.debug(f"Removed vsock socket: {socket_path}")
-            except Exception as e:
-                logger.warning(f"Failed to remove vsock socket {socket_path}: {e}")
+        # Don't remove the main socket file - Firecracker owns it
+        # Only clean up if we're sure we created it (e.g., on failure before VM start)
 
         self.vsock_socket_path = None
         self.vsock_enabled = False
@@ -1286,6 +1132,45 @@ class MicroVM:
 
         if "BANDSOX_VSOCK_PORT" in self.env_vars:
             del self.env_vars["BANDSOX_VSOCK_PORT"]
+
+    def setup_vsock_listener(self, port: int = None):
+        """Set up vsock listener for an already-running VM (e.g., after restore).
+
+        Call this after restore to enable vsock file transfers.
+        The Firecracker vsock device must already be configured.
+
+        Args:
+            port: Port to listen on (uses self.vsock_port if not specified)
+        """
+        from .vsock import VsockHostListener
+
+        if port is None:
+            port = self.vsock_port
+        if port is None:
+            raise ValueError("No vsock port specified")
+
+        if not self.vsock_socket_path:
+            raise ValueError("No vsock socket path configured")
+
+        # Create and start listener
+        listener_path = f"{self.vsock_socket_path}_{port}"
+
+        # Clean up stale listener socket
+        if os.path.exists(listener_path):
+            try:
+                os.unlink(listener_path)
+            except Exception:
+                pass
+
+        self.vsock_listener = VsockHostListener(
+            uds_path=self.vsock_socket_path,
+            port=port,
+        )
+        self.vsock_listener.start()
+
+        self.vsock_enabled = True
+        self.env_vars["BANDSOX_VSOCK_PORT"] = str(port)
+        logger.info(f"Vsock listener started: port={port}, path={listener_path}")
 
     @classmethod
     def create_from_snapshot(
@@ -1336,10 +1221,10 @@ class MicroVM:
 
     def download_file(self, remote_path: str, local_path: str, timeout: int = 300):
         """Downloads a file from the VM to the local filesystem.
-        
+
         Handles both small files (single file_content event) and large files
         (chunked via file_chunk/file_complete events).
-        
+
         Args:
             remote_path: Path to file in VM
             local_path: Path to save file locally
@@ -1350,11 +1235,17 @@ class MicroVM:
 
         import base64
         import hashlib
-        
+
         local_path = os.path.abspath(local_path)
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        
-        result = {"mode": None, "content": None, "file_handle": None, "md5": None, "error": None}
+
+        result = {
+            "mode": None,
+            "content": None,
+            "file_handle": None,
+            "md5": None,
+            "error": None,
+        }
 
         def on_file_content(content):
             """Handle small file (single shot transfer)."""
@@ -1367,7 +1258,7 @@ class MicroVM:
                 result["mode"] = "chunked"
                 result["file_handle"] = open(local_path, "wb")
                 result["md5"] = hashlib.md5()
-            
+
             decoded = base64.b64decode(data)
             result["file_handle"].write(decoded)
             result["md5"].update(decoded)
@@ -1387,7 +1278,7 @@ class MicroVM:
                 on_file_content=on_file_content,
                 on_file_chunk=on_file_chunk,
                 on_file_complete=on_file_complete,
-                timeout=timeout
+                timeout=timeout,
             )
 
             if result["mode"] == "single" and result["content"] is not None:
@@ -1396,17 +1287,19 @@ class MicroVM:
                 with open(local_path, "wb") as f:
                     f.write(data)
                 return
-            
+
             elif result["mode"] == "chunked":
                 # Large file - already written, verify checksum if available
                 if result.get("checksum") and result.get("md5"):
                     local_checksum = result["md5"].hexdigest()
                     if local_checksum != result["checksum"]:
-                        raise Exception(f"Checksum mismatch: expected {result['checksum']}, got {local_checksum}")
+                        raise Exception(
+                            f"Checksum mismatch: expected {result['checksum']}, got {local_checksum}"
+                        )
                 return
-            
+
             raise Exception(f"Failed to download {remote_path} via agent")
-            
+
         finally:
             # Ensure file handle is closed on any error
             if result.get("file_handle"):
@@ -1414,9 +1307,9 @@ class MicroVM:
 
     def upload_file(self, local_path: str, remote_path: str, timeout: int = None):
         """Uploads a file from local filesystem to the VM.
-        
+
         Uses chunked uploads for large files to avoid serial buffer overflows.
-        
+
         Args:
             local_path: Path to local file
             remote_path: Path in VM to write to
@@ -1430,9 +1323,9 @@ class MicroVM:
 
         with open(local_path, "rb") as f:
             content = f.read()
-        
+
         file_size = len(content)
-        
+
         # Calculate timeout based on file size: minimum 60s, +30s per MB
         if timeout is None:
             file_size_mb = file_size / (1024 * 1024)
@@ -1442,27 +1335,38 @@ class MicroVM:
         # Serial console typically has ~4KB buffer, base64 encoding adds 33% overhead
         # So 2KB raw = ~2.7KB base64 = safe for serial
         CHUNK_SIZE = 2 * 1024  # 2KB chunks
-        
+
         if file_size <= CHUNK_SIZE:
             # Small file - send in one request
             import base64
+
             encoded = base64.b64encode(content).decode("utf-8")
-            self.send_request("write_file", {"path": remote_path, "content": encoded}, timeout=timeout)
+            self.send_request(
+                "write_file", {"path": remote_path, "content": encoded}, timeout=timeout
+            )
         else:
             # Large file - send in chunks with append mode
             import base64
-            
+
             # First chunk creates the file
             first_chunk = content[:CHUNK_SIZE]
             encoded = base64.b64encode(first_chunk).decode("utf-8")
-            self.send_request("write_file", {"path": remote_path, "content": encoded, "append": False}, timeout=timeout)
-            
+            self.send_request(
+                "write_file",
+                {"path": remote_path, "content": encoded, "append": False},
+                timeout=timeout,
+            )
+
             # Remaining chunks append
             offset = CHUNK_SIZE
             while offset < file_size:
-                chunk = content[offset:offset + CHUNK_SIZE]
+                chunk = content[offset : offset + CHUNK_SIZE]
                 encoded = base64.b64encode(chunk).decode("utf-8")
-                self.send_request("write_file", {"path": remote_path, "content": encoded, "append": True}, timeout=timeout)
+                self.send_request(
+                    "write_file",
+                    {"path": remote_path, "content": encoded, "append": True},
+                    timeout=timeout,
+                )
                 offset += CHUNK_SIZE
 
     def upload_folder(

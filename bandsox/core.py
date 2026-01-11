@@ -528,50 +528,31 @@ class BandSox:
         if snap_rootfs and os.path.exists(snap_rootfs):
             self._clone_rootfs(snap_rootfs, instance_rootfs)
 
-        # Handle vsock socket path - each restored VM needs its own unique socket
-        # Firecracker bakes the socket path into the snapshot, so we use a symlink trick:
-        # 1. Firecracker expects socket at old_socket_path (from snapshot)
-        # 2. We create old_socket_path as a symlink to new_socket_path (unique per VM)
-        # 3. Firecracker binds to old_socket_path, but it actually creates new_socket_path
+        # Handle vsock configuration for restored VM
+        # With guest-initiated connections, we just need to:
+        # 1. Set up our listener socket at uds_path_PORT (done after VM starts)
+        # 2. The guest agent already has BANDSOX_VSOCK_PORT in its environment (from snapshot)
         vsock_config = snapshot_meta.get("vsock_config")
-        old_socket_path = None
-        new_socket_path = None
-        
-        if vsock_config and vsock_config.get("enabled"):
-            old_vm_id = snapshot_meta.get("source_vm_id")
-            if old_vm_id:
-                old_socket_path = f"/tmp/bandsox/vsock_{old_vm_id}.sock"
-                new_socket_path = f"/tmp/bandsox/vsock_{new_vm_id}.sock"
-                
-                # Ensure /tmp/bandsox exists
-                os.makedirs("/tmp/bandsox", exist_ok=True)
-                
-                # Clean up any existing socket/symlink at old path
-                if os.path.exists(old_socket_path) or os.path.islink(old_socket_path):
-                    try:
-                        os.unlink(old_socket_path)
-                        logger.debug(f"Removed existing socket/symlink: {old_socket_path}")
-                    except Exception as e:
-                        logger.warning(f"Failed to remove {old_socket_path}: {e}")
-                
-                # Clean up any existing socket at new path
-                if os.path.exists(new_socket_path):
-                    try:
-                        os.unlink(new_socket_path)
-                    except Exception:
-                        pass
-                
-                # Create symlink: old_socket_path -> new_socket_path
-                # When Firecracker tries to bind to old_socket_path, it will actually
-                # create the socket at new_socket_path (following the symlink)
-                try:
-                    os.symlink(new_socket_path, old_socket_path)
-                    logger.debug(f"Created vsock symlink: {old_socket_path} -> {new_socket_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to create vsock symlink: {e}")
-                    old_socket_path = None  # Fall back to no vsock
+        new_socket_path = f"/tmp/bandsox/vsock_{new_vm_id}.sock"
 
-                vm.vsock_socket_path = new_socket_path
+        # Pre-cleanup: remove stale socket files for this VM
+        os.makedirs("/tmp/bandsox", exist_ok=True)
+        if os.path.exists(new_socket_path):
+            try:
+                os.unlink(new_socket_path)
+            except Exception:
+                pass
+
+        # Also clean up listener socket if exists
+        if vsock_config and vsock_config.get("enabled"):
+            listener_path = f"{new_socket_path}_{vsock_config.get('port', 9000)}"
+            if os.path.exists(listener_path):
+                try:
+                    os.unlink(listener_path)
+                except Exception:
+                    pass
+
+        vm.vsock_socket_path = new_socket_path
 
         # Try to load snapshot
         created_symlink = None
@@ -666,50 +647,24 @@ class BandSox:
 
         vm.resume()
 
-        # Connect to vsock bridge if snapshot had vsock enabled
-        # We set up the symlink before load_snapshot so the socket is at new_socket_path
-        if vsock_config and vsock_config.get("enabled") and new_socket_path:
+        # Set up vsock listener for guest-initiated connections
+        # With the new architecture, we just start our listener - the guest will connect to us
+        if vsock_config and vsock_config.get("enabled"):
             try:
-                # Wait for Firecracker to create the socket (via our symlink)
-                max_wait = 50
-                for i in range(max_wait):
-                    if os.path.exists(new_socket_path):
-                        break
-                    time.sleep(0.1)
-                else:
-                    raise Exception(f"Vsock socket not created: {new_socket_path}")
-                
-                import socket as sock_module
-                
+                vsock_port = vsock_config.get("port", 9000)
+                vm.vsock_cid = vsock_config.get("cid")
+                vm.vsock_port = vsock_port
                 vm.vsock_socket_path = new_socket_path
-                vm.vsock_bridge_socket = sock_module.socket(
-                    sock_module.AF_UNIX, sock_module.SOCK_STREAM
+
+                # Start the listener for guest-initiated connections
+                vm.setup_vsock_listener(vsock_port)
+
+                logger.info(
+                    f"Vsock listener started for restored VM: port={vsock_port}"
                 )
-                vm.vsock_bridge_socket.connect(new_socket_path)
-                vm.vsock_bridge_socket.settimeout(30)
-                
-                vm.vsock_cid = vsock_config["cid"]
-                vm.vsock_port = vsock_config["port"]
-                vm.vsock_enabled = True
-                vm.vsock_bridge_running = True
-                
-                vm.vsock_bridge_thread = threading.Thread(
-                    target=vm._vsock_bridge_loop, daemon=True
-                )
-                vm.vsock_bridge_thread.start()
-                
-                vm.env_vars["BANDSOX_VSOCK_PORT"] = str(vsock_config["port"])
-                logger.info(f"Vsock bridge connected: {new_socket_path}")
-                
-                # Clean up the symlink - Firecracker has created the real socket now
-                if old_socket_path and os.path.islink(old_socket_path):
-                    try:
-                        os.unlink(old_socket_path)
-                    except Exception:
-                        pass
-                        
+
             except Exception as e:
-                logger.warning(f"Failed to setup vsock bridge: {e}")
+                logger.warning(f"Failed to setup vsock listener: {e}")
                 vm.vsock_enabled = False
 
         if enable_networking and vm.agent_ready:
@@ -831,6 +786,9 @@ class BandSox:
                 source_rootfs
             ),  # Original path for reference/symlink matching
             "network_config": vm_meta.get("network_config"),
+            "vsock_config": vm_meta.get(
+                "vsock_config"
+            ),  # Include vsock config for restore
             "metadata": metadata
             if metadata is not None
             else vm_meta.get("metadata", {}),
@@ -1243,7 +1201,6 @@ class ManagedMicroVM(MicroVM):
         if not self.wait_for_agent():
             raise Exception("Agent not ready")
         return super().download_file(*args, **kwargs)
-
 
     def delete(self):
         self.bandsox.delete_vm(self.vm_id)

@@ -18,27 +18,87 @@ import time
 # This agent runs inside the guest on ttyS0.
 # It reads JSON commands from stdin and writes JSON events to stdout.
 
-# Vsock Client Module
-VSOCK_ENABLED = False
-VSOCK_SOCKET = None
+# Vsock Client Module - Guest-Initiated Connections
+#
+# The guest initiates connections to the host for file transfers.
+# Firecracker routes AF_VSOCK connections to Unix sockets on the host.
+#
+# Protocol:
+# 1. Guest connects to host via AF_VSOCK(CID=2, port)
+# 2. Guest sends a JSON request (download or upload)
+# 3. Host responds with data or acknowledgments
+# 4. Guest closes connection when done
+
 VSOCK_CID_HOST = 2  # Well-known CID for host
 
 
-def vsock_connect(port: int, retry: int = 3) -> bool:
-    """Connects to host vsock socket.
+def vsock_check_available() -> bool:
+    """Check if vsock is available on this system."""
+    try:
+        socket.AF_VSOCK
+        return True
+    except AttributeError:
+        return False
+
+
+def vsock_create_connection(port: int, timeout: float = 10.0):
+    """Create a new vsock connection to the host.
 
     Args:
-        port: Port number to connect to
-        retry: Number of connection attempts (default 3)
+        port: Port to connect to
+        timeout: Connection timeout in seconds
 
     Returns:
-        True if connected, False if failed
+        Connected socket or None on failure
+    """
+    if not vsock_check_available():
+        sys.stderr.write("WARNING: AF_VSOCK not available in kernel\n")
+        sys.stderr.flush()
+        return None
+
+    try:
+        sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((VSOCK_CID_HOST, port))
+        return sock
+    except Exception as e:
+        sys.stderr.write(f"WARNING: Vsock connection to port {port} failed: {e}\n")
+        sys.stderr.flush()
+        return None
+
+
+def vsock_send_json_msg(sock, data: dict):
+    """Send a JSON message over a vsock connection."""
+    message = json.dumps(data) + "\n"
+    sock.sendall(message.encode("utf-8"))
+
+
+def vsock_recv_json_msg(sock) -> dict:
+    """Receive a JSON message from vsock connection."""
+    buffer = b""
+    while b"\n" not in buffer:
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise Exception("Vsock connection closed")
+        buffer += chunk
+
+    line, _ = buffer.split(b"\n", 1)
+    return json.loads(line.decode("utf-8"))
+
+
+# Legacy globals for backward compatibility during transition
+VSOCK_ENABLED = False
+VSOCK_SOCKET = None
+
+
+def vsock_connect(port: int, retry: int = 3) -> bool:
+    """Legacy: Connects to host vsock socket.
+
+    This maintains backward compatibility but uses the new connection method.
     """
     global VSOCK_ENABLED, VSOCK_SOCKET
 
-    try:
-        socket.AF_VSOCK  # Will raise AttributeError if not available
-    except AttributeError:
+    if not vsock_check_available():
         sys.stderr.write(
             "WARNING: Vsock module not available, falling back to serial\n"
         )
@@ -47,26 +107,22 @@ def vsock_connect(port: int, retry: int = 3) -> bool:
 
     for attempt in range(retry):
         try:
-            VSOCK_SOCKET = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-            VSOCK_SOCKET.settimeout(10)  # 10s connection timeout
-
-            # Connect to host (CID=2) on specified port
-            VSOCK_SOCKET.connect((VSOCK_CID_HOST, port))
-
-            sys.stderr.write(
-                f"INFO: Connected to vsock: CID={VSOCK_CID_HOST}, Port={port}\n"
-            )
-            sys.stderr.flush()
-            VSOCK_ENABLED = True
-            return True
-
+            VSOCK_SOCKET = vsock_create_connection(port)
+            if VSOCK_SOCKET:
+                sys.stderr.write(
+                    f"INFO: Connected to vsock: CID={VSOCK_CID_HOST}, Port={port}\n"
+                )
+                sys.stderr.flush()
+                VSOCK_ENABLED = True
+                return True
+            raise Exception("Connection returned None")
         except Exception as e:
             if attempt < retry - 1:
                 sys.stderr.write(
                     f"DEBUG: Vsock connection attempt {attempt + 1} failed: {e}\n"
                 )
                 sys.stderr.flush()
-                time.sleep(1)  # 1s backoff
+                time.sleep(1)
             else:
                 sys.stderr.write(
                     f"WARNING: Vsock connection failed after {retry} attempts: {e}\n"
@@ -79,11 +135,7 @@ def vsock_connect(port: int, retry: int = 3) -> bool:
 
 
 def vsock_send_json(data: dict):
-    """Sends JSON data over vsock connection.
-
-    Args:
-        data: Dictionary to send as JSON
-    """
+    """Legacy: Sends JSON data over vsock connection."""
     global VSOCK_SOCKET
 
     if not VSOCK_ENABLED or not VSOCK_SOCKET:
@@ -94,11 +146,7 @@ def vsock_send_json(data: dict):
 
 
 def vsock_read_line() -> str:
-    """Reads a newline-delimited line from vsock connection.
-
-    Returns:
-        Complete line as string
-    """
+    """Legacy: Reads a newline-delimited line from vsock connection."""
     global VSOCK_SOCKET
 
     if not VSOCK_ENABLED or not VSOCK_SOCKET:
@@ -111,7 +159,7 @@ def vsock_read_line() -> str:
             raise Exception("Vsock connection closed")
         buffer += chunk
         if b"\n" in buffer:
-            line, buffer = buffer.split(b"\n", 1)
+            line, _ = buffer.split(b"\n", 1)
             return line.decode("utf-8")
 
 
@@ -120,7 +168,10 @@ def vsock_disconnect():
     global VSOCK_SOCKET, VSOCK_ENABLED
 
     if VSOCK_SOCKET:
-        VSOCK_SOCKET.close()
+        try:
+            VSOCK_SOCKET.close()
+        except Exception:
+            pass
         VSOCK_SOCKET = None
         VSOCK_ENABLED = False
         sys.stderr.write("INFO: Vsock disconnected\n")
@@ -223,7 +274,9 @@ def handle_command(cmd_id, command, background=False, env=None):
             t_mon = threading.Thread(target=monitor_exit, daemon=True)
             t_mon.start()
 
-            send_event("status", {"cmd_id": cmd_id, "status": "started", "pid": process.pid})
+            send_event(
+                "status", {"cmd_id": cmd_id, "status": "started", "pid": process.pid}
+            )
 
         else:
             # Blocking execution (legacy)
@@ -359,7 +412,7 @@ def handle_kill(cmd_id):
 
 def handle_read_file(cmd_id, path):
     """Reads a file and sends content in chunks to avoid buffer overflows.
-    
+
     Uses 2KB chunks (safe for serial buffer after base64 encoding).
     Sends file_chunk events for each chunk, then file_complete at end.
     """
@@ -370,53 +423,61 @@ def handle_read_file(cmd_id, path):
             return
 
         file_size = os.path.getsize(path)
-        
+
         # For small files (<= 2KB), use single-shot transfer for efficiency
         CHUNK_SIZE = 2 * 1024  # 2KB chunks
-        
+
         if file_size <= CHUNK_SIZE:
             # Small file - send all at once (backward compatible)
             with open(path, "rb") as f:
                 content = f.read()
             encoded = base64.b64encode(content).decode("utf-8")
-            send_event("file_content", {"cmd_id": cmd_id, "path": path, "content": encoded})
+            send_event(
+                "file_content", {"cmd_id": cmd_id, "path": path, "content": encoded}
+            )
             send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
         else:
             # Large file - send in chunks with throttling for serial console
             md5 = hashlib.md5()
             offset = 0
-            
+
             with open(path, "rb") as f:
                 while True:
                     chunk = f.read(CHUNK_SIZE)
                     if not chunk:
                         break
-                    
+
                     md5.update(chunk)
                     encoded = base64.b64encode(chunk).decode("utf-8")
-                    
-                    send_event("file_chunk", {
-                        "cmd_id": cmd_id,
-                        "path": path,
-                        "data": encoded,
-                        "offset": offset,
-                        "size": len(chunk)
-                    })
-                    
+
+                    send_event(
+                        "file_chunk",
+                        {
+                            "cmd_id": cmd_id,
+                            "path": path,
+                            "data": encoded,
+                            "offset": offset,
+                            "size": len(chunk),
+                        },
+                    )
+
                     offset += len(chunk)
-                    
+
                     # Throttle output to prevent serial buffer overflow
                     # Serial console is slow (~115200 baud = ~11KB/s max)
                     # 2KB chunk + base64 overhead = ~2.7KB, needs ~250ms to transmit
                     time.sleep(0.2)  # 200ms delay between chunks for serial safety
-            
+
             # Send completion event with checksum
-            send_event("file_complete", {
-                "cmd_id": cmd_id,
-                "path": path,
-                "total_size": file_size,
-                "checksum": md5.hexdigest()
-            })
+            send_event(
+                "file_complete",
+                {
+                    "cmd_id": cmd_id,
+                    "path": path,
+                    "total_size": file_size,
+                    "checksum": md5.hexdigest(),
+                },
+            )
             send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
 
     except Exception as e:
@@ -447,9 +508,13 @@ def handle_write_file(cmd_id, path, content, mode="wb", append=False):
 
 
 def handle_vsock_upload(cmd_id, path: str, size: int, checksum: str):
-    """Handles vsock-based file upload (raw binary).
+    """Handles vsock-based file upload from host to guest.
 
-    Protocol:
+    NOTE: This is a legacy function for host-initiated uploads.
+    The new architecture uses guest-initiated connections where the guest
+    would request the file. This function is kept for backward compatibility.
+
+    Protocol (legacy host-initiated):
     1. Guest receives upload request with path, size, checksum
     2. Guest sends "ready" response via vsock
     3. Guest receives raw binary data until size bytes received
@@ -462,8 +527,8 @@ def handle_vsock_upload(cmd_id, path: str, size: int, checksum: str):
         size: File size in bytes
         checksum: MD5 checksum for verification
     """
-    global vsock_socket
-    
+    global VSOCK_SOCKET
+
     try:
         # Ensure directory exists
         dirname = os.path.dirname(path)
@@ -472,17 +537,17 @@ def handle_vsock_upload(cmd_id, path: str, size: int, checksum: str):
 
         # Send ready response via vsock
         ready_msg = json.dumps({"type": "ready", "cmd_id": cmd_id}).encode() + b"\n"
-        vsock_socket.sendall(ready_msg)
+        VSOCK_SOCKET.sendall(ready_msg)
 
         # Receive raw binary file data
         received_bytes = 0
         md5 = hashlib.md5()
-        
+
         with open(path, "wb") as f:
             while received_bytes < size:
                 remaining = size - received_bytes
                 chunk_size = min(65536, remaining)
-                chunk = vsock_socket.recv(chunk_size)
+                chunk = VSOCK_SOCKET.recv(chunk_size)
                 if not chunk:
                     raise Exception("Connection closed during upload")
                 f.write(chunk)
@@ -492,106 +557,250 @@ def handle_vsock_upload(cmd_id, path: str, size: int, checksum: str):
         # Verify checksum
         file_checksum = md5.hexdigest()
         if file_checksum == checksum:
-            complete_msg = json.dumps({
-                "type": "complete",
-                "cmd_id": cmd_id,
-                "size": received_bytes
-            }).encode() + b"\n"
-            vsock_socket.sendall(complete_msg)
+            complete_msg = (
+                json.dumps(
+                    {"type": "complete", "cmd_id": cmd_id, "size": received_bytes}
+                ).encode()
+                + b"\n"
+            )
+            VSOCK_SOCKET.sendall(complete_msg)
             send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
         else:
-            error_msg = json.dumps({
-                "type": "error",
-                "cmd_id": cmd_id,
-                "error": f"Checksum mismatch: expected {checksum}, got {file_checksum}"
-            }).encode() + b"\n"
-            vsock_socket.sendall(error_msg)
+            error_msg = (
+                json.dumps(
+                    {
+                        "type": "error",
+                        "cmd_id": cmd_id,
+                        "error": f"Checksum mismatch: expected {checksum}, got {file_checksum}",
+                    }
+                ).encode()
+                + b"\n"
+            )
+            VSOCK_SOCKET.sendall(error_msg)
             send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
 
     except Exception as e:
         try:
-            error_msg = json.dumps({
-                "type": "error",
-                "cmd_id": cmd_id,
-                "error": str(e)
-            }).encode() + b"\n"
-            vsock_socket.sendall(error_msg)
+            if VSOCK_SOCKET:
+                error_msg = (
+                    json.dumps(
+                        {"type": "error", "cmd_id": cmd_id, "error": str(e)}
+                    ).encode()
+                    + b"\n"
+                )
+                VSOCK_SOCKET.sendall(error_msg)
         except:
             pass
         send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
 
 
 def handle_vsock_download(cmd_id, path: str):
-    """Handles vsock-based file download.
+    """Handles sending a file from guest to host via vsock (guest-initiated).
 
-    Protocol:
-    1. Guest receives download request from host
-    2. Guest reads file
-    3. Guest sends file data in chunks with JSON metadata
-    4. Guest sends "complete" response
+    This is called when the host requests a file from the guest.
+    The guest initiates a vsock connection and sends the file.
+
+    Protocol (guest-initiated):
+    1. Guest receives read_file request from host (via serial)
+    2. Guest connects to host vsock listener
+    3. Guest sends "download" request with file path
+    4. Host reads the file and sends chunks back
+    5. Wait - that's wrong! The host doesn't have the file, the guest does!
+
+    Actually for guest->host file transfer:
+    1. Guest connects to host vsock listener
+    2. Guest sends "upload" request with path, size, checksum
+    3. Host sends "ready"
+    4. Guest sends raw binary data
+    5. Host verifies and responds
 
     Args:
         cmd_id: Command ID for responses
-        path: Source file path
+        path: Source file path (in guest)
     """
+    vsock_port = int(os.environ.get("BANDSOX_VSOCK_PORT", "9000"))
+    sock = None
+
     try:
+        # Check file exists
         if not os.path.exists(path):
-            vsock_send_json(
-                {
-                    "type": "error",
-                    "payload": {"cmd_id": cmd_id, "error": f"File not found: {path}"},
-                }
-            )
-            vsock_disconnect()
+            send_event("error", {"cmd_id": cmd_id, "error": f"File not found: {path}"})
             send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
             return
 
+        # Get file info
         file_size = os.path.getsize(path)
 
-        # Read file and send in chunks
-        chunk_size = 64 * 1024  # 64KB chunks
-        bytes_sent = 0
-
+        # Calculate checksum
+        md5 = hashlib.md5()
         with open(path, "rb") as f:
-            while bytes_sent < file_size:
-                chunk = f.read(chunk_size)
-                encoded = base64.b64encode(chunk).decode("utf-8")
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                md5.update(chunk)
+        checksum = md5.hexdigest()
 
-                # Send chunk with metadata
-                vsock_send_json(
-                    {
-                        "type": "status",
-                        "payload": {
-                            "cmd_id": cmd_id,
-                            "type": "chunk",
-                            "data": encoded,
-                            "size": len(chunk),
-                            "offset": bytes_sent,
-                        },
-                    }
-                )
+        # Connect to host
+        sock = vsock_create_connection(vsock_port)
+        if not sock:
+            sys.stderr.write(
+                f"WARNING: Vsock connection failed, falling back to serial\n"
+            )
+            sys.stderr.flush()
+            # Fall back to serial
+            handle_read_file(cmd_id, path)
+            return
 
-                bytes_sent += len(chunk)
+        # Send upload request (we're uploading to the host)
+        request = {
+            "type": "upload",
+            "path": path,
+            "size": file_size,
+            "checksum": checksum,
+            "cmd_id": cmd_id,
+        }
+        vsock_send_json_msg(sock, request)
 
-        # Send complete response
-        vsock_send_json(
-            {
-                "type": "status",
-                "payload": {"cmd_id": cmd_id, "type": "complete", "size": file_size},
-            }
+        # Wait for ready response
+        response = vsock_recv_json_msg(sock)
+        if response.get("type") == "error":
+            raise Exception(response.get("error", "Unknown error"))
+        if response.get("type") != "ready":
+            raise Exception(f"Unexpected response: {response.get('type')}")
+
+        # Send file data
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                sock.sendall(chunk)
+
+        # Wait for complete response
+        response = vsock_recv_json_msg(sock)
+        if response.get("type") == "error":
+            raise Exception(response.get("error", "Unknown error"))
+        if response.get("type") != "complete":
+            raise Exception(f"Unexpected response: {response.get('type')}")
+
+        sys.stderr.write(f"INFO: File uploaded via vsock: {path} ({file_size} bytes)\n")
+        sys.stderr.flush()
+
+        send_event(
+            "status", {"cmd_id": cmd_id, "status": "uploaded", "size": file_size}
         )
-        vsock_disconnect()
         send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
 
     except Exception as e:
-        vsock_send_json(
-            {
-                "type": "error",
-                "payload": {"cmd_id": cmd_id, "error": f"Vsock download failed: {e}"},
-            }
-        )
-        vsock_disconnect()
+        sys.stderr.write(f"ERROR: Vsock upload failed: {e}\n")
+        sys.stderr.flush()
+        send_event("error", {"cmd_id": cmd_id, "error": f"Vsock upload failed: {e}"})
         send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
+
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except:
+                pass
+
+
+def handle_vsock_download_from_host(cmd_id, path: str, dest_path: str = None):
+    """Downloads a file FROM the host TO the guest via vsock (guest-initiated).
+
+    This is for when the guest needs to receive a file from the host.
+
+    Protocol:
+    1. Guest connects to host vsock listener
+    2. Guest sends "download" request with path
+    3. Host sends file chunks
+    4. Host sends "complete" with checksum
+    5. Guest verifies and saves file
+
+    Args:
+        cmd_id: Command ID for responses
+        path: Source file path (on host)
+        dest_path: Destination path (on guest), defaults to same as path
+    """
+    if dest_path is None:
+        dest_path = path
+
+    vsock_port = int(os.environ.get("BANDSOX_VSOCK_PORT", "9000"))
+    sock = None
+
+    try:
+        # Connect to host
+        sock = vsock_create_connection(vsock_port)
+        if not sock:
+            raise Exception("Failed to connect to vsock")
+
+        # Send download request
+        request = {
+            "type": "download",
+            "path": path,
+            "cmd_id": cmd_id,
+        }
+        vsock_send_json_msg(sock, request)
+
+        # Ensure directory exists
+        dirname = os.path.dirname(dest_path)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
+
+        # Receive file chunks
+        md5 = hashlib.md5()
+        total_received = 0
+
+        with open(dest_path, "wb") as f:
+            while True:
+                response = vsock_recv_json_msg(sock)
+                resp_type = response.get("type")
+
+                if resp_type == "error":
+                    raise Exception(response.get("error", "Unknown error"))
+
+                elif resp_type == "chunk":
+                    data = base64.b64decode(response.get("data", ""))
+                    f.write(data)
+                    md5.update(data)
+                    total_received += len(data)
+
+                elif resp_type == "complete":
+                    # Verify checksum
+                    expected_checksum = response.get("checksum")
+                    if expected_checksum:
+                        actual_checksum = md5.hexdigest()
+                        if actual_checksum != expected_checksum:
+                            raise Exception(
+                                f"Checksum mismatch: expected {expected_checksum}, got {actual_checksum}"
+                            )
+                    break
+                else:
+                    raise Exception(f"Unexpected response type: {resp_type}")
+
+        sys.stderr.write(
+            f"INFO: File downloaded via vsock: {path} -> {dest_path} ({total_received} bytes)\n"
+        )
+        sys.stderr.flush()
+
+        send_event(
+            "status", {"cmd_id": cmd_id, "status": "downloaded", "size": total_received}
+        )
+        send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
+
+    except Exception as e:
+        sys.stderr.write(f"ERROR: Vsock download failed: {e}\n")
+        sys.stderr.flush()
+        send_event("error", {"cmd_id": cmd_id, "error": f"Vsock download failed: {e}"})
+        send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
+
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except:
+                pass
 
 
 def handle_file_info(cmd_id, path):
@@ -716,11 +925,10 @@ def main():
 
                 elif req_type == "read_file":
                     path = req.get("path")
-
-                    # Try vsock connection first
                     vsock_port = int(os.environ.get("BANDSOX_VSOCK_PORT", "9000"))
-                    if vsock_connect(vsock_port):
-                        # Vsock connected, use vsock handler
+
+                    # Try vsock first - handle_vsock_download has built-in fallback to serial
+                    if vsock_check_available():
                         t = threading.Thread(
                             target=handle_vsock_download,
                             args=(cmd_id, path),
@@ -728,9 +936,9 @@ def main():
                         )
                         t.start()
                     else:
-                        # Fall back to serial
+                        # No vsock support, use serial directly
                         sys.stderr.write(
-                            f"WARNING: Vsock connection failed for read_file, using serial\n"
+                            "INFO: Vsock not available, using serial for read_file\n"
                         )
                         sys.stderr.flush()
                         t = threading.Thread(
