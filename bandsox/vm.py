@@ -319,6 +319,25 @@ class MicroVM:
                     if cb:
                         cb(info)
 
+            elif evt_type == "file_chunk":
+                cmd_id = payload.get("cmd_id")
+                data = payload.get("data")
+                offset = payload.get("offset")
+                size = payload.get("size")
+                if cmd_id in self.event_callbacks:
+                    cb = self.event_callbacks[cmd_id].get("on_file_chunk")
+                    if cb:
+                        cb(data, offset, size)
+
+            elif evt_type == "file_complete":
+                cmd_id = payload.get("cmd_id")
+                total_size = payload.get("total_size")
+                checksum = payload.get("checksum")
+                if cmd_id in self.event_callbacks:
+                    cb = self.event_callbacks[cmd_id].get("on_file_complete")
+                    if cb:
+                        cb(total_size, checksum)
+
             elif evt_type == "exit":
                 cmd_id = payload.get("cmd_id")
                 exit_code = payload.get("exit_code")
@@ -354,6 +373,8 @@ class MicroVM:
         on_stdout=None,
         on_stderr=None,
         on_file_content=None,
+        on_file_chunk=None,
+        on_file_complete=None,
         on_dir_list=None,
         on_file_info=None,
         timeout=30,
@@ -388,6 +409,8 @@ class MicroVM:
             "on_stdout": on_stdout,
             "on_stderr": on_stderr,
             "on_file_content": on_file_content,
+            "on_file_chunk": on_file_chunk,
+            "on_file_complete": on_file_complete,
             "on_dir_list": on_dir_list,
             "on_file_info": on_file_info,
             "on_exit": on_exit,
@@ -1311,32 +1334,83 @@ class MicroVM:
         self.send_request("list_dir", {"path": path}, on_dir_list=on_dir_list)
         return result.get("files", [])
 
-    def download_file(self, remote_path: str, local_path: str):
-        """Downloads a file from the VM to the local filesystem."""
+    def download_file(self, remote_path: str, local_path: str, timeout: int = 300):
+        """Downloads a file from the VM to the local filesystem.
+        
+        Handles both small files (single file_content event) and large files
+        (chunked via file_chunk/file_complete events).
+        
+        Args:
+            remote_path: Path to file in VM
+            local_path: Path to save file locally
+            timeout: Timeout in seconds (default 300 for large files over serial)
+        """
         if not self.agent_ready:
             raise Exception("Agent not ready")
 
-        result = {}
+        import base64
+        import hashlib
+        
+        local_path = os.path.abspath(local_path)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        
+        result = {"mode": None, "content": None, "file_handle": None, "md5": None, "error": None}
 
-        def on_file_content(c):
-            result["content"] = c
+        def on_file_content(content):
+            """Handle small file (single shot transfer)."""
+            result["mode"] = "single"
+            result["content"] = content
 
-        self.send_request(
-            "read_file", {"path": remote_path}, on_file_content=on_file_content
-        )
+        def on_file_chunk(data, offset, size):
+            """Handle file chunk (streaming transfer)."""
+            if result["mode"] is None:
+                result["mode"] = "chunked"
+                result["file_handle"] = open(local_path, "wb")
+                result["md5"] = hashlib.md5()
+            
+            decoded = base64.b64decode(data)
+            result["file_handle"].write(decoded)
+            result["md5"].update(decoded)
 
-        if "content" in result:
-            import base64
+        def on_file_complete(total_size, checksum):
+            """Handle file transfer completion."""
+            if result["file_handle"]:
+                result["file_handle"].close()
+                result["file_handle"] = None
+            result["checksum"] = checksum
+            result["total_size"] = total_size
 
-            data = base64.b64decode(result["content"])
+        try:
+            self.send_request(
+                "read_file",
+                {"path": remote_path},
+                on_file_content=on_file_content,
+                on_file_chunk=on_file_chunk,
+                on_file_complete=on_file_complete,
+                timeout=timeout
+            )
 
-            local_path = os.path.abspath(local_path)
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
-
-            with open(local_path, "wb") as f:
-                f.write(data)
-            return
-        raise Exception(f"Failed to download {remote_path} via agent")
+            if result["mode"] == "single" and result["content"]:
+                # Small file - decode and write
+                data = base64.b64decode(result["content"])
+                with open(local_path, "wb") as f:
+                    f.write(data)
+                return
+            
+            elif result["mode"] == "chunked":
+                # Large file - already written, verify checksum if available
+                if result.get("checksum") and result.get("md5"):
+                    local_checksum = result["md5"].hexdigest()
+                    if local_checksum != result["checksum"]:
+                        raise Exception(f"Checksum mismatch: expected {result['checksum']}, got {local_checksum}")
+                return
+            
+            raise Exception(f"Failed to download {remote_path} via agent")
+            
+        finally:
+            # Ensure file handle is closed on any error
+            if result.get("file_handle"):
+                result["file_handle"].close()
 
     def upload_file(self, local_path: str, remote_path: str, timeout: int = None):
         """Uploads a file from local filesystem to the VM.
