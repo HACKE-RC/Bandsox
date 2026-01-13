@@ -26,6 +26,9 @@ class BandSox:
         self.sockets_dir.mkdir(exist_ok=True)
         self.metadata_dir = self.storage_dir / "metadata"
         self.metadata_dir.mkdir(exist_ok=True)
+        isolation_root = os.environ.get("BANDSOX_VSOCK_ISOLATION_DIR", "/tmp/bsx")
+        self.vsock_isolation_dir = Path(isolation_root)
+        self.vsock_isolation_dir.mkdir(parents=True, exist_ok=True)
 
         self.active_vms = {}  # vm_id -> MicroVM instance
 
@@ -283,6 +286,9 @@ class BandSox:
                 "enabled": True,
                 "cid": vm.vsock_cid,
                 "port": vm.vsock_port,
+                "uds_path": vm.vsock_baked_path or vm.vsock_socket_path,
+                "baked_uds_path": vm.vsock_baked_path or vm.vsock_socket_path,
+                "host_uds_path": vm.vsock_socket_path,
             }
 
         self._save_metadata(
@@ -374,6 +380,18 @@ class BandSox:
             with open(meta_file, "r") as f:
                 snapshot_meta = json.load(f)
 
+        vsock_config = snapshot_meta.get("vsock_config")
+        if vsock_config:
+            vsock_config = dict(vsock_config)
+        if not vsock_config:
+            source_vm_id = snapshot_meta.get("source_vm_id")
+            if source_vm_id:
+                source_meta = self._get_metadata(source_vm_id)
+                if source_meta and source_meta.get("vsock_config"):
+                    vsock_config = dict(source_meta["vsock_config"])
+        if vsock_config and "enabled" not in vsock_config:
+            vsock_config["enabled"] = True
+
         # We need a new VM ID for the restored instance
         new_vm_id = str(uuid.uuid4())
         socket_path = str(self.sockets_dir / f"{new_vm_id}.sock")
@@ -438,6 +456,64 @@ class BandSox:
         elif "env_vars" in snapshot_meta:
             vm.env_vars = snapshot_meta["env_vars"]
 
+        vsock_baked_path = None
+        vsock_host_path = None
+
+        def _path_exists(path):
+            return path and (os.path.exists(path) or os.path.islink(path))
+
+        def _map_isolation_path(baked_path, isolation_dir):
+            if baked_path.startswith("/tmp/bandsox/"):
+                rel_path = os.path.relpath(baked_path, "/tmp/bandsox")
+                return os.path.join(isolation_dir, "tmp", rel_path)
+            if baked_path.startswith("/var/lib/bandsox/vsock/"):
+                rel_path = os.path.relpath(baked_path, "/var/lib/bandsox/vsock")
+                return os.path.join(isolation_dir, "vsock", rel_path)
+            return os.path.join(isolation_dir, "tmp", os.path.basename(baked_path))
+
+        def _prepare_isolated_socket(baked_path):
+            isolation_dir = self.vsock_isolation_dir / new_vm_id
+            tmp_root = isolation_dir / "tmp"
+            vsock_root = isolation_dir / "vsock"
+            tmp_root.mkdir(parents=True, exist_ok=True)
+            vsock_root.mkdir(parents=True, exist_ok=True)
+
+            mapped_path = _map_isolation_path(baked_path, str(isolation_dir))
+            os.makedirs(os.path.dirname(mapped_path), exist_ok=True)
+
+            if _path_exists(mapped_path):
+                os.unlink(mapped_path)
+
+            return str(isolation_dir), mapped_path
+
+        if vsock_config and vsock_config.get("enabled"):
+            old_vm_id = snapshot_meta.get("source_vm_id")
+            vsock_baked_path = vsock_config.get("baked_uds_path") or vsock_config.get(
+                "uds_path"
+            )
+            if not vsock_baked_path and old_vm_id:
+                vsock_baked_path = f"/tmp/bandsox/vsock_{old_vm_id}.sock"
+            if not vsock_baked_path:
+                raise Exception(
+                    "Vsock is enabled but no socket path is available for restore."
+                )
+
+            try:
+                vsock_isolation_dir, vsock_host_path = _prepare_isolated_socket(
+                    vsock_baked_path
+                )
+                vm.vsock_isolation_dir = vsock_isolation_dir
+                logger.info(f"Using vsock isolation at {vsock_isolation_dir}")
+            except Exception as e:
+                raise Exception(f"Failed to enable vsock isolation: {e}") from e
+
+            vm.vsock_socket_path = vsock_host_path
+            vm.vsock_baked_path = vsock_baked_path
+            vsock_config = dict(vsock_config)
+            vsock_config["baked_uds_path"] = vsock_baked_path
+            vsock_config["uds_path"] = vsock_baked_path
+            vsock_config["host_uds_path"] = vsock_host_path
+
         # Precompute log path for detached runner so we can surface it on failures
         log_dir = self.storage_dir / "logs"
         log_dir.mkdir(exist_ok=True)
@@ -489,6 +565,8 @@ class BandSox:
                 ]
                 if netns_name:
                     runner_cmd.extend(["--netns", netns_name])
+                if vm.vsock_isolation_dir:
+                    runner_cmd.extend(["--vsock-isolation-dir", vm.vsock_isolation_dir])
 
                 logger.info(f"Spawning detached runner for VM {new_vm_id}")
                 with open(log_file, "w") as f:
@@ -528,50 +606,7 @@ class BandSox:
         if snap_rootfs and os.path.exists(snap_rootfs):
             self._clone_rootfs(snap_rootfs, instance_rootfs)
 
-        # Handle vsock socket path - each restored VM needs its own unique socket
-        # Firecracker bakes the socket path into the snapshot, so we use a symlink trick:
-        # 1. Firecracker expects socket at old_socket_path (from snapshot)
-        # 2. We create old_socket_path as a symlink to new_socket_path (unique per VM)
-        # 3. Firecracker binds to old_socket_path, but it actually creates new_socket_path
-        vsock_config = snapshot_meta.get("vsock_config")
-        old_socket_path = None
-        new_socket_path = None
-        
-        if vsock_config and vsock_config.get("enabled"):
-            old_vm_id = snapshot_meta.get("source_vm_id")
-            if old_vm_id:
-                old_socket_path = f"/tmp/bandsox/vsock_{old_vm_id}.sock"
-                new_socket_path = f"/tmp/bandsox/vsock_{new_vm_id}.sock"
-                
-                # Ensure /tmp/bandsox exists
-                os.makedirs("/tmp/bandsox", exist_ok=True)
-                
-                # Clean up any existing socket/symlink at old path
-                if os.path.exists(old_socket_path) or os.path.islink(old_socket_path):
-                    try:
-                        os.unlink(old_socket_path)
-                        logger.debug(f"Removed existing socket/symlink: {old_socket_path}")
-                    except Exception as e:
-                        logger.warning(f"Failed to remove {old_socket_path}: {e}")
-                
-                # Clean up any existing socket at new path
-                if os.path.exists(new_socket_path):
-                    try:
-                        os.unlink(new_socket_path)
-                    except Exception:
-                        pass
-                
-                # Create symlink: old_socket_path -> new_socket_path
-                # When Firecracker tries to bind to old_socket_path, it will actually
-                # create the socket at new_socket_path (following the symlink)
-                try:
-                    os.symlink(new_socket_path, old_socket_path)
-                    logger.debug(f"Created vsock symlink: {old_socket_path} -> {new_socket_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to create vsock symlink: {e}")
-                    old_socket_path = None  # Fall back to no vsock
-
-                vm.vsock_socket_path = new_socket_path
+        # Vsock socket path prepared above (symlink or isolation).
 
         # Try to load snapshot
         created_symlink = None
@@ -667,47 +702,40 @@ class BandSox:
         vm.resume()
 
         # Connect to vsock bridge if snapshot had vsock enabled
-        # We set up the symlink before load_snapshot so the socket is at new_socket_path
-        if vsock_config and vsock_config.get("enabled") and new_socket_path:
+        vsock_socket_path = vm.vsock_socket_path
+        if vsock_config and vsock_config.get("enabled") and vsock_socket_path:
             try:
-                # Wait for Firecracker to create the socket (via our symlink)
+                # Wait for Firecracker to create the socket
                 max_wait = 50
                 for i in range(max_wait):
-                    if os.path.exists(new_socket_path):
+                    if os.path.exists(vsock_socket_path):
                         break
                     time.sleep(0.1)
                 else:
-                    raise Exception(f"Vsock socket not created: {new_socket_path}")
-                
+                    raise Exception(f"Vsock socket not created: {vsock_socket_path}")
+
                 import socket as sock_module
-                
-                vm.vsock_socket_path = new_socket_path
+
+                vm.vsock_socket_path = vsock_socket_path
                 vm.vsock_bridge_socket = sock_module.socket(
                     sock_module.AF_UNIX, sock_module.SOCK_STREAM
                 )
-                vm.vsock_bridge_socket.connect(new_socket_path)
+                vm.vsock_bridge_socket.connect(vsock_socket_path)
                 vm.vsock_bridge_socket.settimeout(30)
-                
+
                 vm.vsock_cid = vsock_config["cid"]
                 vm.vsock_port = vsock_config["port"]
                 vm.vsock_enabled = True
                 vm.vsock_bridge_running = True
-                
+
                 vm.vsock_bridge_thread = threading.Thread(
                     target=vm._vsock_bridge_loop, daemon=True
                 )
                 vm.vsock_bridge_thread.start()
-                
+
                 vm.env_vars["BANDSOX_VSOCK_PORT"] = str(vsock_config["port"])
-                logger.info(f"Vsock bridge connected: {new_socket_path}")
-                
-                # Clean up the symlink - Firecracker has created the real socket now
-                if old_socket_path and os.path.islink(old_socket_path):
-                    try:
-                        os.unlink(old_socket_path)
-                    except Exception:
-                        pass
-                        
+                logger.info(f"Vsock bridge connected: {vsock_socket_path}")
+
             except Exception as e:
                 logger.warning(f"Failed to setup vsock bridge: {e}")
                 vm.vsock_enabled = False
@@ -789,6 +817,39 @@ class BandSox:
         meta = self._get_metadata(vm.vm_id) or {}
         was_paused = meta.get("status") == "paused"
 
+        vsock_config = None
+        if meta.get("vsock_config"):
+            vsock_config = dict(meta["vsock_config"])
+        elif vm.vsock_enabled:
+            vsock_config = {
+                "enabled": True,
+                "cid": vm.vsock_cid,
+                "port": vm.vsock_port,
+            }
+
+        if vsock_config:
+            if "enabled" not in vsock_config:
+                vsock_config["enabled"] = True
+
+            baked_path = (
+                vm.vsock_baked_path
+                or vsock_config.get("baked_uds_path")
+                or vsock_config.get("uds_path")
+            )
+            host_path = (
+                vm.vsock_socket_path
+                or vsock_config.get("host_uds_path")
+                or vsock_config.get("uds_path")
+                or baked_path
+                or f"/tmp/bandsox/vsock_{vm.vm_id}.sock"
+            )
+
+            if baked_path:
+                vsock_config["baked_uds_path"] = baked_path
+                vsock_config["uds_path"] = baked_path
+            if host_path:
+                vsock_config["host_uds_path"] = host_path
+
         # Disconnect vsock bridge before snapshot to avoid "Address in use" error on restore
         # Firecracker saves vsock device state to snapshot file, so we need to release the socket
         had_vsock = vm.vsock_enabled and vm.vsock_bridge_running
@@ -831,6 +892,7 @@ class BandSox:
                 source_rootfs
             ),  # Original path for reference/symlink matching
             "network_config": vm_meta.get("network_config"),
+            "vsock_config": vsock_config,
             "metadata": metadata
             if metadata is not None
             else vm_meta.get("metadata", {}),
@@ -1243,7 +1305,6 @@ class ManagedMicroVM(MicroVM):
         if not self.wait_for_agent():
             raise Exception("Agent not ready")
         return super().download_file(*args, **kwargs)
-
 
     def delete(self):
         self.bandsox.delete_vm(self.vm_id)

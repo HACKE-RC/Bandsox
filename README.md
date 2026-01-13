@@ -120,7 +120,11 @@ This is **100-10,000x faster** than traditional serial-based file transfers!
 - File operations automatically use vsock when available
 - Falls back gracefully to serial if vsock module is unavailable
 - No VM pause required during transfers
-- **Snapshot support**: Vsock bridge disconnected before snapshot, restored VMs detect vsock availability automatically
+- **Snapshot support**: Vsock bridge disconnected before snapshot; restores use per-VM vsock isolation to avoid socket collisions
+
+### Restore vsock isolation
+
+Restores now mount per-VM vsock paths in a private mount namespace so multiple restores can run from the same snapshot without `EADDRINUSE` socket collisions. The isolation root defaults to `/tmp/bsx` and can be overridden with `BANDSOX_VSOCK_ISOLATION_DIR`.
 
 ### Checking Vsock Status
 

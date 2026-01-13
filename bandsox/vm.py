@@ -8,6 +8,7 @@ import threading
 import json
 import socket
 import errno
+import shlex
 from pathlib import Path
 from .firecracker import FirecrackerClient
 from .network import setup_tap_device, cleanup_tap_device
@@ -161,6 +162,8 @@ class MicroVM:
         self.vsock_cid = None
         self.vsock_port = None
         self.vsock_socket_path = None
+        self.vsock_baked_path = None
+        self.vsock_isolation_dir = None
         self.vsock_bridge_socket = None
         self.vsock_bridge_thread = None
         self.vsock_bridge_running = False
@@ -172,6 +175,8 @@ class MicroVM:
 
         cmd = [self.firecracker_bin, "--api-sock", self.socket_path]
 
+        user = os.environ.get("SUDO_USER", os.environ.get("USER", "rc"))
+
         # If running in NetNS, wrap command
         if self.netns:
             # We must run as root to enter NetNS, but then drop back to user for Firecracker?
@@ -180,11 +185,25 @@ class MicroVM:
             # Client (running as user) cannot connect to root socket easily if permissions derived from umask?
             # Better to run: sudo ip netns exec <ns> sudo -u <user> firecracker ...
 
-            # Get current user to switch back to
-            user = os.environ.get("SUDO_USER", os.environ.get("USER", "rc"))
-
             # Note: We need full path for sudo if environment is weird, but usually okay.
-            cmd = ["sudo", "ip", "netns", "exec", self.netns, "sudo", "-u", user] + cmd
+            if self.vsock_isolation_dir:
+                cmd = ["ip", "netns", "exec", self.netns, "sudo", "-u", user] + cmd
+            else:
+                cmd = [
+                    "sudo",
+                    "ip",
+                    "netns",
+                    "exec",
+                    self.netns,
+                    "sudo",
+                    "-u",
+                    user,
+                ] + cmd
+        elif self.vsock_isolation_dir:
+            cmd = ["sudo", "-u", user] + cmd
+
+        if self.vsock_isolation_dir:
+            cmd = self._wrap_with_vsock_isolation(cmd)
 
         logger.info(f"Starting Firecracker: {' '.join(cmd)}")
         # We need pipes for serial console interaction
@@ -210,6 +229,27 @@ class MicroVM:
         # Start thread to read stderr
         t_err = threading.Thread(target=self._read_stderr_loop, daemon=True)
         t_err.start()
+
+    def _wrap_with_vsock_isolation(self, cmd):
+        isolation_dir = self.vsock_isolation_dir
+        if not isolation_dir:
+            return cmd
+
+        tmp_dir = os.path.join(isolation_dir, "tmp")
+        vsock_dir = os.path.join(isolation_dir, "vsock")
+
+        mount_cmds = [
+            "mount --make-rprivate /",
+            f"mkdir -p {shlex.quote(tmp_dir)} {shlex.quote(vsock_dir)} /tmp/bandsox /var/lib/bandsox/vsock",
+            f"mount --bind {shlex.quote(tmp_dir)} /tmp/bandsox",
+            f"mount --bind {shlex.quote(vsock_dir)} /var/lib/bandsox/vsock",
+        ]
+
+        exec_cmd = shlex.join(cmd)
+        shell_cmd = " && ".join(mount_cmds + [f"exec {exec_cmd}"])
+
+        logger.info(f"Starting Firecracker with vsock isolation at {isolation_dir}")
+        return ["sudo", "unshare", "-m", "--", "/bin/sh", "-c", shell_cmd]
 
     def _read_stderr_loop(self):
         """Reads stderr from the Firecracker process and logs it."""
@@ -704,7 +744,7 @@ class MicroVM:
         self, command: str, on_stdout=None, on_stderr=None, on_exit=None
     ) -> tuple[str, int | None]:
         """Starts a background session in the VM.
-        
+
         Returns:
             tuple: (session_id, pid) where pid is the process ID of the started command,
                    or None if the PID could not be retrieved within 5 seconds.
@@ -716,11 +756,11 @@ class MicroVM:
                 raise Exception("Agent not ready")
 
         session_id = str(uuid.uuid4())
-        
+
         # Event to signal when we receive the started status with PID
         started_event = threading.Event()
         pid_result = {"pid": None}
-        
+
         def on_started(pid):
             pid_result["pid"] = pid
             started_event.set()
@@ -742,7 +782,7 @@ class MicroVM:
             }
         )
         self._write_to_agent(req + "\n")
-        
+
         # Wait for the started event with PID (max 5 seconds)
         started_event.wait(timeout=5)
 
@@ -995,6 +1035,7 @@ class MicroVM:
                 self.process.kill()
 
         self._cleanup_vsock_bridge()
+        self._cleanup_vsock_isolation()
 
         should_cleanup_net = (
             self.network_setup
@@ -1032,6 +1073,7 @@ class MicroVM:
         import json
 
         self.vsock_socket_path = f"/tmp/bandsox/vsock_{self.vm_id}.sock"
+        self.vsock_baked_path = self.vsock_socket_path
 
         # Pre-cleanup: Remove any stale socket file before Firecracker creates it
         if os.path.exists(self.vsock_socket_path):
@@ -1280,12 +1322,25 @@ class MicroVM:
                 logger.warning(f"Failed to remove vsock socket {socket_path}: {e}")
 
         self.vsock_socket_path = None
+        self.vsock_baked_path = None
         self.vsock_enabled = False
         self.vsock_cid = None
         self.vsock_port = None
 
         if "BANDSOX_VSOCK_PORT" in self.env_vars:
             del self.env_vars["BANDSOX_VSOCK_PORT"]
+
+    def _cleanup_vsock_isolation(self):
+        if not self.vsock_isolation_dir:
+            return
+        try:
+            shutil.rmtree(self.vsock_isolation_dir)
+            logger.debug(f"Removed vsock isolation dir: {self.vsock_isolation_dir}")
+        except Exception as e:
+            logger.warning(
+                f"Failed to remove vsock isolation dir {self.vsock_isolation_dir}: {e}"
+            )
+        self.vsock_isolation_dir = None
 
     @classmethod
     def create_from_snapshot(
@@ -1336,10 +1391,10 @@ class MicroVM:
 
     def download_file(self, remote_path: str, local_path: str, timeout: int = 300):
         """Downloads a file from the VM to the local filesystem.
-        
+
         Handles both small files (single file_content event) and large files
         (chunked via file_chunk/file_complete events).
-        
+
         Args:
             remote_path: Path to file in VM
             local_path: Path to save file locally
@@ -1350,11 +1405,17 @@ class MicroVM:
 
         import base64
         import hashlib
-        
+
         local_path = os.path.abspath(local_path)
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        
-        result = {"mode": None, "content": None, "file_handle": None, "md5": None, "error": None}
+
+        result = {
+            "mode": None,
+            "content": None,
+            "file_handle": None,
+            "md5": None,
+            "error": None,
+        }
 
         def on_file_content(content):
             """Handle small file (single shot transfer)."""
@@ -1367,7 +1428,7 @@ class MicroVM:
                 result["mode"] = "chunked"
                 result["file_handle"] = open(local_path, "wb")
                 result["md5"] = hashlib.md5()
-            
+
             decoded = base64.b64decode(data)
             result["file_handle"].write(decoded)
             result["md5"].update(decoded)
@@ -1387,7 +1448,7 @@ class MicroVM:
                 on_file_content=on_file_content,
                 on_file_chunk=on_file_chunk,
                 on_file_complete=on_file_complete,
-                timeout=timeout
+                timeout=timeout,
             )
 
             if result["mode"] == "single" and result["content"] is not None:
@@ -1396,17 +1457,19 @@ class MicroVM:
                 with open(local_path, "wb") as f:
                     f.write(data)
                 return
-            
+
             elif result["mode"] == "chunked":
                 # Large file - already written, verify checksum if available
                 if result.get("checksum") and result.get("md5"):
                     local_checksum = result["md5"].hexdigest()
                     if local_checksum != result["checksum"]:
-                        raise Exception(f"Checksum mismatch: expected {result['checksum']}, got {local_checksum}")
+                        raise Exception(
+                            f"Checksum mismatch: expected {result['checksum']}, got {local_checksum}"
+                        )
                 return
-            
+
             raise Exception(f"Failed to download {remote_path} via agent")
-            
+
         finally:
             # Ensure file handle is closed on any error
             if result.get("file_handle"):
@@ -1414,9 +1477,9 @@ class MicroVM:
 
     def upload_file(self, local_path: str, remote_path: str, timeout: int = None):
         """Uploads a file from local filesystem to the VM.
-        
+
         Uses chunked uploads for large files to avoid serial buffer overflows.
-        
+
         Args:
             local_path: Path to local file
             remote_path: Path in VM to write to
@@ -1430,9 +1493,9 @@ class MicroVM:
 
         with open(local_path, "rb") as f:
             content = f.read()
-        
+
         file_size = len(content)
-        
+
         # Calculate timeout based on file size: minimum 60s, +30s per MB
         if timeout is None:
             file_size_mb = file_size / (1024 * 1024)
@@ -1442,27 +1505,38 @@ class MicroVM:
         # Serial console typically has ~4KB buffer, base64 encoding adds 33% overhead
         # So 2KB raw = ~2.7KB base64 = safe for serial
         CHUNK_SIZE = 2 * 1024  # 2KB chunks
-        
+
         if file_size <= CHUNK_SIZE:
             # Small file - send in one request
             import base64
+
             encoded = base64.b64encode(content).decode("utf-8")
-            self.send_request("write_file", {"path": remote_path, "content": encoded}, timeout=timeout)
+            self.send_request(
+                "write_file", {"path": remote_path, "content": encoded}, timeout=timeout
+            )
         else:
             # Large file - send in chunks with append mode
             import base64
-            
+
             # First chunk creates the file
             first_chunk = content[:CHUNK_SIZE]
             encoded = base64.b64encode(first_chunk).decode("utf-8")
-            self.send_request("write_file", {"path": remote_path, "content": encoded, "append": False}, timeout=timeout)
-            
+            self.send_request(
+                "write_file",
+                {"path": remote_path, "content": encoded, "append": False},
+                timeout=timeout,
+            )
+
             # Remaining chunks append
             offset = CHUNK_SIZE
             while offset < file_size:
-                chunk = content[offset:offset + CHUNK_SIZE]
+                chunk = content[offset : offset + CHUNK_SIZE]
                 encoded = base64.b64encode(chunk).decode("utf-8")
-                self.send_request("write_file", {"path": remote_path, "content": encoded, "append": True}, timeout=timeout)
+                self.send_request(
+                    "write_file",
+                    {"path": remote_path, "content": encoded, "append": True},
+                    timeout=timeout,
+                )
                 offset += CHUNK_SIZE
 
     def upload_folder(
