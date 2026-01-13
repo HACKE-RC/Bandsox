@@ -29,6 +29,16 @@ class BandSox:
         isolation_root = os.environ.get("BANDSOX_VSOCK_ISOLATION_DIR", "/tmp/bsx")
         self.vsock_isolation_dir = Path(isolation_root)
         self.vsock_isolation_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(self.vsock_isolation_dir, 0o777)
+        except PermissionError:
+            pass
+
+        try:
+            os.makedirs("/tmp/bandsox", exist_ok=True)
+            os.chmod("/tmp/bandsox", 0o777)
+        except PermissionError:
+            pass
 
         self.active_vms = {}  # vm_id -> MicroVM instance
 
