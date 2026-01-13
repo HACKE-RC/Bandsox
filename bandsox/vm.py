@@ -1075,6 +1075,12 @@ class MicroVM:
         self.vsock_socket_path = f"/tmp/bandsox/vsock_{self.vm_id}.sock"
         self.vsock_baked_path = self.vsock_socket_path
 
+        try:
+            os.makedirs("/tmp/bandsox", exist_ok=True)
+            os.chmod("/tmp/bandsox", 0o777)
+        except PermissionError:
+            pass
+
         # Pre-cleanup: Remove any stale socket file before Firecracker creates it
         if os.path.exists(self.vsock_socket_path):
             try:
