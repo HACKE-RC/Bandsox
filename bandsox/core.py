@@ -273,6 +273,9 @@ class BandSox:
         vm = ManagedMicroVM(vm_id, socket_path, self)
 
         # 3. Start Process & Configure
+        disk_bw = int(os.environ.get("BANDSOX_DISK_BANDWIDTH_MBPS", "200"))
+        disk_iops = int(os.environ.get("BANDSOX_DISK_IOPS", "5000"))
+
         vm.start_process()
         vm.configure(
             kernel_path,
@@ -281,6 +284,8 @@ class BandSox:
             mem_mib,
             enable_networking=enable_networking,
             enable_vsock=enable_vsock,
+            disk_bandwidth_mbps=disk_bw,
+            disk_iops=disk_iops,
         )
 
         if env_vars:
@@ -709,13 +714,13 @@ class BandSox:
 
             configure_tap_offloading(netns_name, old_tap_name, vm.vm_id)
 
-        vm.resume()
-
-        # Connect to vsock bridge if snapshot had vsock enabled
+        # Connect vsock bridge BEFORE resuming — the guest agent tries vsock
+        # immediately on wake, so the bridge must already be listening.
+        # The Firecracker vsock socket is created during snapshot load.
         vsock_socket_path = vm.vsock_socket_path
         if vsock_config and vsock_config.get("enabled") and vsock_socket_path:
             try:
-                # Wait for Firecracker to create the socket
+                # Wait for Firecracker to create the socket (safety net)
                 max_wait = 50
                 for i in range(max_wait):
                     if os.path.exists(vsock_socket_path):
@@ -749,6 +754,8 @@ class BandSox:
             except Exception as e:
                 logger.warning(f"Failed to setup vsock bridge: {e}")
                 vm.vsock_enabled = False
+
+        vm.resume()
 
         if enable_networking and vm.agent_ready:
             # Check if we need to update IP

@@ -892,6 +892,8 @@ class MicroVM:
         boot_args: str = None,
         enable_networking: bool = True,
         enable_vsock: bool = True,
+        disk_bandwidth_mbps: int = 0,
+        disk_iops: int = 0,
     ):
         """Configures the VM resources."""
         self.rootfs_path = rootfs_path
@@ -900,7 +902,12 @@ class MicroVM:
             boot_args = f"{DEFAULT_BOOT_ARGS} root=/dev/vda init=/init"
 
         self.client.put_drives(
-            "rootfs", rootfs_path, is_root_device=True, is_read_only=False
+            "rootfs",
+            rootfs_path,
+            is_root_device=True,
+            is_read_only=False,
+            rate_limit_bandwidth_mbps=disk_bandwidth_mbps,
+            rate_limit_iops=disk_iops,
         )
 
         self.client.put_machine_config(vcpu, mem_mib)
