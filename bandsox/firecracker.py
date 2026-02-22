@@ -61,13 +61,34 @@ class FirecrackerClient:
         path_on_host: str,
         is_root_device: bool = False,
         is_read_only: bool = False,
+        rate_limit_bandwidth_mbps: int = 0,
+        rate_limit_iops: int = 0,
+        io_engine: str = "Async",
     ):
         data = {
             "drive_id": drive_id,
             "path_on_host": path_on_host,
             "is_root_device": is_root_device,
             "is_read_only": is_read_only,
+            "io_engine": io_engine,
         }
+
+        if rate_limit_bandwidth_mbps > 0 or rate_limit_iops > 0:
+            rate_limiter = {}
+            if rate_limit_bandwidth_mbps > 0:
+                rate_limiter["bandwidth"] = {
+                    "size": rate_limit_bandwidth_mbps * 1024 * 1024,
+                    "one_time_burst": rate_limit_bandwidth_mbps * 1024 * 1024,
+                    "refill_time": 1000,
+                }
+            if rate_limit_iops > 0:
+                rate_limiter["ops"] = {
+                    "size": rate_limit_iops,
+                    "one_time_burst": rate_limit_iops,
+                    "refill_time": 1000,
+                }
+            data["rate_limiter"] = rate_limiter
+
         return self._request("PUT", f"/drives/{drive_id}", data)
 
     def patch_drive(self, drive_id: str, path_on_host: str):

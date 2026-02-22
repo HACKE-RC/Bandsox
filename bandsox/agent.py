@@ -22,6 +22,8 @@ import time
 VSOCK_ENABLED = False
 VSOCK_SOCKET = None
 VSOCK_CID_HOST = 2  # Well-known CID for host
+_vsock_lock = threading.Lock()
+_vsock_reconnect_thread = None
 
 
 def vsock_connect(port: int, retry: int = 3) -> bool:
@@ -47,17 +49,20 @@ def vsock_connect(port: int, retry: int = 3) -> bool:
 
     for attempt in range(retry):
         try:
-            VSOCK_SOCKET = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-            VSOCK_SOCKET.settimeout(10)  # 10s connection timeout
+            sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+            sock.settimeout(10)  # 10s connection timeout
 
             # Connect to host (CID=2) on specified port
-            VSOCK_SOCKET.connect((VSOCK_CID_HOST, port))
+            sock.connect((VSOCK_CID_HOST, port))
+
+            with _vsock_lock:
+                VSOCK_SOCKET = sock
+                VSOCK_ENABLED = True
 
             sys.stderr.write(
                 f"INFO: Connected to vsock: CID={VSOCK_CID_HOST}, Port={port}\n"
             )
             sys.stderr.flush()
-            VSOCK_ENABLED = True
             return True
 
         except Exception as e:
@@ -72,10 +77,81 @@ def vsock_connect(port: int, retry: int = 3) -> bool:
                     f"WARNING: Vsock connection failed after {retry} attempts: {e}\n"
                 )
                 sys.stderr.flush()
-                VSOCK_ENABLED = False
+                with _vsock_lock:
+                    VSOCK_ENABLED = False
                 return False
 
     return False
+
+
+def _vsock_reconnect_loop(port: int, max_retries: int = 30):
+    """Background reconnection loop for vsock.
+
+    Retries vsock connection every 10 seconds until successful or max retries
+    reached. Runs as a daemon thread after initial connection failure.
+
+    Args:
+        port: Port number to connect to
+        max_retries: Maximum number of attempts (default 30 = ~5 minutes)
+    """
+    global VSOCK_ENABLED, VSOCK_SOCKET
+
+    try:
+        socket.AF_VSOCK
+    except AttributeError:
+        return
+
+    for attempt in range(max_retries):
+        time.sleep(10)
+
+        with _vsock_lock:
+            if VSOCK_ENABLED:
+                # Already reconnected (e.g. by an inline vsock_connect call)
+                return
+
+        try:
+            sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect((VSOCK_CID_HOST, port))
+
+            with _vsock_lock:
+                VSOCK_SOCKET = sock
+                VSOCK_ENABLED = True
+
+            sys.stderr.write(
+                f"INFO: Vsock reconnected on attempt {attempt + 1}: "
+                f"CID={VSOCK_CID_HOST}, Port={port}\n"
+            )
+            sys.stderr.flush()
+            return
+
+        except Exception as e:
+            sys.stderr.write(
+                f"DEBUG: Vsock reconnect attempt {attempt + 1}/{max_retries} failed: {e}\n"
+            )
+            sys.stderr.flush()
+
+    sys.stderr.write(
+        f"WARNING: Vsock reconnect giving up after {max_retries} attempts\n"
+    )
+    sys.stderr.flush()
+
+
+def start_vsock_reconnect(port: int):
+    """Starts a background daemon thread to retry vsock connection.
+
+    Args:
+        port: Port number to reconnect to
+    """
+    global _vsock_reconnect_thread
+
+    if _vsock_reconnect_thread and _vsock_reconnect_thread.is_alive():
+        return  # Already running
+
+    _vsock_reconnect_thread = threading.Thread(
+        target=_vsock_reconnect_loop, args=(port,), daemon=True
+    )
+    _vsock_reconnect_thread.start()
 
 
 def vsock_send_json(data: dict):
@@ -84,13 +160,13 @@ def vsock_send_json(data: dict):
     Args:
         data: Dictionary to send as JSON
     """
-    global VSOCK_SOCKET
-
-    if not VSOCK_ENABLED or not VSOCK_SOCKET:
-        raise Exception("Vsock not connected")
+    with _vsock_lock:
+        if not VSOCK_ENABLED or not VSOCK_SOCKET:
+            raise Exception("Vsock not connected")
+        sock = VSOCK_SOCKET
 
     message = json.dumps(data) + "\n"
-    VSOCK_SOCKET.sendall(message.encode("utf-8"))
+    sock.sendall(message.encode("utf-8"))
 
 
 def vsock_read_line() -> str:
@@ -99,14 +175,14 @@ def vsock_read_line() -> str:
     Returns:
         Complete line as string
     """
-    global VSOCK_SOCKET
-
-    if not VSOCK_ENABLED or not VSOCK_SOCKET:
-        raise Exception("Vsock not connected")
+    with _vsock_lock:
+        if not VSOCK_ENABLED or not VSOCK_SOCKET:
+            raise Exception("Vsock not connected")
+        sock = VSOCK_SOCKET
 
     buffer = b""
     while True:
-        chunk = VSOCK_SOCKET.recv(1024)
+        chunk = sock.recv(1024)
         if not chunk:
             raise Exception("Vsock connection closed")
         buffer += chunk
@@ -119,12 +195,13 @@ def vsock_disconnect():
     """Disconnects from vsock socket and cleans up."""
     global VSOCK_SOCKET, VSOCK_ENABLED
 
-    if VSOCK_SOCKET:
-        VSOCK_SOCKET.close()
-        VSOCK_SOCKET = None
-        VSOCK_ENABLED = False
-        sys.stderr.write("INFO: Vsock disconnected\n")
-        sys.stderr.flush()
+    with _vsock_lock:
+        if VSOCK_SOCKET:
+            VSOCK_SOCKET.close()
+            VSOCK_SOCKET = None
+            VSOCK_ENABLED = False
+    sys.stderr.write("INFO: Vsock disconnected\n")
+    sys.stderr.flush()
 
 
 # Global session registry
@@ -719,7 +796,11 @@ def main():
 
                     # Try vsock connection first
                     vsock_port = int(os.environ.get("BANDSOX_VSOCK_PORT", "9000"))
-                    if vsock_connect(vsock_port):
+                    with _vsock_lock:
+                        vsock_ok = VSOCK_ENABLED
+                    if not vsock_ok:
+                        vsock_ok = vsock_connect(vsock_port)
+                    if vsock_ok:
                         # Vsock connected, use vsock handler
                         t = threading.Thread(
                             target=handle_vsock_download,
@@ -728,7 +809,8 @@ def main():
                         )
                         t.start()
                     else:
-                        # Fall back to serial
+                        # Fall back to serial, start background reconnect
+                        start_vsock_reconnect(vsock_port)
                         sys.stderr.write(
                             f"WARNING: Vsock connection failed for read_file, using serial\n"
                         )
