@@ -4,25 +4,25 @@
 
 
 
-BandSox is a fast, lightweight Python library and CLI for managing Firecracker microVMs. It provides a simple interface to create, manage, and interact with secure sandboxes, making it easy to run untrusted code or isolate workloads.
+BandSox is a Python library and CLI for managing Firecracker microVMs. Create, snapshot, and restore secure sandboxes from Docker images. Runs untrusted code or isolates workloads.
 
 ## Features
 
-- **Fast Boot Times**: Leverages Firecracker's speed to start VMs in milliseconds.
-- **Docker Image Support**: Create VMs directly from Docker images (requires Python 3 installed in the image).
-- **Snapshotting**: Pause, resume and snapshot VMs for instant restoration.
-- **Web Dashboard**: Visual interface to manage VMs, snapshots, and view terminal sessions.
-- **CLI Tool**: Comprehensive command-line interface for all operations.
-- **Python API**: Easy-to-use Python library for integration into your own applications.
-- **Vsock File Transfers**: Lightning-fast file operations (100-10,000x faster than serial) with automatic fallback.
-- **File Operations**: Upload, download and manage files within VM.
-- **Terminal Access**: Interactive web-based terminal for running VMs.
+- Millisecond boot times via Firecracker
+- Create VMs from Docker images (requires Python 3 in the image)
+- Pause, resume, and snapshot VMs for instant restore
+- Web dashboard for managing VMs, snapshots, and terminal sessions
+- CLI for all operations
+- Python API for scripting and integration
+- Vsock file transfers (100-10,000x faster than serial), with automatic serial fallback
+- Upload, download, and manage files inside VMs
+- Web-based terminal access
 
 ## Usage
 
-### Quick Start - Hello World
+### Quick start
 
-Create a VM and run Python code in just a few seconds:
+Create a VM and run Python code:
 
 ```python
 from bandsox.core import BandSox
@@ -36,7 +36,7 @@ print(result['stdout'])  # Output: Hello from VM!
 vm.stop()
 ```
 
-### Python API
+### Python API usage
 
 ```python
 from bandsox.core import BandSox
@@ -65,7 +65,7 @@ vm.stop()
 
 ### Web UI
 
-Start the web dashboard:
+Start the dashboard:
 
 ```bash
 sudo python3 -m bandsox.cli serve --host 0.0.0.0 --port 8000
@@ -97,13 +97,13 @@ sudo python3 -m bandsox.cli serve --host 0.0.0.0 --port 8000
 
 Visit `http://localhost:8000` to access the dashboard.
 
-## Vsock - High-Performance File Transfers
+## Vsock file transfers
 
-BandSox uses **vsock** (Virtual Socket) for fast, efficient file transfers between host and guest VMs.
+BandSox uses vsock (Virtual Socket) for file transfers between host and guest.
 
 ### Performance
 
-File transfer speeds with vsock:
+Measured transfer speeds:
 
 | File Size | Expected Speed | Expected Time |
 |-----------|----------------|----------------|
@@ -112,21 +112,20 @@ File transfer speeds with vsock:
 | 100 MB    | ~100 MB/s     | < 1s          |
 | 1 GB      | ~100 MB/s     | < 10s         |
 
-This is **100-10,000x faster** than traditional serial-based file transfers!
+That's 100-10,000x faster than serial-based transfers.
 
-### How It Works
+### How it works
 
-- Each VM gets a unique **CID** (Context ID) and **port** for vsock communication
-- File operations automatically use vsock when available
-- Falls back gracefully to serial if vsock module is unavailable
+- Each VM gets a unique CID (Context ID) and port for vsock communication
+- File operations use vsock when available, fall back to serial otherwise
 - No VM pause required during transfers
-- **Snapshot support**: Vsock bridge disconnected before snapshot; restores use per-VM vsock isolation to avoid socket collisions
+- Vsock bridge is disconnected before snapshots; restores use per-VM vsock isolation to avoid socket collisions
 
-### Restore vsock isolation
+### Restore isolation
 
-Restores now mount per-VM vsock paths in a private mount namespace so multiple restores can run from the same snapshot without `EADDRINUSE` socket collisions. The isolation root defaults to `/tmp/bsx` and can be overridden with `BANDSOX_VSOCK_ISOLATION_DIR`.
+Restores mount per-VM vsock paths in a private mount namespace, so multiple restores from the same snapshot don't hit `EADDRINUSE`. The isolation root defaults to `/tmp/bsx` and can be overridden with `BANDSOX_VSOCK_ISOLATION_DIR`.
 
-### Checking Vsock Status
+### Checking vsock status
 
 In a running VM terminal:
 ```bash
@@ -139,9 +138,9 @@ zcat /proc/config.gz | grep VSOCK
 # Should see: CONFIG_VIRTIO_VSOCK=y or m
 ```
 
-### Upgrading from Older Versions
+### Upgrading from older versions
 
-VMs created before vsock support require recreation. See [`VSOCK_MIGRATION.md`](VSOCK_MIGRATION.md) for detailed migration instructions.
+VMs created before vsock support need to be recreated. See [`VSOCK_MIGRATION.md`](VSOCK_MIGRATION.md) for migration steps.
 
 ## Prerequisites
 
@@ -153,9 +152,9 @@ VMs created before vsock support require recreation. See [`VSOCK_MIGRATION.md`](
 
 ## Installation
 
-### Install from PyPI (Recommended)
+### Install from PyPI
 
-Install BandSox directly using pip or uv:
+Install with pip or uv:
 
 ```bash
 # Using pip
@@ -171,7 +170,7 @@ Then initialize the required artifacts:
 bandsox init --rootfs-url ./bandsox-base.ext4
 ```
 
-### Install from Source
+### Install from source
 
 1. Clone the repository:
 
@@ -203,53 +202,51 @@ bandsox init --rootfs-url ./bandsox-base.ext4
     Default URLs are provided for kernel and CNI. For the rootfs, build one locally (instructions below) and point `--rootfs-url` to a local path (or `file://` URL). Use `--skip-*` flags to omit specific downloads or `--force` to re-download.
 
 
-## Web UI Screenshots
-#### Home Page
+## Web UI screenshots
+#### Home page
 <img width="1564" height="931" alt="image" src="https://github.com/user-attachments/assets/e3bba19c-dba5-4f5d-a5ef-e38df43bbee8" />
 
 ---
 
-#### Details Page
+#### Details page
 <img width="1446" height="852" alt="image" src="https://github.com/user-attachments/assets/135512d7-2212-49aa-9454-fa2ae2e918fc" />
 
 ##### File browser
-###### The details page has a file browser which you can use to explore the files inside the VM.
+###### Browse files inside the VM from the details page.
 <img width="1618" height="852" alt="image" src="https://github.com/user-attachments/assets/13191fa2-5b2c-4935-a448-e5d8810a9a1e" />
 
 ##### Markdown viewer
-###### Markdown files have a view button next to them, which opens a markdown viewer
+###### Click the view button next to any `.md` file to open it in the viewer.
 <img width="1261" height="369" alt="image" src="https://github.com/user-attachments/assets/54ca063a-9885-497c-b2be-83ef7180da52" />
 
 
 ---
 
 #### Terminal
-###### The webui has a terminal which can be accessed by clicking on the terminal button
+###### Open a terminal from the dashboard by clicking the terminal button.
 <img width="613" height="219" alt="image" src="https://github.com/user-attachments/assets/2c0148bf-9820-431f-87c0-620c45d4bd03" />
 
 
 
 ## Architecture
 
-BandSox consists of several components:
+BandSox has four main modules:
 
-- **Core (`bandsox.core`)**: High-level manager for VMs and snapshots, including CID/port allocation.
-- **VM (`bandsox.vm`)**: Wrapper around the Firecracker process, handling configuration, network, vsock bridge, and interaction.
-- **Agent (`bandsox.agent`)**: A lightweight Python agent injected into the VM to handle command execution and file operations (with vsock/serial dual-mode support).
-- **Server (`bandsox.server`)**: FastAPI-based backend for the web dashboard.
+- `bandsox.core` -- manages VMs, snapshots, and CID/port allocation.
+- `bandsox.vm` -- wraps the Firecracker process; handles config, networking, vsock bridge, and guest interaction.
+- `bandsox.agent` -- a small Python agent injected into the VM that runs commands and transfers files (vsock or serial).
+- `bandsox.server` -- FastAPI backend for the web dashboard.
 
 ### Communication
 
-**Vsock (Fast)**:
-- VMs communicate with host via `AF_VSOCK` sockets
+Vsock (primary):
+- VMs talk to the host via `AF_VSOCK` sockets
 - Firecracker forwards vsock connections to Unix domain sockets
-- File transfers are 100-10,000x faster than serial
 
-**Serial (Fallback)**:
-- Gracefully falls back to serial console if vsock is unavailable
-- Ensures compatibility with custom kernels
+Serial (fallback):
+- Used when vsock is unavailable (e.g., custom kernels without `virtio-vsock`)
 
-### Storage Layout
+### Storage layout
 
 Default: `/var/lib/bandsox` (override with `BANDSOX_STORAGE` env var)
 
@@ -262,14 +259,14 @@ Default: `/var/lib/bandsox` (override with `BANDSOX_STORAGE` env var)
 └── port_allocator.json # Port allocation state
 ```
 
-## Docs & APIs
+## Docs & APIs reference
 
 - Full library, CLI, and HTTP endpoint reference: [`API_DOCUMENTATION.md`](API_DOCUMENTATION.md)
 - Vsock migration guide: [`VSOCK_MIGRATION.md`](VSOCK_MIGRATION.md)
 - Vsock restoration fix: [`VSOCK_RESTORATION_FIX.md`](VSOCK_RESTORATION_FIX.md)
 - REST base path: `http://<host>:<port>/api` (see docs for endpoints such as `/api/vms`, `/api/snapshots`, `/api/vms/{id}/terminal` WebSocket)
 
-## Building a local base rootfs (no hosting required)
+## Building a local base rootfs
 
 Build a minimal ext4 from a Docker image and keep it local:
 
@@ -317,21 +314,21 @@ Use it locally with `bandsox init --rootfs-url ./bandsox-base.ext4` (or `file://
 
 Alternative: skip providing a base rootfs entirely—BandSox can build per-image rootfs on demand from Docker images when you call `bandsox create <image>`.
 
-## Storage & Artifacts
+## Storage & artifacts
 
-- Large artifacts (ext4 rootfs images, snapshots, `vmlinux`, CNI binaries) are **not** tracked in git; `bandsox init` downloads them into `storage/` and `cni/bin/` (or a directory you pass via `--cni-dir` pointing at the official CNI release tarball).
-- Default storage path is `/var/lib/sandbox`; override with `BANDSOX_STORAGE` or `--storage` when running the server.
-- To pre-seed a base rootfs, build it locally and reference it via `--rootfs-url file://...`; otherwise, create VMs from Docker images on demand (no prebuilt rootfs needed).
+- Large artifacts (ext4 rootfs images, snapshots, `vmlinux`, CNI binaries) are not tracked in git. `bandsox init` downloads them into `storage/` and `cni/bin/`.
+- Default storage path is `/var/lib/sandbox`; override with `BANDSOX_STORAGE` or `--storage`.
+- You can pre-seed a base rootfs via `--rootfs-url file://...`, or skip it and let BandSox build per-image rootfs from Docker images on demand.
 
-## Verification & Testing
+## Verification & testing
 
-The `verification/` directory contains scripts to verify various functionalities:
+The `verification/` directory has smoke-test scripts:
 
-- `verify_bandsox.py`: General smoke test.
-- `verify_file_ops.py`: Tests file upload/download.
-- `verify_internet.py`: Tests network connectivity inside the VM.
+- `verify_bandsox.py` -- general smoke test
+- `verify_file_ops.py` -- file upload/download
+- `verify_internet.py` -- network connectivity inside the VM
 
-To run a verification script:
+To run one:
 
 ```bash
 sudo python3 verification/verify_bandsox.py

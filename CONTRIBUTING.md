@@ -1,15 +1,13 @@
 # Contributing to BandSox
 
-We welcome contributions to BandSox!
-
-## Development Setup
+## Development setup
 
 1.  Clone the repo.
 2.  Install development dependencies (e.g., `pytest`, `black`, `isort`).
 3.  Ensure you have `firecracker` installed.
 4.  Fetch runtime artifacts with `bandsox init` (kernel, CNI, optional base rootfs). These are not committed to git.
 
-## Project Structure
+## Project structure
 
 - `bandsox/`: Main package source code.
   - `core.py`: Main entry point.
@@ -19,20 +17,19 @@ We welcome contributions to BandSox!
 - `verification/`: Verification and test scripts.
 - `scripts/`: Utility scripts.
 
-## Running Tests
+## Running tests
 
-Currently, we use verification scripts in `verification/`.
-Run them with `sudo` as they require network device creation.
+Verification scripts live in `verification/`. They need `sudo` because they create network devices.
 
 ```bash
 sudo python3 verification/verify_bandsox.py
 ```
 
-## Code Style
+## Code style
 
-Please follow PEP 8. We recommend using `black` for formatting.
+Follow PEP 8. Use `black` for formatting.
 
-## Pull Requests
+## Pull requests
 
 1.  Fork the repo.
 2.  Create a feature branch.
