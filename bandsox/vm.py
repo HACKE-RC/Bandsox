@@ -241,6 +241,7 @@ class MicroVM:
         mount_cmds = [
             "mount --make-rprivate /",
             f"mkdir -p {shlex.quote(tmp_dir)} {shlex.quote(vsock_dir)} /tmp/bandsox /var/lib/bandsox/vsock",
+            f"chmod 0777 {shlex.quote(tmp_dir)} {shlex.quote(vsock_dir)} /tmp/bandsox /var/lib/bandsox/vsock",
             f"mount --bind {shlex.quote(tmp_dir)} /tmp/bandsox",
             f"mount --bind {shlex.quote(vsock_dir)} /var/lib/bandsox/vsock",
         ]
@@ -1376,18 +1377,53 @@ class MicroVM:
         if not self.agent_ready:
             raise Exception("Agent not ready")
 
-        result = {}
+        result = {
+            "mode": None,
+            "content": None,
+            "chunks": bytearray(),
+            "checksum": None,
+            "total_size": None,
+        }
 
         def on_file_content(c):
+            result["mode"] = "single"
             result["content"] = c
 
-        self.send_request("read_file", {"path": path}, on_file_content=on_file_content)
+        def on_file_chunk(data, offset, size):
+            if result["mode"] is None:
+                result["mode"] = "chunked"
+            result["chunks"].extend(base64.b64decode(data))
 
-        if "content" in result:
-            import base64
+        def on_file_complete(total_size, checksum):
+            result["total_size"] = total_size
+            result["checksum"] = checksum
 
+        import base64
+        import hashlib
+
+        self.send_request(
+            "read_file",
+            {"path": path},
+            on_file_content=on_file_content,
+            on_file_chunk=on_file_chunk,
+            on_file_complete=on_file_complete,
+        )
+
+        if result["mode"] == "single" and result["content"] is not None:
             return base64.b64decode(result["content"]).decode("utf-8")
-        raise Exception(f"Failed to read {path} via agent")
+
+        if result["mode"] == "chunked":
+            if result["checksum"]:
+                md5 = hashlib.md5(result["chunks"]).hexdigest()
+                if md5 != result["checksum"]:
+                    raise Exception(
+                        f"Checksum mismatch: expected {result['checksum']}, got {md5}"
+                    )
+            return result["chunks"].decode("utf-8")
+
+        raise Exception(
+            f"Failed to read {path} via agent. You may need to use a different tool to read this file"
+        )
 
     def list_dir(self, path: str) -> list:
         """Lists directory contents."""
