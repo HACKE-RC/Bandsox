@@ -1,23 +1,23 @@
-# BandSox Documentation
+# BandSox documentation
 
-BandSox is a Python library for managing Firecracker microVMs. It allows you to create, manage, and snapshot secure sandboxes defined by Docker images.
+Python library for managing Firecracker microVMs. Create, manage, and snapshot sandboxes from Docker images.
 
-## Table of Contents
+## Table of contents
 
-- [Quick Start](#quick-start)
-- [Core Concepts](#core-concepts)
-- [Usage Guide](#usage-guide)
+- [Quick start](#quick-start)
+- [Core concepts](#core-concepts)
+- [Usage guide](#usage-guide)
   - [Initialization](#initialization)
   - [Creating VMs](#creating-vms)
-  - [Executing Commands](#executing-commands)
-  - [File Operations](#file-operations)
+  - [Executing commands](#executing-commands)
+  - [File operations](#file-operations)
   - [Snapshots](#snapshots)
-- [CLI Reference](#cli-reference)
+- [CLI reference](#cli-reference)
 - [HTTP API](#http-api)
-- [Class Reference](#class-reference)
-- [Caveats & Troubleshooting](#caveats--troubleshooting)
+- [Class reference](#class-reference)
+- [Caveats & troubleshooting](#caveats--troubleshooting)
 
-## Quick Start
+## Quick start
 
 ```python
 from bandsox.core import BandSox
@@ -41,18 +41,18 @@ vm.stop()
 vm.delete()
 ```
 
-## Core Concepts
+## Core concepts
 
-- **BandSox**: The main controller class that manages the storage, networking, and lifecycle of all VMs.
-- **MicroVM**: Represents a single running Firecracker instance. It handles communication with the guest agent and the VMM.
-- **Agent**: A lightweight process running inside the guest OS that executes commands and operations requested by the host `MicroVM` object.
-- **Rootfs**: The filesystem of the VM, created from a Docker image.
+- `BandSox` -- the main controller. Manages storage, networking, and VM lifecycle.
+- `MicroVM` -- a single running Firecracker instance. Talks to the guest agent and the VMM.
+- `Agent` -- a small process inside the guest OS that runs commands and handles file ops on behalf of the host.
+- `Rootfs` -- the VM filesystem, built from a Docker image.
 
-## Usage Guide
+## Usage guide
 
 ### Initialization
 
-The `BandSox` class is your entry point.
+Start with the `BandSox` class.
 
 ```python
 from bandsox.core import BandSox
@@ -60,13 +60,11 @@ from bandsox.core import BandSox
 manager = BandSox(storage_dir="/path/to/storage")
 ```
 
-**Note**: The storage directory will contain sensitive data (images, sockets, metadata). Ensure proper permissions. Large artifacts (kernel, CNI plugins, rootfs images) are not shipped in git; use the CLI `bandsox init` command to download them.
+The storage directory holds images, sockets, and metadata -- set permissions accordingly. Large artifacts (kernel, CNI plugins, rootfs images) are not in git; run `bandsox init` to download them.
 
 ### Creating VMs
 
-You can create VMs from existing Docker images or build them from a Dockerfile.
-
-**From Docker Image:**
+From a Docker image:
 
 ```python
 vm = manager.create_vm(
@@ -78,7 +76,7 @@ vm = manager.create_vm(
 )
 ```
 
-**From Dockerfile:**
+From a Dockerfile:
 
 ```python
 vm = manager.create_vm_from_dockerfile(
@@ -88,19 +86,19 @@ vm = manager.create_vm_from_dockerfile(
 )
 ```
 
-### Executing Commands
+### Executing commands
 
-BandSox provides several ways to run commands.
+Several ways to run commands:
 
-**1. Blocking Execution (`exec_command`)**
-Wait for the command to finish. Good for simple tasks.
+**1. Blocking (`exec_command`)**
+Waits for the command to finish.
 
 ```python
 code = vm.exec_command("ls -la /", on_stdout=lambda line: print(f"OUT: {line}"), timeout=10)
 ```
 
-**2. Background Session (`start_session`)**
-Run long-running processes. Returns a session ID.
+**2. Background (`start_session`)**
+Returns a session ID for long-running processes.
 
 ```python
 session_id = vm.start_session("sleep 100")
@@ -109,15 +107,15 @@ vm.kill_session(session_id)
 ```
 
 **3. Interactive PTY (`start_pty_session`)**
-Allocate a pseudo-terminal. Useful if the application expects a TTY (e.g., shells, interactive CLIs).
+Allocates a pseudo-terminal. Use when the program expects a TTY (shells, interactive CLIs).
 
 ```python
 session_id = vm.start_pty_session("/bin/sh", cols=80, rows=24)
 vm.send_session_input(session_id, "echo Interactive\n")
 ```
 
-**4. Python Execution (`exec_python`)**
-Execute Python code with isolated dependencies (using `uv` for fast package installation).
+**4. Python execution (`exec_python`)**
+Run Python code with isolated dependencies (uses `uv` for package installation).
 
 ```python
 # Simple execution
@@ -130,8 +128,8 @@ vm.exec_python(
 )
 ```
 
-**5. Python Execution with Capture (`exec_python_capture`)**
-Convenience wrapper that captures output and returns a result dictionary. **Does not raise exceptions.**
+**5. Python execution with capture (`exec_python_capture`)**
+Captures output and returns a result dict. Does not raise exceptions.
 
 ```python
 result = vm.exec_python_capture("print('hello')")
@@ -141,9 +139,9 @@ else:
     print(f"Error: {result['error']}")
 ```
 
-### File Operations
+### File operations
 
-File operations use the guest agent for transfers.
+File transfers go through the guest agent.
 
 ```python
 # Upload a file (timeout scales with file size: 60s minimum + 30s per MB)
@@ -158,7 +156,7 @@ content = vm.get_file_contents("/etc/hostname")
 
 ### Snapshots
 
-Snapshots allow you to save the memory and disk state of a running VM and restore it instantly later.
+Save the memory and disk state of a running VM, then restore it later.
 
 ```python
 # Create a snapshot
@@ -169,9 +167,9 @@ snapshot_id = manager.snapshot_vm(vm, snapshot_name="checkpoint-1")
 restored_vm = manager.restore_vm(snapshot_id)
 ```
 
-## CLI Reference
+## CLI reference
 
-The `bandsox` CLI wraps the server and API for common workflows.
+The `bandsox` CLI wraps the server and API.
 
 - `bandsox init` — download required artifacts.
   - Flags: `--kernel-url`, `--kernel-output`, `--skip-kernel`, `--cni-url`, `--cni-dir`, `--skip-cni`, `--rootfs-url`, `--rootfs-output`, `--skip-rootfs`, `--force`
@@ -193,7 +191,7 @@ The `bandsox` CLI wraps the server and API for common workflows.
 
 Base URL: `http://HOST:PORT`
 
-VMs
+### VMs
 
 - `GET /api/vms` — list VMs.
 - `POST /api/vms` — create a VM from an image.
@@ -207,21 +205,21 @@ VMs
 - `GET /api/vms/{vm_id}/download?path=/etc/hosts` — download a file.
 - `WS /api/vms/{vm_id}/terminal?cols=80&rows=24` — interactive terminal.
 
-Snapshots
+### Snapshots
 
 - `GET /api/snapshots` — list snapshots.
 - `DELETE /api/snapshots/{snapshot_id}` — delete a snapshot.
 - `POST /api/snapshots/{snapshot_id}/restore` — restore into a new VM.
   - Body: `{ "name": "optional-name", "enable_networking": true }`
 
-Static assets
+### Static assets
 
 - `GET /` — dashboard.
 - `GET /terminal` — web terminal page.
 - `GET /vm_details` — VM details page.
 - `GET /markdown_viewer` — markdown viewer.
 
-## Class Reference
+## Class reference
 
 ### `BandSox`
 
@@ -248,38 +246,34 @@ Static assets
 | `download_file(remote, local)` | Download a file (Pauses VM). |
 | `get_file_contents(remote)` | Read file content (Pauses VM). |
 
-## Caveats & Troubleshooting
+## Caveats & troubleshooting
 
-### 1. Root Privileges & Networking
+### 1. Root privileges & networking
 
-Standard networking setup (`enable_networking=True`) requires **sudo privileges**.
+Networking (`enable_networking=True`) requires sudo.
 
 - The library executes `sudo ip ...` and `sudo iptables ...` to configure TAP devices and NAT.
 - Users must run the script as root OR have sudo access to run networking commands.
 - If you do not have sudo access, create the VM with `enable_networking=False`.
 
-### 2. File Operations Pause VM
+### 2. File operations pause the VM
 
-The current implementation of `upload_file` and `download_file` uses `debugfs` on the underlying `ext4` filesystem file.
+`upload_file` and `download_file` use `debugfs` on the ext4 filesystem file, so the VM is paused during transfer to avoid corruption. Network connections may time out and real-time processes will be interrupted. For small files, `cat` via `exec_command` avoids the pause, but it's less reliable for binary data.
 
-- **Caveat**: The VM process is **paused** during the file transfer to prevent filesystem corruption.
-- **Impact**: Network connections might time out; real-time processes will be interrupted.
-- **Alternative**: For small files, consider using `cat` via `exec_command` to avoid pausing, though this is less robust for binary data.
+### 3. Kernel dependencies
 
-### 3. Kernel Dependencies
-
-The VM boot requires a compatible Linux kernel binary (`vmlinux`).
+VMs need a compatible Linux kernel binary (`vmlinux`).
 
 - By default, it looks at `/var/lib/bandsox/vmlinux`.
 - Ensure this file exists, or pass `kernel_path` to `create_vm`.
 
-### 4. Image Size
+### 4. Image size
 
-When creating a VM, the rootfs size is fixed at build time (defaults to Docker export size + overhead). If you need more space, the image generation logic needs to be adjusted (currently in `image.py`, typically minimal size).
+The rootfs size is fixed at build time (Docker export size + overhead). If you need more space, adjust the image generation logic in `image.py`.
 
-### 5. Snapshot Compatibility
+### 5. Snapshot compatibility
 
-Restoring a snapshot requires the **original kernel** and compatible network configuration.
+Restoring a snapshot requires the same kernel and a compatible network config.
 
-- If you move the backend storage, ensure metadata and snapshots are moved together.
-- Snapshots are tied to the exact kernel binary used at creation.
+- If you move the storage directory, move metadata and snapshots together.
+- Snapshots are tied to the exact kernel binary used when they were created.
