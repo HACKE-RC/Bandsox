@@ -1329,6 +1329,11 @@ class ManagedMicroVM(MicroVM):
             raise Exception("Agent not ready")
         return super().list_dir(*args, **kwargs)
 
+    def send_request(self, *args, **kwargs):
+        if not self.wait_for_agent():
+            raise Exception("Agent not ready")
+        return super().send_request(*args, **kwargs)
+
     def download_file(self, *args, **kwargs):
         if not self.wait_for_agent():
             raise Exception("Agent not ready")
