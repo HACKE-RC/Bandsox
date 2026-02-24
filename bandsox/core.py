@@ -620,6 +620,17 @@ class BandSox:
 
         if snap_rootfs and os.path.exists(snap_rootfs):
             self._clone_rootfs(snap_rootfs, instance_rootfs)
+            sudo_user = os.environ.get("SUDO_USER")
+            if sudo_user and os.geteuid() == 0:
+                import pwd
+
+                try:
+                    user_info = pwd.getpwnam(sudo_user)
+                    os.chown(instance_rootfs, user_info.pw_uid, user_info.pw_gid)
+                except KeyError:
+                    logger.warning(
+                        f"SUDO_USER {sudo_user} not found; leaving rootfs ownership unchanged"
+                    )
 
         # Vsock socket path prepared above (symlink or isolation).
 
