@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -7,6 +7,9 @@ from .core import BandSox
 import logging
 import asyncio
 import json
+import base64
+import tempfile
+from typing import List
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -87,6 +90,41 @@ def create_vm(req: CreateVMRequest):
         return {"id": vm.vm_id, "status": "created"}
     except Exception as e:
         logger.error(f"Failed to create VM: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/vms/from-dockerfile")
+async def create_vm_from_dockerfile(
+    dockerfile: UploadFile = File(...),
+    tag: str = Form(None),
+    name: str = Form(None),
+    vcpu: int = Form(1),
+    mem_mib: int = Form(128),
+    disk_size_mib: int = Form(4096),
+    force_rebuild: bool = Form(False),
+    env_vars: str = Form(None),
+    metadata: str = Form(None),
+):
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".Dockerfile") as tmp:
+            tmp.write(await dockerfile.read())
+            dockerfile_path = tmp.name
+        try:
+            vm = bs.create_vm_from_dockerfile(
+                dockerfile_path,
+                tag=tag,
+                name=name,
+                vcpu=vcpu,
+                mem_mib=mem_mib,
+                disk_size_mib=disk_size_mib,
+                force_rebuild=force_rebuild,
+                env_vars=json.loads(env_vars) if env_vars else None,
+                metadata=json.loads(metadata) if metadata else None,
+            )
+        finally:
+            os.unlink(dockerfile_path)
+        return {"id": vm.vm_id, "status": "created"}
+    except Exception as e:
+        logger.error(f"Failed to create VM from Dockerfile: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 class RestoreVMRequest(BaseModel):
@@ -223,6 +261,31 @@ class UpdateMetadataRequest(BaseModel):
 class RenameRequest(BaseModel):
     name: str
 
+class ExecRequest(BaseModel):
+    command: str
+    timeout: int = 30
+
+class ExecPythonRequest(BaseModel):
+    code: str
+    cwd: str = "/tmp"
+    packages: List[str] = None
+    timeout: int = 60
+    cleanup_venv: bool = True
+
+class WriteFileRequest(BaseModel):
+    path: str
+    content: str
+    encoding: str = "utf-8"
+
+class HttpProxyRequest(BaseModel):
+    port: int
+    path: str = "/"
+    method: str = "GET"
+    headers: dict = None
+    body: str = None
+    json_body: dict = None
+    timeout: int = 30
+
 @app.put("/api/vms/{vm_id}/metadata")
 def update_vm_metadata(vm_id: str, req: UpdateMetadataRequest):
     """Update the metadata of a VM."""
@@ -245,6 +308,129 @@ def rename_vm(vm_id: str, req: RenameRequest):
         raise HTTPException(status_code=404, detail="VM not found")
     except Exception as e:
         logger.error(f"Failed to rename VM {vm_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+def _get_running_vm_or_404(vm_id: str):
+    vm = bs.get_vm(vm_id)
+    if not vm:
+        raise HTTPException(status_code=404, detail="VM not found or not running")
+    return vm
+
+@app.post("/api/vms/{vm_id}/exec")
+def exec_command(vm_id: str, req: ExecRequest):
+    """Run a blocking shell command inside a VM and capture stdout/stderr."""
+    vm = _get_running_vm_or_404(vm_id)
+    stdout = []
+    stderr = []
+    try:
+        exit_code = vm.exec_command(
+            req.command,
+            on_stdout=lambda line: stdout.append(str(line)),
+            on_stderr=lambda line: stderr.append(str(line)),
+            timeout=req.timeout,
+        )
+        return {
+            "exit_code": exit_code,
+            "stdout": "".join(stdout),
+            "stderr": "".join(stderr),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/vms/{vm_id}/exec-python")
+def exec_python(vm_id: str, req: ExecPythonRequest):
+    """Run Python inside a VM and return captured output."""
+    vm = _get_running_vm_or_404(vm_id)
+    try:
+        return vm.exec_python_capture(
+            req.code,
+            cwd=req.cwd,
+            packages=req.packages,
+            timeout=req.timeout,
+            cleanup_venv=req.cleanup_venv,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/vms/{vm_id}/read-file")
+def read_file(vm_id: str, path: str):
+    """Read a UTF-8 file from inside a VM."""
+    vm = _get_running_vm_or_404(vm_id)
+    try:
+        return {"path": path, "content": vm.get_file_contents(path)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/vms/{vm_id}/write-file")
+def write_file(vm_id: str, req: WriteFileRequest):
+    """Write string content to a file inside a VM."""
+    vm = _get_running_vm_or_404(vm_id)
+    try:
+        raw = (
+            base64.b64decode(req.content)
+            if req.encoding == "base64"
+            else req.content.encode("utf-8")
+        )
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(raw)
+            tmp_path = tmp.name
+        try:
+            vm.upload_file(tmp_path, req.path)
+        finally:
+            os.unlink(tmp_path)
+        return {"status": "written", "path": req.path}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/vms/{vm_id}/file-info")
+def file_info(vm_id: str, path: str):
+    """Get file metadata from inside a VM."""
+    vm = _get_running_vm_or_404(vm_id)
+    try:
+        return {"path": path, "info": vm.get_file_info(path)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/vms/{vm_id}/upload")
+async def upload_file(
+    vm_id: str,
+    remote_path: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """Upload multipart file content into a VM."""
+    vm = _get_running_vm_or_404(vm_id)
+    try:
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(await file.read())
+            tmp_path = tmp.name
+        try:
+            vm.upload_file(tmp_path, remote_path)
+        finally:
+            os.unlink(tmp_path)
+        return {"status": "uploaded", "path": remote_path}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/vms/{vm_id}/http")
+def proxy_http(vm_id: str, req: HttpProxyRequest):
+    """Proxy an HTTP request to a service running inside the VM."""
+    vm = _get_running_vm_or_404(vm_id)
+    try:
+        resp = vm.send_http_request(
+            port=req.port,
+            path=req.path,
+            method=req.method,
+            headers=req.headers,
+            data=req.body,
+            json=req.json_body,
+            timeout=req.timeout,
+        )
+        return {
+            "status_code": resp.status_code,
+            "headers": dict(resp.headers),
+            "body": resp.text,
+        }
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/vms/{vm_id}/files")
@@ -312,7 +498,6 @@ def list_directory(vm_id: str, path: str = "/"):
 def download_file(vm_id: str, path: str):
     """Download a file from the VM."""
     from fastapi.responses import StreamingResponse
-    import tempfile
     
     # Get VM metadata first
     vm_info = bs.get_vm_info(vm_id)
@@ -422,4 +607,3 @@ async def terminal_endpoint(websocket: WebSocket, vm_id: str, cols: int = 80, ro
     finally:
         vm.kill_session(session_id)
         sender_task.cancel()
-

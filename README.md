@@ -63,6 +63,24 @@ print(content) # Output: Hello World
 vm.stop()
 ```
 
+### Python API against a server
+
+If the BandSox dashboard/API is already running somewhere, point the same Python entry point at it:
+
+```python
+from bandsox.core import BandSox
+
+bs = BandSox(server_url="http://localhost:8000")
+vm = bs.create_vm("python:3-alpine", enable_networking=False)
+
+result = vm.exec_python_capture("print('Hello from the server')")
+print(result["stdout"])
+
+vm.stop()
+```
+
+Passing the URL directly also works: `BandSox("http://localhost:8000")`.
+
 ### Web UI
 
 Start the dashboard:

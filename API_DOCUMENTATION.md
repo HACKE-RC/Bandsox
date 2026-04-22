@@ -62,6 +62,23 @@ manager = BandSox(storage_dir="/path/to/storage")
 
 The storage directory holds images, sockets, and metadata -- set permissions accordingly. Large artifacts (kernel, CNI plugins, rootfs images) are not in git; run `bandsox init` to download them.
 
+To use a running BandSox server instead of managing Firecracker locally, pass `server_url`.
+The same high-level Python API will proxy operations through the HTTP server.
+
+```python
+from bandsox.core import BandSox
+
+manager = BandSox(server_url="http://localhost:8000")
+vm = manager.create_vm("python:3.11-slim", enable_networking=False)
+
+result = vm.exec_python_capture("print('hello from the remote server')")
+print(result["stdout"])
+
+vm.stop()
+```
+
+You can also pass the URL as the first argument: `BandSox("http://localhost:8000")`.
+
 ### Creating VMs
 
 From a Docker image:
@@ -201,8 +218,16 @@ Base URL: `http://HOST:PORT`
 - `DELETE /api/vms/{vm_id}` — delete a VM.
 - `POST /api/vms/{vm_id}/snapshot` — snapshot a running VM.
   - Body: `{ "name": "snap-name" }`
+- `POST /api/vms/{vm_id}/exec` — run a blocking command.
+  - Body: `{ "command": "echo hello", "timeout": 30 }`
+- `POST /api/vms/{vm_id}/exec-python` — run Python and return captured output.
 - `GET /api/vms/{vm_id}/files?path=/` — list files inside the VM (may start a temporary instance when stopped).
+- `GET /api/vms/{vm_id}/read-file?path=/etc/hosts` — read a UTF-8 file.
+- `POST /api/vms/{vm_id}/write-file` — write a UTF-8 or base64-encoded file.
+- `GET /api/vms/{vm_id}/file-info?path=/etc/hosts` — get file metadata.
+- `POST /api/vms/{vm_id}/upload` — upload a multipart file.
 - `GET /api/vms/{vm_id}/download?path=/etc/hosts` — download a file.
+- `POST /api/vms/{vm_id}/http` — proxy an HTTP request to a service running inside the VM.
 - `WS /api/vms/{vm_id}/terminal?cols=80&rows=24` — interactive terminal.
 
 ### Snapshots

@@ -1,6 +1,6 @@
 [project]
 name = "bandsox"
-version = "1.8.1"
+version = "1.9"
 description = "Fast Firecracker microVM manager"
 authors = [{name = "rc", email = "crretsim@gmail.com"}]
 readme = "README.md"
@@ -10,6 +10,7 @@ dependencies = [
     "requests",
     "requests-unixsocket",
     "fastapi",
+    "python-multipart",
     "uvicorn",
     "websockets",
     "pydantic",
