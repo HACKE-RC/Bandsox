@@ -1,6 +1,7 @@
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import bandsox.server as server
+from bandsox.core import BandSox, RemoteBandSox
 
 
 class DummyVM:
@@ -25,6 +27,7 @@ class DummyVM:
         self.inputs = []
         self.resizes = []
         self.killed_sessions = []
+        self.uploads = []
 
     def stop(self):
         self.stopped = True
@@ -44,6 +47,39 @@ class DummyVM:
 
     def download_file(self, remote, local):
         Path(local).write_bytes(self.download_content)
+
+    def exec_command(self, command, on_stdout=None, on_stderr=None, timeout=30):
+        if on_stdout:
+            on_stdout("stdout")
+        if on_stderr:
+            on_stderr("stderr")
+        return 0
+
+    def exec_python_capture(self, code, cwd="/tmp", packages=None, timeout=60, cleanup_venv=True):
+        return {
+            "exit_code": 0,
+            "stdout": "pyout",
+            "stderr": "",
+            "output": "pyout",
+            "success": True,
+            "error": None,
+        }
+
+    def get_file_contents(self, path):
+        return "file text"
+
+    def upload_file(self, local, remote):
+        self.uploads.append((Path(local).read_bytes(), remote))
+
+    def get_file_info(self, path):
+        return {"size": 9}
+
+    def send_http_request(self, port, path="/", method="GET", **kwargs):
+        return SimpleNamespace(
+            status_code=201,
+            headers={"x-test": "ok"},
+            text=f"{method} {port}{path}",
+        )
 
     def start_pty_session(self, cmd, cols, rows, on_stdout=None, on_exit=None):
         if on_stdout:
@@ -70,7 +106,7 @@ class FakeBandSox:
         self.deleted_vm = None
         self.last_status = None
 
-    def list_vms(self):
+    def list_vms(self, limit=None, metadata_equals=None):
         return self.vms
 
     def list_snapshots(self):
@@ -79,7 +115,7 @@ class FakeBandSox:
     def create_vm(self, *_, **__):
         return self.vm
 
-    def restore_vm(self, snapshot_id, name=None, enable_networking=True):
+    def restore_vm(self, snapshot_id, name=None, enable_networking=True, env_vars=None, metadata=None):
         if snapshot_id == "missing":
             raise FileNotFoundError("snapshot missing")
         return self.vm
@@ -95,7 +131,7 @@ class FakeBandSox:
     def update_vm_status(self, vm_id, status):
         self.last_status = (vm_id, status)
 
-    def snapshot_vm(self, vm, snapshot_name=None):
+    def snapshot_vm(self, vm, snapshot_name=None, metadata=None):
         return snapshot_name or "snapshot-auto"
 
     def delete_vm(self, vm_id):
@@ -121,6 +157,11 @@ def client(fake_bs):
 def test_static_pages(client, path):
     resp = client.get(path)
     assert resp.status_code == 200
+
+
+def test_bandsox_constructor_accepts_server_url():
+    assert isinstance(BandSox(server_url="http://localhost:8000"), RemoteBandSox)
+    assert isinstance(BandSox("http://localhost:8000"), RemoteBandSox)
 
 
 def test_list_vms(client, fake_bs):
@@ -266,6 +307,65 @@ def test_get_vm_details_not_found(client):
     assert resp.status_code == 404
 
 
+def test_exec_command(client, fake_bs):
+    resp = client.post(
+        f"/api/vms/{fake_bs.vm.vm_id}/exec",
+        json={"command": "echo hi", "timeout": 5},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"exit_code": 0, "stdout": "stdout", "stderr": "stderr"}
+
+
+def test_exec_python(client, fake_bs):
+    resp = client.post(
+        f"/api/vms/{fake_bs.vm.vm_id}/exec-python",
+        json={"code": "print('hi')"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["stdout"] == "pyout"
+
+
+def test_read_write_file(client, fake_bs):
+    read_resp = client.get(
+        f"/api/vms/{fake_bs.vm.vm_id}/read-file",
+        params={"path": "/tmp/in.txt"},
+    )
+    assert read_resp.status_code == 200
+    assert read_resp.json() == {"path": "/tmp/in.txt", "content": "file text"}
+
+    write_resp = client.post(
+        f"/api/vms/{fake_bs.vm.vm_id}/write-file",
+        json={"path": "/tmp/out.txt", "content": "hello"},
+    )
+    assert write_resp.status_code == 200
+    assert fake_bs.vm.uploads[-1] == (b"hello", "/tmp/out.txt")
+
+
+def test_file_info_upload_and_http_proxy(client, fake_bs):
+    info_resp = client.get(
+        f"/api/vms/{fake_bs.vm.vm_id}/file-info",
+        params={"path": "/tmp/out.txt"},
+    )
+    assert info_resp.status_code == 200
+    assert info_resp.json()["info"] == {"size": 9}
+
+    upload_resp = client.post(
+        f"/api/vms/{fake_bs.vm.vm_id}/upload",
+        data={"remote_path": "/tmp/upload.txt"},
+        files={"file": ("upload.txt", b"uploaded")},
+    )
+    assert upload_resp.status_code == 200
+    assert fake_bs.vm.uploads[-1] == (b"uploaded", "/tmp/upload.txt")
+
+    http_resp = client.post(
+        f"/api/vms/{fake_bs.vm.vm_id}/http",
+        json={"port": 8080, "path": "/health", "method": "POST"},
+    )
+    assert http_resp.status_code == 200
+    assert http_resp.json()["status_code"] == 201
+    assert http_resp.json()["body"] == "POST 8080/health"
+
+
 def test_list_directory(client, fake_bs):
     resp = client.get(f"/api/vms/{fake_bs.vm.vm_id}/files", params={"path": "/etc"})
     assert resp.status_code == 200
@@ -289,4 +389,3 @@ def test_terminal_websocket(client, fake_bs):
         ws.send_text(json.dumps({"type": "input", "data": "Zm9v"}))
     assert fake_bs.vm.inputs == [("session-1", "Zm9v", "base64")]
     assert fake_bs.vm.killed_sessions == ["session-1"]
-

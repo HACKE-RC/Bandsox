@@ -5,6 +5,7 @@ import logging
 import shutil
 import json
 import threading
+import requests
 from pathlib import Path
 from .vm import MicroVM, DEFAULT_KERNEL_PATH
 from .image import build_rootfs
@@ -15,7 +16,38 @@ logger = logging.getLogger(__name__)
 
 
 class BandSox:
-    def __init__(self, storage_dir: str = "/var/lib/bandsox"):
+    def __new__(
+        cls,
+        storage_dir: str = "/var/lib/bandsox",
+        server_url: str = None,
+        headers: dict = None,
+        timeout: int = 60,
+    ):
+        if (
+            not server_url
+            and isinstance(storage_dir, str)
+            and storage_dir.startswith(("http://", "https://"))
+        ):
+            server_url = storage_dir
+        if cls is BandSox and server_url:
+            return RemoteBandSox(server_url, headers=headers, timeout=timeout)
+        return super().__new__(cls)
+
+    def __init__(
+        self,
+        storage_dir: str = "/var/lib/bandsox",
+        server_url: str = None,
+        headers: dict = None,
+        timeout: int = 60,
+    ):
+        if (
+            not server_url
+            and isinstance(storage_dir, str)
+            and storage_dir.startswith(("http://", "https://"))
+        ):
+            server_url = storage_dir
+        if server_url:
+            return
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.images_dir = self.storage_dir / "images"
@@ -1169,6 +1201,365 @@ class BandSox:
             vm.env_vars = meta["env_vars"]
 
         return vm
+
+
+class RemoteBandSox:
+    """HTTP-backed BandSox client exposed through the Python API."""
+
+    def __init__(self, server_url: str, headers: dict = None, timeout: int = 60):
+        self.server_url = server_url.rstrip("/")
+        self.headers = headers or {}
+        self.timeout = timeout
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
+
+    def _request(self, method: str, path: str, **kwargs):
+        url = f"{self.server_url}{path}"
+        timeout = kwargs.pop("timeout", self.timeout)
+        if "json" in kwargs and isinstance(kwargs["json"], dict):
+            kwargs["json"] = {
+                key: value for key, value in kwargs["json"].items() if value is not None
+            }
+        resp = self.session.request(method, url, timeout=timeout, **kwargs)
+        if resp.status_code == 404:
+            detail = self._error_detail(resp)
+            raise FileNotFoundError(detail)
+        if not resp.ok:
+            raise Exception(self._error_detail(resp))
+        content_type = resp.headers.get("content-type", "")
+        if "application/json" in content_type:
+            return resp.json()
+        return resp.content
+
+    @staticmethod
+    def _error_detail(resp) -> str:
+        try:
+            data = resp.json()
+            return str(data.get("detail") or resp.text or resp.reason)
+        except Exception:
+            return resp.text or resp.reason
+
+    def _vm(self, vm_id: str, info: dict = None):
+        return RemoteMicroVM(vm_id, self, info=info)
+
+    def create_vm(
+        self,
+        docker_image: str,
+        name: str = None,
+        vcpu: int = 1,
+        mem_mib: int = 128,
+        kernel_path: str = DEFAULT_KERNEL_PATH,
+        enable_networking: bool = True,
+        enable_vsock: bool = True,
+        force_rebuild: bool = False,
+        disk_size_mib: int = 4096,
+        env_vars: dict = None,
+        metadata: dict = None,
+    ):
+        payload = {
+            "image": docker_image,
+            "name": name,
+            "vcpu": vcpu,
+            "mem_mib": mem_mib,
+            "enable_networking": enable_networking,
+            "force_rebuild": force_rebuild,
+            "disk_size_mib": disk_size_mib,
+            "env_vars": env_vars,
+            "metadata": metadata,
+        }
+        res = self._request("POST", "/api/vms", json=payload)
+        return self._vm(res["id"])
+
+    def create_vm_from_dockerfile(
+        self,
+        dockerfile_path: str,
+        tag: str = None,
+        name: str = None,
+        vcpu: int = 1,
+        mem_mib: int = 128,
+        disk_size_mib: int = 4096,
+        env_vars: dict = None,
+        metadata: dict = None,
+        force_rebuild: bool = False,
+        **kwargs,
+    ):
+        data = {
+            "vcpu": str(vcpu),
+            "mem_mib": str(mem_mib),
+            "disk_size_mib": str(disk_size_mib),
+            "force_rebuild": str(force_rebuild).lower(),
+        }
+        if tag:
+            data["tag"] = tag
+        if name:
+            data["name"] = name
+        if env_vars:
+            data["env_vars"] = json.dumps(env_vars)
+        if metadata:
+            data["metadata"] = json.dumps(metadata)
+
+        with open(dockerfile_path, "rb") as f:
+            files = {"dockerfile": ("Dockerfile", f, "text/plain")}
+            res = self._request(
+                "POST", "/api/vms/from-dockerfile", data=data, files=files
+            )
+        return self._vm(res["id"])
+
+    def restore_vm(
+        self,
+        snapshot_id: str,
+        name: str = None,
+        enable_networking: bool = True,
+        detach: bool = True,
+        env_vars: dict = None,
+        metadata: dict = None,
+    ):
+        payload = {
+            "name": name,
+            "enable_networking": enable_networking,
+            "env_vars": env_vars,
+            "metadata": metadata,
+        }
+        res = self._request("POST", f"/api/snapshots/{snapshot_id}/restore", json=payload)
+        return self._vm(res["id"])
+
+    def snapshot_vm(self, vm, snapshot_name: str = None, metadata: dict = None) -> str:
+        vm_id = vm.vm_id if hasattr(vm, "vm_id") else str(vm)
+        res = self._request(
+            "POST",
+            f"/api/vms/{vm_id}/snapshot",
+            json={"name": snapshot_name or f"{vm_id}-snapshot", "metadata": metadata},
+        )
+        return res["snapshot_id"]
+
+    def list_vms(self, limit: int = None, metadata_equals: dict = None):
+        params = {}
+        if limit is not None:
+            params["limit"] = str(limit)
+        if metadata_equals:
+            params["metadata_equals"] = json.dumps(metadata_equals)
+        return self._request("GET", "/api/vms", params=params or None)
+
+    def list_snapshots(self):
+        return self._request("GET", "/api/snapshots")
+
+    def get_vm_info(self, vm_id: str):
+        try:
+            return self._request("GET", f"/api/vms/{vm_id}")
+        except FileNotFoundError:
+            return None
+
+    def get_vm(self, vm_id: str):
+        info = self.get_vm_info(vm_id)
+        if not info:
+            return None
+        return self._vm(vm_id, info=info)
+
+    def delete_vm(self, vm_id: str):
+        return self._request("DELETE", f"/api/vms/{vm_id}")
+
+    def delete_snapshot(self, snapshot_id: str):
+        return self._request("DELETE", f"/api/snapshots/{snapshot_id}")
+
+    def update_vm_metadata(self, vm_id: str, metadata: dict):
+        return self._request("PUT", f"/api/vms/{vm_id}/metadata", json={"metadata": metadata})
+
+    def rename_vm(self, vm_id: str, new_name: str):
+        return self._request("PUT", f"/api/vms/{vm_id}/name", json={"name": new_name})
+
+    def update_snapshot_metadata(self, snapshot_id: str, metadata: dict):
+        return self._request(
+            "PUT", f"/api/snapshots/{snapshot_id}/metadata", json={"metadata": metadata}
+        )
+
+    def rename_snapshot(self, snapshot_id: str, new_name: str):
+        return self._request(
+            "PUT", f"/api/snapshots/{snapshot_id}/name", json={"name": new_name}
+        )
+
+
+class RemoteMicroVM:
+    """VM handle returned by RemoteBandSox."""
+
+    def __init__(self, vm_id: str, bandsox: RemoteBandSox, info: dict = None):
+        self.vm_id = vm_id
+        self.bandsox = bandsox
+        self._info = info or {}
+
+    def get_info(self):
+        self._info = self.bandsox.get_vm_info(self.vm_id) or {}
+        return self._info
+
+    def stop(self):
+        return self.bandsox._request("POST", f"/api/vms/{self.vm_id}/stop")
+
+    def pause(self):
+        return self.bandsox._request("POST", f"/api/vms/{self.vm_id}/pause")
+
+    def resume(self):
+        return self.bandsox._request("POST", f"/api/vms/{self.vm_id}/resume")
+
+    def delete(self):
+        return self.bandsox.delete_vm(self.vm_id)
+
+    def snapshot(self, name: str = None, metadata: dict = None):
+        return self.bandsox.snapshot_vm(self, snapshot_name=name, metadata=metadata)
+
+    def wait_for_agent(self, timeout=30):
+        start = time.time()
+        while time.time() - start < timeout:
+            info = self.get_info()
+            if info.get("agent_ready") or info.get("status") == "running":
+                return True
+            time.sleep(0.5)
+        return False
+
+    def exec_command(self, command: str, on_stdout=None, on_stderr=None, timeout=30):
+        res = self.bandsox._request(
+            "POST",
+            f"/api/vms/{self.vm_id}/exec",
+            json={"command": command, "timeout": timeout},
+            timeout=timeout + 5,
+        )
+        if on_stdout and res.get("stdout"):
+            on_stdout(res["stdout"])
+        if on_stderr and res.get("stderr"):
+            on_stderr(res["stderr"])
+        return res["exit_code"]
+
+    def exec_python(
+        self,
+        code: str,
+        cwd: str = "/tmp",
+        packages: list = None,
+        on_stdout=None,
+        on_stderr=None,
+        timeout=60,
+        cleanup_venv=True,
+    ):
+        res = self.exec_python_capture(
+            code,
+            cwd=cwd,
+            packages=packages,
+            timeout=timeout,
+            cleanup_venv=cleanup_venv,
+        )
+        if on_stdout and res.get("stdout"):
+            on_stdout(res["stdout"])
+        if on_stderr and res.get("stderr"):
+            on_stderr(res["stderr"])
+        return res["exit_code"]
+
+    def exec_python_capture(
+        self,
+        code: str,
+        cwd: str = "/tmp",
+        packages: list = None,
+        timeout=60,
+        cleanup_venv=True,
+    ):
+        return self.bandsox._request(
+            "POST",
+            f"/api/vms/{self.vm_id}/exec-python",
+            json={
+                "code": code,
+                "cwd": cwd,
+                "packages": packages,
+                "timeout": timeout,
+                "cleanup_venv": cleanup_venv,
+            },
+            timeout=timeout + 5,
+        )
+
+    def list_dir(self, path: str = "/"):
+        res = self.bandsox._request(
+            "GET", f"/api/vms/{self.vm_id}/files", params={"path": path}
+        )
+        return res.get("files", [])
+
+    def get_file_contents(self, path: str) -> str:
+        res = self.bandsox._request(
+            "GET", f"/api/vms/{self.vm_id}/read-file", params={"path": path}
+        )
+        return res["content"]
+
+    def download_file(self, remote_path: str, local_path: str, timeout: int = 300):
+        data = self.bandsox._request(
+            "GET",
+            f"/api/vms/{self.vm_id}/download",
+            params={"path": remote_path},
+            timeout=timeout,
+        )
+        local_path = os.path.abspath(local_path)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, "wb") as f:
+            f.write(data)
+
+    def upload_file(self, local_path: str, remote_path: str, timeout: int = None):
+        if not os.path.exists(local_path):
+            raise FileNotFoundError(f"Local file not found: {local_path}")
+        request_timeout = timeout or self.bandsox.timeout
+        with open(local_path, "rb") as f:
+            files = {"file": (os.path.basename(local_path), f)}
+            data = {"remote_path": remote_path}
+            self.bandsox._request(
+                "POST",
+                f"/api/vms/{self.vm_id}/upload",
+                data=data,
+                files=files,
+                timeout=request_timeout,
+            )
+
+    def upload_folder(
+        self,
+        local_path: str,
+        remote_path: str,
+        pattern: str = None,
+        skip_pattern: list = None,
+    ):
+        import fnmatch
+
+        local_path = Path(local_path)
+        if not local_path.is_dir():
+            raise NotADirectoryError(f"Local path is not a directory: {local_path}")
+
+        for root, dirs, files in os.walk(local_path):
+            rel_root = Path(root).relative_to(local_path)
+            remote_root = Path(remote_path) / rel_root
+            if skip_pattern:
+                for d in list(dirs):
+                    if any(fnmatch.fnmatch(d, sp) for sp in skip_pattern):
+                        dirs.remove(d)
+            self.exec_command(f"mkdir -p {remote_root}", timeout=10)
+            for file_name in files:
+                if pattern and not fnmatch.fnmatch(file_name, pattern):
+                    continue
+                if skip_pattern and any(fnmatch.fnmatch(file_name, sp) for sp in skip_pattern):
+                    continue
+                self.upload_file(
+                    str(Path(root) / file_name),
+                    str(remote_root / file_name),
+                )
+
+    def get_file_info(self, path: str) -> dict:
+        res = self.bandsox._request(
+            "GET", f"/api/vms/{self.vm_id}/file-info", params={"path": path}
+        )
+        return res.get("info", {})
+
+    def send_http_request(
+        self, port: int, path: str = "/", method: str = "GET", **kwargs
+    ):
+        payload = {
+            "port": port,
+            "path": path,
+            "method": method,
+            "headers": kwargs.get("headers"),
+            "body": kwargs.get("data"),
+            "json_body": kwargs.get("json"),
+            "timeout": kwargs.get("timeout", 30),
+        }
+        return self.bandsox._request("POST", f"/api/vms/{self.vm_id}/http", json=payload)
 
 
 class ManagedMicroVM(MicroVM):
