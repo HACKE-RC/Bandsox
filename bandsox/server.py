@@ -1,9 +1,17 @@
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 import os
+from pathlib import Path
 from .core import BandSox
+from .auth import (
+    load_auth_config, init_auth_config, auth_enabled,
+    create_api_key, list_api_keys, revoke_api_key,
+    verify_password, verify_api_key, create_session,
+    validate_session, check_rate_limit, authenticate_websocket,
+    get_auth_dependency, SESSION_COOKIE_NAME,
+)
 import logging
 import asyncio
 import json
@@ -20,6 +28,16 @@ storage_path = os.environ.get("BANDSOX_STORAGE", os.getcwd() + "/storage")
 logger.info(f"Initializing BandSox with storage path: {storage_path}")
 bs = BandSox(storage_dir=storage_path)
 
+# Auth initialization
+_auth_storage = Path(storage_path)
+if auth_enabled(_auth_storage):
+    logger.info("Authentication enabled (auth.json found)")
+else:
+    logger.info("Authentication disabled. Run 'bandsox auth init' to enable.")
+
+require_auth = get_auth_dependency(_auth_storage)
+
+
 # Serve static files
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if not os.path.exists(static_dir):
@@ -27,23 +45,108 @@ if not os.path.exists(static_dir):
 
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
+def _has_valid_session(request: Request) -> bool:
+    if not auth_enabled(_auth_storage):
+        return True
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if session_token and validate_session(session_token, _auth_storage):
+        return True
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        config = load_auth_config(_auth_storage)
+        if config and verify_api_key(config, auth_header[7:]) is not None:
+            return True
+    return False
+
+
+@app.get("/login")
+async def login_page():
+    return FileResponse(os.path.join(static_dir, "login.html"))
+
+
 @app.get("/")
-async def read_index():
+async def read_index(request: Request):
+    if not _has_valid_session(request):
+        return RedirectResponse(url="/login", status_code=303)
     return FileResponse(os.path.join(static_dir, "index.html"))
 
 @app.get("/vm_details")
-async def read_vm_details():
+async def read_vm_details(request: Request):
+    if not _has_valid_session(request):
+        return RedirectResponse(url="/login", status_code=303)
     return FileResponse(os.path.join(static_dir, "vm_details.html"))
 
 @app.get("/terminal")
-async def read_terminal():
+async def read_terminal(request: Request):
+    if not _has_valid_session(request):
+        return RedirectResponse(url="/login", status_code=303)
     return FileResponse(os.path.join(static_dir, "terminal.html"))
 
 @app.get("/markdown_viewer")
-async def read_markdown_viewer():
+async def read_markdown_viewer(request: Request):
+    if not _has_valid_session(request):
+        return RedirectResponse(url="/login", status_code=303)
     return FileResponse(os.path.join(static_dir, "markdown_viewer.html"))
 
-@app.get("/api/vms")
+class LoginRequest(BaseModel):
+    password: str
+
+class CreateKeyRequest(BaseModel):
+    name: str
+
+
+@app.post("/api/auth/login")
+async def login(req: LoginRequest, request: Request, response: Response):
+    if not auth_enabled(_auth_storage):
+        raise HTTPException(status_code=404, detail="Auth not enabled. Run 'bandsox auth init' first.")
+    client_ip = request.client.host
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
+    config = load_auth_config(_auth_storage)
+    if not config or not verify_password(config, req.password):
+        raise HTTPException(status_code=401, detail="Invalid password")
+    token = create_session(_auth_storage)
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=86400,
+        path="/",
+    )
+    return {"status": "ok", "token": token}
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request, response: Response):
+    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+    return {"status": "ok"}
+
+
+@app.get("/api/auth/check")
+async def check_auth(request: Request):
+    return {"authenticated": _has_valid_session(request)}
+
+
+@app.get("/api/auth/keys", dependencies=[Depends(require_auth)])
+async def get_api_keys():
+    return list_api_keys(_auth_storage)
+
+
+@app.post("/api/auth/keys", dependencies=[Depends(require_auth)])
+async def create_key(req: CreateKeyRequest):
+    key_id, plaintext = create_api_key(_auth_storage, req.name)
+    return {"key_id": key_id, "key": plaintext, "name": req.name}
+
+
+@app.delete("/api/auth/keys/{key_id}", dependencies=[Depends(require_auth)])
+async def revoke_key(key_id: str):
+    if revoke_api_key(_auth_storage, key_id):
+        return {"status": "revoked"}
+    raise HTTPException(status_code=404, detail="Key not found")
+
+
+@app.get("/api/vms", dependencies=[Depends(require_auth)])
 def list_vms(limit: int = None, metadata_equals: str = None):
     meta_filter = None
     if metadata_equals:
@@ -54,7 +157,7 @@ def list_vms(limit: int = None, metadata_equals: str = None):
              pass
     return bs.list_vms(limit=limit, metadata_equals=meta_filter)
 
-@app.get("/api/projects")
+@app.get("/api/projects", dependencies=[Depends(require_auth)])
 def list_projects(limit: int = None, metadata_equals: str = None):
     """
     Alias for listing VMs used by the UI.
@@ -67,7 +170,7 @@ def list_projects(limit: int = None, metadata_equals: str = None):
              pass
     return bs.list_vms(limit=limit, metadata_equals=meta_filter)
 
-@app.get("/api/snapshots")
+@app.get("/api/snapshots", dependencies=[Depends(require_auth)])
 def list_snapshots():
     return bs.list_snapshots()
 
@@ -82,7 +185,7 @@ class CreateVMRequest(BaseModel):
     env_vars: dict = None
     metadata: dict = None
 
-@app.post("/api/vms")
+@app.post("/api/vms", dependencies=[Depends(require_auth)])
 def create_vm(req: CreateVMRequest):
     logger.info(f"Received create request for {req.image}")
     try:
@@ -92,7 +195,7 @@ def create_vm(req: CreateVMRequest):
         logger.error(f"Failed to create VM: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/vms/from-dockerfile")
+@app.post("/api/vms/from-dockerfile", dependencies=[Depends(require_auth)])
 async def create_vm_from_dockerfile(
     dockerfile: UploadFile = File(...),
     tag: str = Form(None),
@@ -133,7 +236,7 @@ class RestoreVMRequest(BaseModel):
     env_vars: dict = None
     metadata: dict = None
 
-@app.post("/api/snapshots/{snapshot_id}/restore")
+@app.post("/api/snapshots/{snapshot_id}/restore", dependencies=[Depends(require_auth)])
 def restore_snapshot(snapshot_id: str, req: RestoreVMRequest):
     logger.info(f"Received restore request for snapshot {snapshot_id}")
     try:
@@ -145,7 +248,7 @@ def restore_snapshot(snapshot_id: str, req: RestoreVMRequest):
         logger.error(f"Failed to restore VM: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete("/api/snapshots/{snapshot_id}")
+@app.delete("/api/snapshots/{snapshot_id}", dependencies=[Depends(require_auth)])
 def delete_snapshot(snapshot_id: str):
     logger.info(f"Received delete request for snapshot {snapshot_id}")
     try:
@@ -159,7 +262,7 @@ def delete_snapshot(snapshot_id: str):
 class UpdateSnapshotMetadataRequest(BaseModel):
     metadata: dict
 
-@app.put("/api/snapshots/{snapshot_id}/metadata")
+@app.put("/api/snapshots/{snapshot_id}/metadata", dependencies=[Depends(require_auth)])
 def update_snapshot_metadata(snapshot_id: str, req: UpdateSnapshotMetadataRequest):
     logger.info(f"Received metadata update request for snapshot {snapshot_id}")
     try:
@@ -174,7 +277,7 @@ def update_snapshot_metadata(snapshot_id: str, req: UpdateSnapshotMetadataReques
 class RenameSnapshotRequest(BaseModel):
     name: str
 
-@app.put("/api/snapshots/{snapshot_id}/name")
+@app.put("/api/snapshots/{snapshot_id}/name", dependencies=[Depends(require_auth)])
 def rename_snapshot(snapshot_id: str, req: RenameSnapshotRequest):
     """Rename a snapshot."""
     try:
@@ -186,7 +289,7 @@ def rename_snapshot(snapshot_id: str, req: RenameSnapshotRequest):
         logger.error(f"Failed to rename snapshot {snapshot_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/vms/{vm_id}/stop")
+@app.post("/api/vms/{vm_id}/stop", dependencies=[Depends(require_auth)])
 def stop_vm(vm_id: str):
     logger.info(f"Received stop request for VM {vm_id}")
     vm = bs.get_vm(vm_id)
@@ -201,7 +304,7 @@ def stop_vm(vm_id: str):
         raise HTTPException(status_code=500, detail=str(e))
     return {"status": "stopped"}
 
-@app.post("/api/vms/{vm_id}/pause")
+@app.post("/api/vms/{vm_id}/pause", dependencies=[Depends(require_auth)])
 def pause_vm(vm_id: str):
     vm = bs.get_vm(vm_id)
     if not vm:
@@ -215,7 +318,7 @@ def pause_vm(vm_id: str):
         raise HTTPException(status_code=500, detail=str(e))
     return {"status": "paused"}
 
-@app.post("/api/vms/{vm_id}/resume")
+@app.post("/api/vms/{vm_id}/resume", dependencies=[Depends(require_auth)])
 def resume_vm(vm_id: str):
     vm = bs.get_vm(vm_id)
     if not vm:
@@ -233,13 +336,13 @@ class SnapshotRequest(BaseModel):
     name: str
     metadata: dict = None
 
-@app.delete("/api/vms/{vm_id}")
+@app.delete("/api/vms/{vm_id}", dependencies=[Depends(require_auth)])
 def delete_vm(vm_id: str):
     logger.info(f"Received delete request for VM {vm_id}")
     bs.delete_vm(vm_id)
     return {"status": "deleted"}
 
-@app.post("/api/vms/{vm_id}/snapshot")
+@app.post("/api/vms/{vm_id}/snapshot", dependencies=[Depends(require_auth)])
 def snapshot_vm(vm_id: str, req: SnapshotRequest):
     vm = bs.get_vm(vm_id)
     if not vm:
@@ -247,7 +350,7 @@ def snapshot_vm(vm_id: str, req: SnapshotRequest):
     snap_id = bs.snapshot_vm(vm, req.name, metadata=req.metadata)
     return {"snapshot_id": snap_id}
 
-@app.get("/api/vms/{vm_id}")
+@app.get("/api/vms/{vm_id}", dependencies=[Depends(require_auth)])
 def get_vm_details(vm_id: str):
     """Get detailed information about a specific VM."""
     vm_info = bs.get_vm_info(vm_id)
@@ -286,7 +389,7 @@ class HttpProxyRequest(BaseModel):
     json_body: dict = None
     timeout: int = 30
 
-@app.put("/api/vms/{vm_id}/metadata")
+@app.put("/api/vms/{vm_id}/metadata", dependencies=[Depends(require_auth)])
 def update_vm_metadata(vm_id: str, req: UpdateMetadataRequest):
     """Update the metadata of a VM."""
     try:
@@ -298,7 +401,7 @@ def update_vm_metadata(vm_id: str, req: UpdateMetadataRequest):
         logger.error(f"Failed to update metadata for VM {vm_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.put("/api/vms/{vm_id}/name")
+@app.put("/api/vms/{vm_id}/name", dependencies=[Depends(require_auth)])
 def rename_vm(vm_id: str, req: RenameRequest):
     """Rename a VM."""
     try:
@@ -316,7 +419,7 @@ def _get_running_vm_or_404(vm_id: str):
         raise HTTPException(status_code=404, detail="VM not found or not running")
     return vm
 
-@app.post("/api/vms/{vm_id}/exec")
+@app.post("/api/vms/{vm_id}/exec", dependencies=[Depends(require_auth)])
 def exec_command(vm_id: str, req: ExecRequest):
     """Run a blocking shell command inside a VM and capture stdout/stderr."""
     vm = _get_running_vm_or_404(vm_id)
@@ -337,7 +440,7 @@ def exec_command(vm_id: str, req: ExecRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/vms/{vm_id}/exec-python")
+@app.post("/api/vms/{vm_id}/exec-python", dependencies=[Depends(require_auth)])
 def exec_python(vm_id: str, req: ExecPythonRequest):
     """Run Python inside a VM and return captured output."""
     vm = _get_running_vm_or_404(vm_id)
@@ -352,7 +455,7 @@ def exec_python(vm_id: str, req: ExecPythonRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/vms/{vm_id}/read-file")
+@app.get("/api/vms/{vm_id}/read-file", dependencies=[Depends(require_auth)])
 def read_file(vm_id: str, path: str):
     """Read a UTF-8 file from inside a VM."""
     vm = _get_running_vm_or_404(vm_id)
@@ -361,7 +464,7 @@ def read_file(vm_id: str, path: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/vms/{vm_id}/write-file")
+@app.post("/api/vms/{vm_id}/write-file", dependencies=[Depends(require_auth)])
 def write_file(vm_id: str, req: WriteFileRequest):
     """Write string content to a file inside a VM."""
     vm = _get_running_vm_or_404(vm_id)
@@ -382,7 +485,7 @@ def write_file(vm_id: str, req: WriteFileRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/vms/{vm_id}/file-info")
+@app.get("/api/vms/{vm_id}/file-info", dependencies=[Depends(require_auth)])
 def file_info(vm_id: str, path: str):
     """Get file metadata from inside a VM."""
     vm = _get_running_vm_or_404(vm_id)
@@ -391,7 +494,7 @@ def file_info(vm_id: str, path: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/vms/{vm_id}/upload")
+@app.post("/api/vms/{vm_id}/upload", dependencies=[Depends(require_auth)])
 async def upload_file(
     vm_id: str,
     remote_path: str = Form(...),
@@ -411,7 +514,7 @@ async def upload_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/vms/{vm_id}/http")
+@app.post("/api/vms/{vm_id}/http", dependencies=[Depends(require_auth)])
 def proxy_http(vm_id: str, req: HttpProxyRequest):
     """Proxy an HTTP request to a service running inside the VM."""
     vm = _get_running_vm_or_404(vm_id)
@@ -433,7 +536,7 @@ def proxy_http(vm_id: str, req: HttpProxyRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/vms/{vm_id}/files")
+@app.get("/api/vms/{vm_id}/files", dependencies=[Depends(require_auth)])
 def list_directory(vm_id: str, path: str = "/"):
     """List files in a directory inside the VM."""
     # Get VM metadata first
@@ -494,7 +597,7 @@ def list_directory(vm_id: str, path: str = "/"):
         # If agent is not ready/vm stopped and we don't support it yet
         raise HTTPException(status_code=500, detail=f"Failed to list directory. VM must be running. Error: {str(e)}")
 
-@app.get("/api/vms/{vm_id}/download")
+@app.get("/api/vms/{vm_id}/download", dependencies=[Depends(require_auth)])
 def download_file(vm_id: str, path: str):
     """Download a file from the VM."""
     from fastapi.responses import StreamingResponse
@@ -547,8 +650,13 @@ def download_file(vm_id: str, path: str):
 
 @app.websocket("/api/vms/{vm_id}/terminal")
 async def terminal_endpoint(websocket: WebSocket, vm_id: str, cols: int = 80, rows: int = 24):
+    if not await authenticate_websocket(websocket, _auth_storage):
+        await websocket.accept()
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
     await websocket.accept()
-    
+
     vm = bs.get_vm(vm_id)
     if not vm:
         await websocket.close(code=4004, reason="VM not found or not running")

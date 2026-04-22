@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BandSox — Login</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    },
+                    colors: {
+                        zinc: {
+                            850: '#202022',
+                            950: '#0c0c0e',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .glass {
+            background: rgba(255, 255, 255, 0.03);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+    </style>
+</head>
+
+<body class="bg-black text-zinc-200 min-h-screen flex items-center justify-center selection:bg-white selection:text-black">
+    <div class="w-full max-w-sm mx-auto px-6">
+        <div class="glass rounded-lg p-8 space-y-8">
+            <div class="text-center">
+                <h1 class="text-3xl font-light tracking-tight text-white mb-2">BandSox</h1>
+                <p class="text-zinc-500 text-sm">Enter your admin password to continue</p>
+            </div>
+
+            <form id="login-form" class="space-y-4">
+                <div>
+                    <input type="password" id="password" name="password" required autofocus
+                        placeholder="Password"
+                        class="w-full px-4 py-3 bg-zinc-900 border border-zinc-800 rounded text-white text-sm placeholder-zinc-600 focus:outline-none focus:border-zinc-600 transition-colors">
+                </div>
+                <div id="error-msg" class="text-red-400 text-sm hidden"></div>
+                <button type="submit" id="submit-btn"
+                    class="w-full px-4 py-3 bg-white text-black text-sm font-medium rounded hover:bg-zinc-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                    Log in
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        (async () => {
+            try {
+                const res = await fetch('/api/auth/check');
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.authenticated) {
+                        window.location.href = '/';
+                        return;
+                    }
+                }
+            } catch (e) {}
+        })();
+
+        document.getElementById('login-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const errEl = document.getElementById('error-msg');
+            const btn = document.getElementById('submit-btn');
+            const password = document.getElementById('password').value;
+
+            errEl.classList.add('hidden');
+            btn.disabled = true;
+            btn.textContent = 'Logging in...';
+
+            try {
+                const res = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password }),
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.token) {
+                        sessionStorage.setItem('bandsox_session_token', data.token);
+                    }
+                    window.location.href = '/';
+                } else if (res.status === 429) {
+                    errEl.textContent = 'Too many attempts. Please wait and try again.';
+                    errEl.classList.remove('hidden');
+                } else {
+                    errEl.textContent = 'Invalid password.';
+                    errEl.classList.remove('hidden');
+                }
+            } catch (err) {
+                errEl.textContent = 'Connection error. Is the server running?';
+                errEl.classList.remove('hidden');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Log in';
+            }
+        });
+    </script>
+</body>
+
+</html>
