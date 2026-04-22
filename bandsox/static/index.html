@@ -73,6 +73,15 @@
                     </svg>
                     Refresh
                 </button>
+                <button onclick="logout()"
+                    class="flex items-center gap-2 px-4 py-2 text-zinc-400 hover:text-white text-sm transition-colors">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1">
+                        </path>
+                    </svg>
+                    Logout
+                </button>
             </div>
         </header>
 
@@ -332,6 +341,18 @@
     </div>
 
     <script>
+        const _originalFetch = window.fetch;
+        window.fetch = async function(...args) {
+            const response = await _originalFetch(...args);
+            if (response.status === 401) { window.location.href = '/login'; }
+            return response;
+        };
+        async function logout() {
+            await _originalFetch('/api/auth/logout', { method: 'POST' });
+            sessionStorage.removeItem('bandsox_session_token');
+            window.location.href = '/login';
+        }
+
         // Escape HTML to prevent XSS
         function escapeHtml(text) {
             const div = document.createElement('div');

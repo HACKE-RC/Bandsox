@@ -95,7 +95,9 @@
 
         // Initial connection
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/api/vms/${vmId}/terminal?cols=${term.cols}&rows=${term.rows}`;
+        const _sessionToken = sessionStorage.getItem('bandsox_session_token') || '';
+        const _tokenParam = _sessionToken ? `&token=${encodeURIComponent(_sessionToken)}` : '';
+        const wsUrl = `${protocol}//${window.location.host}/api/vms/${vmId}/terminal?cols=${term.cols}&rows=${term.rows}${_tokenParam}`;
 
         let ws = new WebSocket(wsUrl);
 

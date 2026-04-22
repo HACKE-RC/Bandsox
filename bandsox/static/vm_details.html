@@ -239,6 +239,13 @@
     </div>
 
     <script>
+        const _originalFetch = window.fetch;
+        window.fetch = async function(...args) {
+            const response = await _originalFetch(...args);
+            if (response.status === 401) { window.location.href = '/login'; }
+            return response;
+        };
+
         let currentPath = '/';
         let vmId = null;
         let vmInfo = null;

@@ -17,6 +17,52 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
+
+def _load_credentials():
+    cred_path = _real_home() / ".bandsox" / "credentials"
+    if not cred_path.exists():
+        return None
+    with open(cred_path) as f:
+        return json.load(f)
+
+
+def _auth_headers():
+    creds = _load_credentials()
+    if creds and creds.get("api_key"):
+        return {"Authorization": f"Bearer {creds['api_key']}"}
+    return {}
+
+
+def _real_home():
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        import pwd
+        return Path(pwd.getpwnam(sudo_user).pw_dir)
+    return Path.home()
+
+
+def _save_credentials(api_key, server_url=None):
+    cred_dir = _real_home() / ".bandsox"
+    cred_dir.mkdir(exist_ok=True)
+    cred_path = cred_dir / "credentials"
+    data = {}
+    if cred_path.exists():
+        with open(cred_path) as f:
+            data = json.load(f)
+    data["api_key"] = api_key
+    if server_url:
+        data["server_url"] = server_url
+    with open(cred_path, "w") as f:
+        json.dump(data, f, indent=2)
+    os.chmod(cred_path, 0o600)
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        import pwd
+        pw = pwd.getpwnam(sudo_user)
+        os.chown(cred_dir, pw.pw_uid, pw.pw_gid)
+        os.chown(cred_path, pw.pw_uid, pw.pw_gid)
+
+
 def _stringify(value):
     return "" if value is None else str(value)
 
@@ -79,7 +125,11 @@ def terminal_client(vm_id, host, port):
         return
 
     cols, rows = shutil.get_terminal_size()
-    url = f"ws://{host}:{port}/api/vms/{vm_id}/terminal?cols={cols}&rows={rows}"
+    creds = _load_credentials()
+    token_param = ""
+    if creds and creds.get("api_key"):
+        token_param = f"&token={creds['api_key']}"
+    url = f"ws://{host}:{port}/api/vms/{vm_id}/terminal?cols={cols}&rows={rows}{token_param}"
     
     try:
         # Increase open_timeout to allow time for server to wait for agent readiness
@@ -381,7 +431,30 @@ def main():
     init_parser.add_argument("--skip-cni", action="store_true", help="Skip CNI plugins download")
     init_parser.add_argument("--skip-rootfs", action="store_true", help="Skip rootfs download")
     init_parser.add_argument("--force", action="store_true", help="Re-download artifacts even if they exist")
-    
+
+    auth_parser = subparsers.add_parser("auth", help="Manage authentication")
+    auth_sub = auth_parser.add_subparsers(dest="auth_command")
+
+    auth_init = auth_sub.add_parser("init", help="Enable authentication (generates password and API key)")
+    auth_init.add_argument("--storage", type=str, default=None, help="Storage directory path")
+
+    auth_set_pw = auth_sub.add_parser("set-password", help="Set admin password")
+    auth_set_pw.add_argument("--storage", type=str, default=None, help="Storage directory path")
+
+    auth_create_key = auth_sub.add_parser("create-key", help="Create an API key")
+    auth_create_key.add_argument("name", type=str, help="Name for the key")
+    auth_create_key.add_argument("--host", type=str, default="127.0.0.1")
+    auth_create_key.add_argument("--port", type=int, default=8000)
+
+    auth_list_keys = auth_sub.add_parser("list-keys", help="List API keys")
+    auth_list_keys.add_argument("--host", type=str, default="127.0.0.1")
+    auth_list_keys.add_argument("--port", type=int, default=8000)
+
+    auth_revoke_key = auth_sub.add_parser("revoke-key", help="Revoke an API key")
+    auth_revoke_key.add_argument("key_id", type=str, help="Key ID to revoke")
+    auth_revoke_key.add_argument("--host", type=str, default="127.0.0.1")
+    auth_revoke_key.add_argument("--port", type=int, default=8000)
+
     args = parser.parse_args()
     
     if args.command == "serve":
@@ -407,7 +480,7 @@ def main():
             payload["mem_mib"] = args.mem
             payload["disk_size_mib"] = args.disk_size
             
-            resp = requests.post(url, json=payload)
+            resp = requests.post(url, json=payload, headers=_auth_headers())
             if resp.status_code == 200:
                 print(f"VM created: {resp.json()['id']}")
             else:
@@ -421,7 +494,7 @@ def main():
         base = f"http://{args.host}:{args.port}/api/vms"
         if args.vm_command == "list":
             try:
-                resp = requests.get(base)
+                resp = requests.get(base, headers=_auth_headers())
                 if resp.status_code != 200:
                     print(f"Failed to list VMs ({resp.status_code}): {resp.text}")
                     return
@@ -450,7 +523,7 @@ def main():
         elif args.vm_command == "stop":
             url = f"{base}/{args.vm_id}/stop"
             try:
-                resp = requests.post(url)
+                resp = requests.post(url, headers=_auth_headers())
                 if resp.status_code == 200:
                     print(f"VM {args.vm_id} stopped.")
                 else:
@@ -460,7 +533,7 @@ def main():
         elif args.vm_command == "pause":
             url = f"{base}/{args.vm_id}/pause"
             try:
-                resp = requests.post(url)
+                resp = requests.post(url, headers=_auth_headers())
                 if resp.status_code == 200:
                     print(f"VM {args.vm_id} paused.")
                 else:
@@ -470,7 +543,7 @@ def main():
         elif args.vm_command == "resume":
             url = f"{base}/{args.vm_id}/resume"
             try:
-                resp = requests.post(url)
+                resp = requests.post(url, headers=_auth_headers())
                 if resp.status_code == 200:
                     print(f"VM {args.vm_id} resumed.")
                 else:
@@ -480,7 +553,7 @@ def main():
         elif args.vm_command == "delete":
             url = f"{base}/{args.vm_id}"
             try:
-                resp = requests.delete(url)
+                resp = requests.delete(url, headers=_auth_headers())
                 if resp.status_code == 200:
                     print(f"VM {args.vm_id} deleted.")
                 else:
@@ -490,7 +563,7 @@ def main():
         elif args.vm_command == "save":
             url = f"{base}/{args.vm_id}/snapshot"
             try:
-                resp = requests.post(url, json={"name": args.name})
+                resp = requests.post(url, json={"name": args.name}, headers=_auth_headers())
                 if resp.status_code == 200:
                     data = resp.json()
                     snap_id = data.get("snapshot_id", "<unknown>")
@@ -502,7 +575,7 @@ def main():
         elif args.vm_command == "rename":
             url = f"{base}/{args.vm_id}/name"
             try:
-                resp = requests.put(url, json={"name": args.name})
+                resp = requests.put(url, json={"name": args.name}, headers=_auth_headers())
                 if resp.status_code == 200:
                     print(f"VM {args.vm_id} renamed to '{args.name}'")
                 else:
@@ -518,7 +591,7 @@ def main():
         base = f"http://{args.host}:{args.port}/api/snapshots"
         if args.snapshot_command == "list":
             try:
-                resp = requests.get(base)
+                resp = requests.get(base, headers=_auth_headers())
                 if resp.status_code != 200:
                     print(f"Failed to list snapshots ({resp.status_code}): {resp.text}")
                     return
@@ -546,7 +619,7 @@ def main():
         elif args.snapshot_command == "delete":
             url = f"{base}/{args.snapshot_id}"
             try:
-                resp = requests.delete(url)
+                resp = requests.delete(url, headers=_auth_headers())
                 if resp.status_code == 200:
                     print(f"Snapshot {args.snapshot_id} deleted.")
                 else:
@@ -557,7 +630,7 @@ def main():
             url = f"{base}/{args.snapshot_id}/restore"
             payload = {"name": args.name, "enable_networking": args.enable_networking}
             try:
-                resp = requests.post(url, json=payload)
+                resp = requests.post(url, json=payload, headers=_auth_headers())
                 if resp.status_code == 200:
                     data = resp.json()
                     new_id = data.get("id", "<unknown>")
@@ -569,7 +642,7 @@ def main():
         elif args.snapshot_command == "rename":
             url = f"{base}/{args.snapshot_id}/name"
             try:
-                resp = requests.put(url, json={"name": args.name})
+                resp = requests.put(url, json={"name": args.name}, headers=_auth_headers())
                 if resp.status_code == 200:
                     print(f"Snapshot {args.snapshot_id} renamed to '{args.name}'")
                 else:
@@ -580,6 +653,106 @@ def main():
             snap_parser.print_help()
     elif args.command == "cleanup":
         cleanup_taps()
+    elif args.command == "auth":
+        if not args.auth_command:
+            auth_parser.print_help()
+            return
+
+        if args.auth_command == "init":
+            from .auth import init_auth_config, load_auth_config
+            storage = args.storage or os.environ.get("BANDSOX_STORAGE", "/var/lib/sandbox")
+            storage_path_auth = Path(os.path.abspath(storage))
+
+            config = load_auth_config(storage_path_auth)
+            if config is not None:
+                print("Authentication is already enabled.")
+                return
+
+            pw, key, key_id = init_auth_config(storage_path_auth)
+            print("Authentication enabled.")
+            print(f"  Admin password : {pw}")
+            print(f"  API key        : {key}")
+            print(f"  Key ID         : {key_id}")
+            print("\nSave these. The API key will not be shown again.")
+            save = input("Save API key to ~/.bandsox/credentials? [Y/n] ").strip().lower()
+            if save in ("", "y", "yes"):
+                _save_credentials(key, None)
+                print("Credentials saved.")
+
+        elif args.auth_command == "set-password":
+            import getpass
+            from .auth import set_password, load_auth_config
+            storage = args.storage or os.environ.get("BANDSOX_STORAGE", "/var/lib/sandbox")
+            storage_path_auth = Path(os.path.abspath(storage))
+
+            config = load_auth_config(storage_path_auth)
+            if config is None:
+                print("Auth not enabled. Run 'bandsox auth init' first.")
+                return
+
+            pw = getpass.getpass("New admin password: ")
+            pw2 = getpass.getpass("Confirm password: ")
+            if pw != pw2:
+                print("Passwords do not match.")
+                return
+            if len(pw) < 8:
+                print("Password must be at least 8 characters.")
+                return
+            set_password(storage_path_auth, pw)
+            print("Admin password updated.")
+
+        elif args.auth_command == "create-key":
+            base = f"http://{args.host}:{args.port}"
+            resp = requests.post(
+                f"{base}/api/auth/keys",
+                json={"name": args.name},
+                headers=_auth_headers(),
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                print(f"API key created:")
+                print(f"  ID:  {data['key_id']}")
+                print(f"  Key: {data['key']}")
+                print(f"\nSave this key! It will not be shown again.")
+                save = input("Save to ~/.bandsox/credentials? [Y/n] ").strip().lower()
+                if save in ("", "y", "yes"):
+                    _save_credentials(data["key"], base)
+                    print("Credentials saved.")
+            elif resp.status_code == 401:
+                print("Unauthorized. Configure credentials first or use 'bandsox auth set-password'.")
+            else:
+                print(f"Failed: {resp.text}")
+
+        elif args.auth_command == "list-keys":
+            base = f"http://{args.host}:{args.port}"
+            resp = requests.get(f"{base}/api/auth/keys", headers=_auth_headers())
+            if resp.status_code == 200:
+                keys = resp.json()
+                if not keys:
+                    print("No API keys found.")
+                else:
+                    rows = [[k["id"], k["name"], k.get("created_at", "?")] for k in keys]
+                    term_cols = shutil.get_terminal_size(fallback=(120, 20)).columns
+                    table = _format_table(rows, ["ID", "Name", "Created"], max_width=term_cols)
+                    print(table)
+            elif resp.status_code == 401:
+                print("Unauthorized. Configure credentials first.")
+            else:
+                print(f"Failed: {resp.text}")
+
+        elif args.auth_command == "revoke-key":
+            base = f"http://{args.host}:{args.port}"
+            resp = requests.delete(
+                f"{base}/api/auth/keys/{args.key_id}",
+                headers=_auth_headers(),
+            )
+            if resp.status_code == 200:
+                print(f"Key {args.key_id} revoked.")
+            elif resp.status_code == 401:
+                print("Unauthorized. Configure credentials first.")
+            else:
+                print(f"Failed: {resp.text}")
+
     elif args.command == "init":
         if not args.skip_kernel:
             download_kernel(args.kernel_output, args.kernel_url, force=args.force)
