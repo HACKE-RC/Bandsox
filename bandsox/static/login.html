@@ -95,7 +95,7 @@
                 if (res.ok) {
                     const data = await res.json();
                     if (data.token) {
-                        sessionStorage.setItem('bandsox_session_token', data.token);
+                        localStorage.setItem('bandsox_session_token', data.token);
                     }
                     window.location.href = '/';
                 } else if (res.status === 429) {

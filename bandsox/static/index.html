@@ -349,7 +349,7 @@
         };
         async function logout() {
             await _originalFetch('/api/auth/logout', { method: 'POST' });
-            sessionStorage.removeItem('bandsox_session_token');
+            localStorage.removeItem('bandsox_session_token');
             window.location.href = '/login';
         }
 
