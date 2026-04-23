@@ -944,6 +944,14 @@ class MicroVM:
         )
 
         self.client.put_machine_config(vcpu, mem_mib)
+        # Attach virtio-rng for fresh VMs so getrandom() does not block in
+        # low-entropy guests (which can stall git/openssl on first use).
+        # Older Firecracker builds may not support /entropy; keep startup
+        # backwards-compatible in that case.
+        try:
+            self.client.put_entropy()
+        except Exception as e:
+            logger.warning(f"Failed to configure entropy device: {e}")
 
         if enable_networking:
             base_idx = int(self.vm_id[-2:], 16)
