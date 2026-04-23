@@ -89,30 +89,49 @@ class ConsoleMultiplexer:
             if not line:
                 break
 
-            # Broadcast to callbacks (owner)
+            # Snapshot callbacks + clients under lock, then release before
+            # doing any blocking I/O. Holding the lock during a blocking
+            # sendall() (or during a slow callback) stalls this drain thread
+            # and, in turn, the firecracker stdout pipe — which eventually
+            # blocks the guest agent's stdout.flush() and freezes the VM.
             with self.lock:
-                for cb in self.callbacks:
-                    try:
-                        cb(line)
-                    except Exception:
-                        pass
+                callbacks = list(self.callbacks)
+                clients = list(self.clients)
 
-            # Broadcast to clients
-            data = line.encode("utf-8")
-            with self.lock:
+            # Broadcast to callbacks (owner) outside the lock.
+            for cb in callbacks:
+                try:
+                    cb(line)
+                except Exception:
+                    pass
+
+            # Broadcast to clients outside the lock; per-send timeout bounds
+            # how long any single slow client can stall the drain.
+            if clients:
+                data = line.encode("utf-8")
                 dead_clients = []
-                for client in self.clients:
+                for client in clients:
                     try:
+                        # Bound blocking so a wedged client can't freeze us.
+                        client.settimeout(2.0)
                         client.sendall(data)
                     except Exception:
                         dead_clients.append(client)
+                    finally:
+                        try:
+                            client.settimeout(None)
+                        except Exception:
+                            pass
 
-                for client in dead_clients:
-                    self.clients.remove(client)
-                    try:
-                        client.close()
-                    except:
-                        pass
+                if dead_clients:
+                    with self.lock:
+                        for client in dead_clients:
+                            if client in self.clients:
+                                self.clients.remove(client)
+                            try:
+                                client.close()
+                            except Exception:
+                                pass
 
     def _client_read_loop(self, client):
         """Reads input from a client and writes to process stdin."""
