@@ -23,6 +23,13 @@ VSOCK_ENABLED = False
 VSOCK_SOCKET = None
 VSOCK_CID_HOST = 2  # Well-known CID for host
 _vsock_lock = threading.Lock()
+# Separate writer lock so concurrent vsock_send_json calls can't interleave
+# JSON lines on the wire. Same class of bug as the send_event interleave fix
+# (commit 0a1d035): a corrupted line breaks framing on the host parser, which
+# drops the response and hangs the command. We can't reuse _vsock_lock for
+# this — readers hold _vsock_lock briefly to grab the sock reference and we
+# don't want to serialize reads against writes on a full-duplex socket.
+_vsock_write_lock = threading.Lock()
 _vsock_reconnect_thread = None
 
 
@@ -165,8 +172,9 @@ def vsock_send_json(data: dict):
             raise Exception("Vsock not connected")
         sock = VSOCK_SOCKET
 
-    message = json.dumps(data) + "\n"
-    sock.sendall(message.encode("utf-8"))
+    message = (json.dumps(data) + "\n").encode("utf-8")
+    with _vsock_write_lock:
+        sock.sendall(message)
 
 
 def vsock_read_line() -> str:

@@ -115,8 +115,8 @@ class ConsoleMultiplexer:
                         # Bound blocking so a wedged client can't freeze us.
                         client.settimeout(2.0)
                         client.sendall(data)
-                    except Exception:
-                        dead_clients.append(client)
+                    except Exception as exc:
+                        dead_clients.append((client, exc))
                     finally:
                         try:
                             client.settimeout(None)
@@ -124,8 +124,21 @@ class ConsoleMultiplexer:
                             pass
 
                 if dead_clients:
+                    # Log each drop so the next "every command times out"
+                    # incident is easy to root-cause from the host log.
+                    for client, exc in dead_clients:
+                        try:
+                            peer = client.getpeername()
+                        except Exception:
+                            peer = "<unknown>"
+                        logger.warning(
+                            "Dropping wedged console client %s on %s: %s",
+                            peer,
+                            self.socket_path,
+                            exc,
+                        )
                     with self.lock:
-                        for client in dead_clients:
+                        for client, _ in dead_clients:
                             if client in self.clients:
                                 self.clients.remove(client)
                             try:
