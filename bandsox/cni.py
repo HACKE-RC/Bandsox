@@ -60,7 +60,17 @@ class CNIRuntime:
         # 4. Attach Host veth to Bridge
         self._run_cmd(["ip", "link", "set", veth_host, "master", bridge_name])
         self._run_cmd(["ip", "link", "set", veth_host, "up"])
-        
+        # Pin the veth MTU to the actual path MTU. This is the ground truth
+        # the MSS clamp in network.py needs: --clamp-mss-to-pmtu reads the
+        # route MTU, and the route MTU defaults to the device MTU. If we
+        # leave both veths at 1500 but the host egress (VPN, overlay, etc.)
+        # only carries 1400, the clamp does nothing, the guest advertises
+        # MSS=1460, the server sends 1500-byte segments, intermediate
+        # routers drop them, and the first HTTPS connection (e.g. git clone)
+        # blackholes for ~30s until TCP backs off. 1400 is a safe lower
+        # bound that covers WireGuard, most VPNs, GRE, and typical overlays.
+        self._run_cmd(["ip", "link", "set", veth_host, "mtu", "1400"])
+
         # 5. Move peer to NetNS
         self._run_cmd(["ip", "link", "set", veth_temp, "netns", self.netns_name])
         
@@ -71,6 +81,9 @@ class CNIRuntime:
         # 7. Configure IP inside NetNS
         self._run_cmd(["ip", "netns", "exec", self.netns_name, "ip", "addr", "add", f"{container_ip}/{cidr}", "dev", ifname])
         self._run_cmd(["ip", "netns", "exec", self.netns_name, "ip", "link", "set", ifname, "up"])
+        # Match the host-side MTU so the route MTU inside the netns is 1400
+        # and the MSS clamp on the FORWARD chain actually fires.
+        self._run_cmd(["ip", "netns", "exec", self.netns_name, "ip", "link", "set", ifname, "mtu", "1400"])
         self._run_cmd(["ip", "netns", "exec", self.netns_name, "ip", "link", "set", "lo", "up"])
         
         # 8. Set Default Route
@@ -102,13 +115,16 @@ class CNIRuntime:
         # Ensure IP forwarding is enabled on host (crucial for routing)
         self._run_cmd(["sysctl", "-w", "net.ipv4.ip_forward=1"], check=False)
         
-        # Ensure Forwarding is allowed for this bridge (since default policy might be DROP)
-        # We add to 'ip filter FORWARD'
+        # Ensure Forwarding is allowed for this bridge (default policy may be DROP).
+        # Use 'insert' (prepend) rather than 'add' (append): when Docker is
+        # running it installs a FORWARD chain with a default DROP at the end,
+        # plus a jump to its own DOCKER-USER / DOCKER chains near the top.
+        # Appended ACCEPT rules sit after that DROP and never fire, which
+        # silently breaks the first packet out of every freshly-restored
+        # microVM until conntrack happens to be already populated.
         try:
-            # iifname bridge -> accept
-            self._run_cmd(["sudo", "nft", "add", "rule", "ip", "filter", "FORWARD", "iifname", bridge_name, "counter", "accept"], check=False)
-            # oifname bridge -> accept  
-            self._run_cmd(["sudo", "nft", "add", "rule", "ip", "filter", "FORWARD", "oifname", bridge_name, "counter", "accept"], check=False)
+            self._run_cmd(["sudo", "nft", "insert", "rule", "ip", "filter", "FORWARD", "iifname", bridge_name, "counter", "accept"], check=False)
+            self._run_cmd(["sudo", "nft", "insert", "rule", "ip", "filter", "FORWARD", "oifname", bridge_name, "counter", "accept"], check=False)
         except Exception:
             pass
             

@@ -192,6 +192,29 @@ def setup_tap_device(tap_name: str, host_ip: str, cidr: int = 24, host_mac: str 
         # We need to allow packets destined to the TAP device
         if run_command(["sudo", "iptables", "-C", "FORWARD", "-o", tap_name, "-j", "ACCEPT"], check=False).returncode != 0:
              run_command(["sudo", "iptables", "-I", "FORWARD", "-o", tap_name, "-j", "ACCEPT"])
+
+        # Clamp TCP MSS to the path MTU. This prevents a common PMTUD
+        # blackhole when the host egress path has MTU < 1500 (e.g. VPN /
+        # overlay). Without clamping, the guest advertises MSS=1460 and
+        # remote servers may send packets that are too large and get
+        # dropped, making the *first* HTTPS request hang until TCP
+        # blackhole detection kicks in.
+        #
+        # We clamp on forwarded SYN packets from TAP -> ext_if.
+        mss_check = [
+            "sudo", "iptables", "-t", "mangle", "-C", "FORWARD",
+            "-i", tap_name, "-o", ext_if,
+            "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+            "-j", "TCPMSS", "--clamp-mss-to-pmtu",
+        ]
+        mss_insert = [
+            "sudo", "iptables", "-t", "mangle", "-I", "FORWARD", "1",
+            "-i", tap_name, "-o", ext_if,
+            "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+            "-j", "TCPMSS", "--clamp-mss-to-pmtu",
+        ]
+        if run_command(mss_check, check=False).returncode != 0:
+            run_command(mss_insert, check=False)
             
     except Exception as e:
         logger.warning(f"iptables setup failed (might already exist or permission denied): {e}")
@@ -284,6 +307,33 @@ def setup_netns_networking(netns_name: str, tap_name: str, host_ip: str, vm_id: 
     if not try_netns_iptables("iptables-legacy"):
         if not try_netns_iptables("iptables"):
              logger.warning("Failed to setup NAT inside NetNS (tried iptables-legacy and iptables)")
+
+    # Clamp TCP MSS to the path MTU inside the netns. The CNI interface
+    # MTU is often smaller than 1500 (e.g. 1400), and snapshot-restored
+    # guests frequently keep eth0 at 1500 and advertise MSS=1460. Some
+    # networks drop the resulting oversized inbound TCP segments (PMTUD
+    # blackhole), which makes the first HTTPS connection (e.g. git clone)
+    # hang for ~30s until TCP falls back. MSS clamping fixes this
+    # deterministically.
+    def try_netns_mss_clamp(cmd_name):
+        try:
+            run_command(
+                [
+                    "sudo", "ip", "netns", "exec", netns_name,
+                    cmd_name, "-t", "mangle", "-A", "FORWARD",
+                    "-i", tap_name, "-o", "eth0",
+                    "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+                    "-j", "TCPMSS", "--clamp-mss-to-pmtu",
+                ],
+                check=False,
+            )
+            return True
+        except Exception:
+            return False
+
+    if not try_netns_mss_clamp("iptables-legacy"):
+        if not try_netns_mss_clamp("iptables"):
+            logger.warning("Failed to setup TCP MSS clamping inside NetNS")
 
     # Return the CNI assigned IP (IPv4)
     # Result format: {'ips': [{'version': '4', 'address': '10.200.x.x/16', ...}]}
