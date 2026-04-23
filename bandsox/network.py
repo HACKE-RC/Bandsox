@@ -8,6 +8,84 @@ def run_command(cmd, check=True):
     logger.debug(f"Running command: {' '.join(cmd)}")
     return subprocess.run(cmd, check=check)
 
+
+def derive_host_mac(host_ip: str) -> str:
+    """Derives a deterministic host-side TAP MAC from the gateway IP.
+
+    Mirrors the guest_mac scheme in vm.py (AA:FC:00:00:{subnet_idx:02x}:02)
+    but uses :01 for the host side. Stable across snapshot/restore so the
+    guest's cached gateway ARP entry stays valid; without this the TAP gets
+    a fresh random MAC on every restore and the first packets the guest
+    sends are silently dropped at L2 until ARP ages out (~30-60s). See
+    tests/test_host_mac.py.
+
+    Falls back to a hash-based MAC if the IP isn't in the expected
+    172.16.X.1 form, so legacy/arbitrary host_ips still get a stable value.
+    """
+    try:
+        parts = host_ip.split(".")
+        if len(parts) == 4 and parts[0] == "172" and parts[1] == "16":
+            subnet_idx = int(parts[2]) & 0xFF
+            return f"AA:FC:00:00:{subnet_idx:02x}:01"
+    except Exception:
+        pass
+
+    import hashlib
+
+    h = hashlib.sha256(host_ip.encode()).digest()
+    # Locally-administered, unicast: set bit 1, clear bit 0 of first octet.
+    b0 = (h[0] | 0x02) & 0xFE
+    return f"{b0:02x}:{h[1]:02x}:{h[2]:02x}:{h[3]:02x}:{h[4]:02x}:{h[5]:02x}".upper()
+
+
+def _send_gratuitous_arp(tap_name: str, host_ip: str, netns_name: str = None, count: int = 3):
+    """Pushes gratuitous ARPs for host_ip out of tap_name.
+
+    Refreshes the guest's stale gateway ARP entry after a snapshot restore
+    so the first guest -> host packet doesn't get dropped at L2. Best-effort:
+    arping may not be installed, in which case we silently skip — pinning
+    the TAP MAC alone (derive_host_mac) is the primary fix.
+
+    Send several packets (default 3) one second apart so we cover the
+    window where the guest's network stack is still coming back up after
+    a snapshot resume — a single packet sent before resume gets dropped
+    on the floor.
+    """
+    base = ["sudo"]
+    if netns_name:
+        base += ["ip", "netns", "exec", netns_name]
+    # -A: ARP REPLY (gratuitous announcement). iputils arping rejects
+    # fractional intervals, so we just send N packets at the default 1s
+    # interval. Total wall time is bounded by -w (count + 1) so a hung
+    # arping never wedges restore.
+    cmd = base + [
+        "arping", "-A", "-c", str(count), "-w", str(count + 1),
+        "-I", tap_name, host_ip,
+    ]
+    try:
+        subprocess.run(
+            cmd,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=count + 3,
+        )
+    except Exception as e:
+        logger.debug(f"Gratuitous ARP for {host_ip} on {tap_name} skipped: {e}")
+
+
+def refresh_guest_arp(tap_name: str, host_ip: str, netns_name: str = None):
+    """Public helper: send gratuitous ARPs to refresh a resumed guest's
+    ARP cache. Safe to call from anywhere on the host (or in a netns).
+
+    This is the post-resume counterpart to the pre-resume ARP sent in
+    setup_tap_device / setup_netns_networking. Both are required: the
+    pre-resume one covers VMs that boot fresh, the post-resume one
+    covers snapshot restores where the guest's stack only comes alive
+    after vm.resume().
+    """
+    _send_gratuitous_arp(tap_name, host_ip, netns_name=netns_name)
+
 def get_default_interface():
     """Get the default network interface with internet access."""
     # Simple heuristic: look for default route
@@ -22,7 +100,7 @@ def get_default_interface():
         logger.error(f"Failed to get default interface: {e}")
     return "eth0" # Fallback
 
-def setup_tap_device(tap_name: str, host_ip: str, cidr: int = 24):
+def setup_tap_device(tap_name: str, host_ip: str, cidr: int = 24, host_mac: str = None):
     """
     Creates and configures a TAP device.
     
@@ -30,9 +108,19 @@ def setup_tap_device(tap_name: str, host_ip: str, cidr: int = 24):
         tap_name: Name of the TAP device (e.g., 'tap0')
         host_ip: IP address to assign to the TAP device on the host (gateway for VM)
         cidr: Network mask (e.g., 24)
+        host_mac: Optional MAC to pin on the TAP. Derived from host_ip if not given.
+            Pinning a stable MAC is required for snapshot restore — otherwise
+            the new TAP gets a random MAC and the guest's cached gateway ARP
+            entry from snapshot points to the OLD MAC, dropping packets.
+
+    Returns:
+        The MAC address that was set on the TAP.
     """
-    logger.info(f"Setting up TAP device {tap_name} with IP {host_ip}/{cidr}")
-    
+    if not host_mac:
+        host_mac = derive_host_mac(host_ip)
+
+    logger.info(f"Setting up TAP device {tap_name} with IP {host_ip}/{cidr} mac {host_mac}")
+
     # Create TAP device
     # We need to set the user to the current user so Firecracker (running as user) can open it
     import os
@@ -42,6 +130,13 @@ def setup_tap_device(tap_name: str, host_ip: str, cidr: int = 24):
     except subprocess.CalledProcessError:
         # Ignore if it fails (likely exists). We proceed to set IP/UP which might fix it or fail later.
         logger.warning(f"Failed to create TAP {tap_name} (might already involve). Continuing...")
+
+    # Pin the MAC to the deterministic value. Idempotent — if it's already
+    # set to host_mac this is a no-op; if not, this corrects it.
+    try:
+        run_command(["sudo", "ip", "link", "set", "dev", tap_name, "address", host_mac])
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"Failed to set MAC {host_mac} on {tap_name}: {e}")
     
     # Set IP
     # Check for global IP collision
@@ -65,7 +160,12 @@ def setup_tap_device(tap_name: str, host_ip: str, cidr: int = 24):
     
     # Bring up
     run_command(["sudo", "ip", "link", "set", tap_name, "up"])
-    
+
+    # Push a gratuitous ARP so the guest (which may be restoring from a
+    # snapshot taken against a previous instance of this TAP) updates its
+    # gateway ARP entry immediately.
+    _send_gratuitous_arp(tap_name, host_ip)
+
     # Enable IP forwarding
     run_command(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=1"])
     
@@ -96,17 +196,25 @@ def setup_tap_device(tap_name: str, host_ip: str, cidr: int = 24):
     except Exception as e:
         logger.warning(f"iptables setup failed (might already exist or permission denied): {e}")
 
+    return host_mac
 
-def setup_netns_networking(netns_name: str, tap_name: str, host_ip: str, vm_id: str):
+
+def setup_netns_networking(netns_name: str, tap_name: str, host_ip: str, vm_id: str, host_mac: str = None):
     """
     Sets up NetNS using CNI and bridges to a TAP device via TC.
+
+    host_mac, if not provided, is derived from host_ip. Pinning a stable
+    MAC matters on snapshot restore (see derive_host_mac docstring).
     """
     import os
     from .cni import CNIRuntime
-    
+
     user = os.environ.get("SUDO_USER", os.environ.get("USER", "rc"))
-    
-    logger.info(f"Setting up NetNS {netns_name} using CNI")
+
+    if not host_mac:
+        host_mac = derive_host_mac(host_ip)
+
+    logger.info(f"Setting up NetNS {netns_name} using CNI (tap mac {host_mac})")
 
     # 1. Create NetNS
     # Ensure directory exists for ip netns
@@ -137,10 +245,24 @@ def setup_netns_networking(netns_name: str, tap_name: str, host_ip: str, vm_id: 
     
     # Rename to target name
     run_command(["sudo", "ip", "netns", "exec", netns_name, "ip", "link", "set", tmp_tap_name, "name", tap_name])
-    
+
+    # Pin the TAP MAC before bringing the link up. Critical on snapshot
+    # restore: the guest's preserved ARP cache for host_ip points to the
+    # TAP MAC at snapshot time, and a fresh random MAC here would silently
+    # drop the first batch of guest -> host packets.
+    try:
+        run_command(["sudo", "ip", "netns", "exec", netns_name, "ip", "link", "set", "dev", tap_name, "address", host_mac])
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"Failed to set MAC {host_mac} on {tap_name} in {netns_name}: {e}")
+
     # Give TAP the IP expected by the VM (host_ip from snapshot/args)
     run_command(["sudo", "ip", "netns", "exec", netns_name, "ip", "addr", "add", f"{host_ip}/24", "dev", tap_name])
     run_command(["sudo", "ip", "netns", "exec", netns_name, "ip", "link", "set", tap_name, "up"])
+
+    # Belt-and-suspenders: even with the pinned MAC, push a gratuitous ARP
+    # so any cache anywhere along the path snaps to the right entry. Also
+    # covers legacy snapshots taken before MAC pinning was in place.
+    _send_gratuitous_arp(tap_name, host_ip, netns_name=netns_name)
     
     # 4. Enable Forwarding
     run_command(["sudo", "ip", "netns", "exec", netns_name, "sysctl", "-w", "net.ipv4.ip_forward=1"])

@@ -461,15 +461,25 @@ class BandSox:
                 # To avoid collisions (Resource busy), we create this TAP device
                 # inside a new Network Namespace unique to this VM.
                 # We use a rename workaround in setup_netns_networking to avoid "Busy" error.
-                from .network import setup_netns_networking
+                from .network import setup_netns_networking, derive_host_mac
 
                 netns_name = f"netns{new_vm_id[:8]}"
                 host_ip = net_config.get("host_ip", "172.16.100.1")
 
+                # The host TAP MAC must match what the guest had cached for
+                # its gateway at snapshot time, otherwise the first guest ->
+                # host packets are dropped at L2 (see derive_host_mac
+                # docstring). Snapshots taken after the MAC-pinning fix
+                # carry host_mac; older ones fall back to the deterministic
+                # derivation, which matches what they would have ended up
+                # with on next save.
+                host_mac = net_config.get("host_mac") or derive_host_mac(host_ip)
+                net_config["host_mac"] = host_mac
+
                 # Setup NetNS with the OLD tap name
                 try:
                     cni_ip = setup_netns_networking(
-                        netns_name, old_tap_name, host_ip, new_vm_id
+                        netns_name, old_tap_name, host_ip, new_vm_id, host_mac=host_mac
                     )
 
                     # Add route on Host to Guest via CNI IP
@@ -578,7 +588,8 @@ class BandSox:
 
                 logger.info(f"NetNS {netns_name} missing; recreating before start")
                 cni_ip = setup_netns_networking(
-                    netns_name, old_tap_name, host_ip, new_vm_id
+                    netns_name, old_tap_name, host_ip, new_vm_id,
+                    host_mac=net_config.get("host_mac"),
                 )
                 guest_ip = net_config.get("guest_ip")
                 if cni_ip and guest_ip:
@@ -799,6 +810,31 @@ class BandSox:
                 vm.vsock_enabled = False
 
         vm.resume()
+
+        # The pre-resume gratuitous ARP we sent during TAP setup is dropped
+        # because the guest network stack isn't running yet. Now that vm
+        # has resumed, push another burst so the guest's stale ARP entry
+        # for host_ip flips to the (newly pinned) TAP MAC immediately.
+        # Without this the first guest -> host packet is silently dropped
+        # for ~30-60s while the guest's neighbor entry ages out.
+        if enable_networking and netns_name and old_tap_name:
+            try:
+                from .network import refresh_guest_arp
+
+                host_ip_for_arp = net_config.get("host_ip")
+                if host_ip_for_arp:
+                    # Fire-and-forget in a thread so we never block the
+                    # restore path on a hung arping.
+                    import threading as _t
+
+                    _t.Thread(
+                        target=refresh_guest_arp,
+                        args=(old_tap_name, host_ip_for_arp),
+                        kwargs={"netns_name": netns_name},
+                        daemon=True,
+                    ).start()
+            except Exception as e:
+                logger.warning(f"Post-resume ARP refresh failed: {e}")
 
         if enable_networking and vm.agent_ready:
             # Check if we need to update IP
