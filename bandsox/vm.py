@@ -11,7 +11,7 @@ import errno
 import shlex
 from pathlib import Path
 from .firecracker import FirecrackerClient
-from .network import setup_tap_device, cleanup_tap_device
+from .network import setup_tap_device, cleanup_tap_device, derive_host_mac
 import requests
 
 logger = logging.getLogger(__name__)
@@ -952,13 +952,15 @@ class MicroVM:
                 host_ip = f"172.16.{subnet_idx}.1"
                 guest_ip = f"172.16.{subnet_idx}.2"
                 guest_mac = f"AA:FC:00:00:{subnet_idx:02x}:02"
+                host_mac = derive_host_mac(host_ip)
 
                 try:
-                    setup_tap_device(self.tap_name, host_ip)
+                    setup_tap_device(self.tap_name, host_ip, host_mac=host_mac)
                     self.network_config = {
                         "host_ip": host_ip,
                         "guest_ip": guest_ip,
                         "guest_mac": guest_mac,
+                        "host_mac": host_mac,
                         "tap_name": self.tap_name,
                     }
                     self.network_setup = True
@@ -1033,13 +1035,15 @@ class MicroVM:
                     current_mac = (
                         guest_mac if guest_mac else f"AA:FC:00:00:{subnet_idx:02x}:02"
                     )
+                    host_mac = derive_host_mac(host_ip)
 
                     try:
-                        setup_tap_device(self.tap_name, host_ip)
+                        setup_tap_device(self.tap_name, host_ip, host_mac=host_mac)
                         self.network_config = {
                             "host_ip": host_ip,
                             "guest_ip": guest_ip,
                             "guest_mac": current_mac,
+                            "host_mac": host_mac,
                             "tap_name": self.tap_name,
                         }
                         self.network_setup = True
