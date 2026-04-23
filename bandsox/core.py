@@ -4,6 +4,7 @@ import uuid
 import logging
 import shutil
 import json
+import base64
 import threading
 import requests
 from pathlib import Path
@@ -106,6 +107,63 @@ class BandSox:
             with open(meta_path, "r") as f:
                 return json.load(f)
         return {}
+
+    def _best_effort_unblock_guest_rng(self, vm: MicroVM):
+        """Inject host entropy into restored guests when CRNG isn't ready.
+
+        Why this exists:
+        - Legacy snapshots may not include a virtio-rng device.
+        - In that state, getrandom() can block indefinitely in the guest,
+          which stalls git/openssl on first use.
+        - Firecracker forbids adding /entropy before snapshot load if any
+          boot-specific resources are already configured in that snapshot.
+
+        This is best-effort and intentionally non-fatal.
+        """
+        # Fast probe: if non-blocking getrandom already works, skip.
+        probe_cmd = (
+            "python3 -c 'import os; "
+            "os.getrandom(1, os.GRND_NONBLOCK); print(\"rng-ready\")' >/dev/null 2>&1"
+        )
+        try:
+            probe_ec = vm.exec_command(probe_cmd, timeout=3)
+            if probe_ec == 0:
+                return
+        except Exception:
+            # Continue with injection attempt.
+            pass
+
+        # Generate true entropy on host and inject into guest kernel pool.
+        host_seed = os.urandom(256)
+        seed_b64 = base64.b64encode(host_seed).decode("ascii")
+        inject_cmd = (
+            "python3 - <<'PY'\n"
+            "import base64, fcntl, struct\n"
+            "RNDADDENTROPY = 0x40085203\n"
+            f"seed = base64.b64decode('{seed_b64}')\n"
+            "payload = struct.pack('ii', 64, len(seed)) + seed\n"
+            "ok = False\n"
+            "for dev in ('/dev/random', '/dev/urandom'):\n"
+            "    try:\n"
+            "        buf = bytearray(payload)\n"
+            "        with open(dev, 'wb', buffering=0) as f:\n"
+            "            fcntl.ioctl(f.fileno(), RNDADDENTROPY, buf, True)\n"
+            "        ok = True\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "raise SystemExit(0 if ok else 1)\n"
+            "PY"
+        )
+        try:
+            ec = vm.exec_command(inject_cmd, timeout=5)
+            if ec == 0:
+                logger.info(f"Injected host entropy into guest VM {vm.vm_id}")
+            else:
+                logger.warning(
+                    f"Guest entropy injection returned non-zero for VM {vm.vm_id}: {ec}"
+                )
+        except Exception as e:
+            logger.warning(f"Guest entropy injection failed for VM {vm.vm_id}: {e}")
 
     def _clone_rootfs(self, src: Path, dest: Path) -> str:
         """
@@ -859,6 +917,10 @@ class BandSox:
 
         # Agent is already running in the restored VM
         vm.agent_ready = True
+        # Legacy snapshots without virtio-rng can leave guest getrandom()
+        # blocked forever. Best-effort seed from host so first git/openssl
+        # doesn't hang.
+        self._best_effort_unblock_guest_rng(vm)
 
         # Save metadata (inherit from snapshot if possible, or create new)
         self._save_metadata(

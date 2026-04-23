@@ -111,6 +111,8 @@ def test_configure_persists_host_mac_in_network_config():
             enable_vsock=False,
         )
 
+    fake_client.put_entropy.assert_called_once()
+
     assert instance.network_config.get("host_mac"), \
         f"host_mac missing: {instance.network_config}"
     host_ip = instance.network_config["host_ip"]

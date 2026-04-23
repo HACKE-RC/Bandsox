@@ -112,6 +112,28 @@ class FirecrackerClient:
         data = {"vcpu_count": vcpu_count, "mem_size_mib": mem_size_mib}
         return self._request("PUT", "/machine-config", data)
 
+    def put_entropy(
+        self,
+        bandwidth_size: int = 1048576,
+        refill_time_ms: int = 1000,
+        one_time_burst: int = 0,
+    ):
+        """Configures the virtio-rng entropy device.
+
+        Must be called pre-boot. Firecracker rejects this after the VM
+        starts, and snapshot-restore paths can't call it before load.
+        """
+        data = {
+            "rate_limiter": {
+                "bandwidth": {
+                    "size": bandwidth_size,
+                    "one_time_burst": one_time_burst,
+                    "refill_time": refill_time_ms,
+                }
+            }
+        }
+        return self._request("PUT", "/entropy", data)
+
     def instance_start(self):
         data = {"action_type": "InstanceStart"}
         return self._request("PUT", "/actions", data)
