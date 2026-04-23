@@ -209,10 +209,17 @@ sessions = {}  # session_id -> process
 pty_masters = {}  # session_id -> master_fd
 
 
+_send_event_lock = threading.Lock()
+
+
 def send_event(event_type, payload):
     msg = json.dumps({"type": event_type, "payload": payload})
-    sys.stdout.write(msg + "\n")
-    sys.stdout.flush()
+    # Serialize write+flush so concurrent worker threads can't interleave
+    # JSON lines on the serial console. Interleaved lines corrupt the JSON
+    # stream the host parses, which drops exit events and hangs commands.
+    with _send_event_lock:
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
 
 
 def read_stream(stream, stream_name, cmd_id):
