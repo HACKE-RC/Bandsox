@@ -294,46 +294,96 @@ def setup_netns_networking(netns_name: str, tap_name: str, host_ip: str, vm_id: 
     # VM(172.16..) -> TAP -> NAT -> eth0(10.200..) -> CNI Bridge -> Host
     # This ensures packets leaving the NetNS have the CNI-assigned IP.
     
+    # Configure NAT and MSS clamping inside the netns. We try nft first,
+    # then fall back to iptables-legacy / iptables.
+    #
+    # Why nft-first: on Ubuntu 22.04+ (and other distros that have moved
+    # the kernel netfilter backend to nftables), iptables-legacy is still
+    # installed and accepts rule additions with returncode 0 — but the
+    # rules are written to a backend the kernel no longer consults, so
+    # they silently never fire. Masquerade and MSS clamp both vanish,
+    # the first git clone hangs, conntrack stays empty, etc. Trying nft
+    # first guarantees we land on the backend the kernel actually uses.
+    # iptables/iptables-legacy fallback covers older systems and netns
+    # images without nft installed.
     logger.info("Configuring internal NAT from TAP to eth0 (CNI)")
-    def try_netns_iptables(cmd_name):
-        try:
-            # Check availability first (optional, but good)
-            # subprocess.run(["which", cmd_name], check=True, stdout=subprocess.DEVNULL)
-            run_command(["sudo", "ip", "netns", "exec", netns_name, cmd_name, "-t", "nat", "-A", "POSTROUTING", "-o", "eth0", "-j", "MASQUERADE"])
-            return True
-        except Exception:
-            return False
 
-    if not try_netns_iptables("iptables-legacy"):
-        if not try_netns_iptables("iptables"):
-             logger.warning("Failed to setup NAT inside NetNS (tried iptables-legacy and iptables)")
+    def _netns_run(args, check=False):
+        """Run a command inside the netns and return its CompletedProcess.
+        Always uses sudo; never raises on non-zero exit unless check=True."""
+        cmd = ["sudo", "ip", "netns", "exec", netns_name] + list(args)
+        return subprocess.run(cmd, check=check, capture_output=True, text=True)
+
+    def _try_nft_nat():
+        """Install MASQUERADE on netns eth0 via nft. All steps must
+        return 0 — partial success leaves the chain half-built."""
+        steps = [
+            ["nft", "add", "table", "ip", "nat"],
+            ["nft", "add", "chain", "ip", "nat", "POSTROUTING",
+             "{ type nat hook postrouting priority 100; }"],
+            ["nft", "add", "rule", "ip", "nat", "POSTROUTING",
+             "oifname", "eth0", "masquerade"],
+        ]
+        for step in steps:
+            if _netns_run(step).returncode != 0:
+                return False
+        return True
+
+    def _try_iptables_nat(cmd_name):
+        return _netns_run([
+            cmd_name, "-t", "nat", "-A", "POSTROUTING",
+            "-o", "eth0", "-j", "MASQUERADE",
+        ]).returncode == 0
+
+    if not _try_nft_nat():
+        if not _try_iptables_nat("iptables-legacy"):
+            if not _try_iptables_nat("iptables"):
+                logger.warning(
+                    "Failed to setup NAT inside NetNS "
+                    "(tried nft, iptables-legacy, iptables)"
+                )
 
     # Clamp TCP MSS to the path MTU inside the netns. The CNI interface
-    # MTU is often smaller than 1500 (e.g. 1400), and snapshot-restored
-    # guests frequently keep eth0 at 1500 and advertise MSS=1460. Some
-    # networks drop the resulting oversized inbound TCP segments (PMTUD
-    # blackhole), which makes the first HTTPS connection (e.g. git clone)
-    # hang for ~30s until TCP falls back. MSS clamping fixes this
-    # deterministically.
-    def try_netns_mss_clamp(cmd_name):
-        try:
-            run_command(
-                [
-                    "sudo", "ip", "netns", "exec", netns_name,
-                    cmd_name, "-t", "mangle", "-A", "FORWARD",
-                    "-i", tap_name, "-o", "eth0",
-                    "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
-                    "-j", "TCPMSS", "--clamp-mss-to-pmtu",
-                ],
-                check=False,
-            )
-            return True
-        except Exception:
-            return False
+    # MTU is 1400 (set in cni.py) but snapshot-restored guests keep eth0
+    # at 1500 and advertise MSS=1460. Some networks drop the resulting
+    # oversized inbound TCP segments (PMTUD blackhole), which makes the
+    # first HTTPS connection (e.g. git clone) hang for ~30s until TCP
+    # falls back. MSS clamping fixes this deterministically.
+    def _try_nft_mss_clamp():
+        steps = [
+            ["nft", "add", "table", "ip", "mangle"],
+            ["nft", "add", "chain", "ip", "mangle", "FORWARD",
+             "{ type filter hook forward priority mangle; }"],
+            # tcp flags & (syn|rst) == syn => SYN set, RST clear (matches
+            # both client SYN and server SYN-ACK, same semantics as the
+            # iptables --tcp-flags SYN,RST SYN match below). 'set rt mtu'
+            # is the nft equivalent of --clamp-mss-to-pmtu: it clamps
+            # MSS to the route MTU on the outgoing interface.
+            ["nft", "add", "rule", "ip", "mangle", "FORWARD",
+             "iifname", tap_name, "oifname", "eth0",
+             "tcp", "flags", "&", "(syn|rst)", "==", "syn",
+             "tcp", "option", "maxseg", "size", "set", "rt", "mtu"],
+        ]
+        for step in steps:
+            if _netns_run(step).returncode != 0:
+                return False
+        return True
 
-    if not try_netns_mss_clamp("iptables-legacy"):
-        if not try_netns_mss_clamp("iptables"):
-            logger.warning("Failed to setup TCP MSS clamping inside NetNS")
+    def _try_iptables_mss_clamp(cmd_name):
+        return _netns_run([
+            cmd_name, "-t", "mangle", "-A", "FORWARD",
+            "-i", tap_name, "-o", "eth0",
+            "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+            "-j", "TCPMSS", "--clamp-mss-to-pmtu",
+        ]).returncode == 0
+
+    if not _try_nft_mss_clamp():
+        if not _try_iptables_mss_clamp("iptables-legacy"):
+            if not _try_iptables_mss_clamp("iptables"):
+                logger.warning(
+                    "Failed to setup TCP MSS clamping inside NetNS "
+                    "(tried nft, iptables-legacy, iptables)"
+                )
 
     # Return the CNI assigned IP (IPv4)
     # Result format: {'ips': [{'version': '4', 'address': '10.200.x.x/16', ...}]}
