@@ -17,199 +17,149 @@ import time
 
 # This agent runs inside the guest on ttyS0.
 # It reads JSON commands from stdin and writes JSON events to stdout.
+#
+# IMPORTANT: stdout is the serial console. We must serialize writes so that
+# concurrent worker threads don't interleave JSON lines on the wire (which
+# corrupts framing on the host parser). The same applies to stderr: the
+# Firecracker serial console is shared between stdout/stderr, and any
+# unsynchronized write to stderr can interleave with an in-flight stdout
+# JSON line. We send all diagnostic output through the same lock as events
+# below, and we keep vsock diagnostics to a minimum to avoid swamping the
+# serial channel with bookkeeping noise.
+#
+# Vsock Architecture (guest-initiated):
+# The guest initiates a new AF_VSOCK connection for each file transfer.
+# Firecracker forwards the connection to the host's Unix socket listener
+# at <uds_path>_<port>. The host listener accepts, reads a JSON request,
+# handles the transfer, and closes the connection. No shared state.
+#
+# Protocol:
+# 1. Guest connects to host via AF_VSOCK(CID=2, port)
+# 2. Guest sends a JSON request (upload or download)
+# 3. Host sends "ready" (for upload) or chunks (for download)
+# 4. Data is transferred
+# 5. Connection closes when done
 
-# Vsock Client Module
-VSOCK_ENABLED = False
-VSOCK_SOCKET = None
 VSOCK_CID_HOST = 2  # Well-known CID for host
-_vsock_lock = threading.Lock()
-# Separate writer lock so concurrent vsock_send_json calls can't interleave
-# JSON lines on the wire. Same class of bug as the send_event interleave fix
-# (commit 0a1d035): a corrupted line breaks framing on the host parser, which
-# drops the response and hangs the command. We can't reuse _vsock_lock for
-# this — readers hold _vsock_lock briefly to grab the sock reference and we
-# don't want to serialize reads against writes on a full-duplex socket.
-_vsock_write_lock = threading.Lock()
-_vsock_reconnect_thread = None
 
 
-def vsock_connect(port: int, retry: int = 3) -> bool:
-    """Connects to host vsock socket.
+# Cached vsock availability: None = unknown, True = works, False = known-broken
+# Once set False (after an explicit probe), we stop retrying and fall straight
+# to serial so we don't waste 3 × ~1s per file read on a broken VM.
+_vsock_available_lock = threading.Lock()
+_vsock_available = None  # type: ignore[assignment]
+_vsock_last_probe_ts = 0.0
+_VSOCK_REPROBE_INTERVAL = 60.0  # seconds before re-checking a broken vsock
 
-    Args:
-        port: Port number to connect to
-        retry: Number of connection attempts (default 3)
 
-    Returns:
-        True if connected, False if failed
-    """
-    global VSOCK_ENABLED, VSOCK_SOCKET
-
+def _vsock_module_available() -> bool:
+    """Return True if the Python socket module has AF_VSOCK."""
     try:
-        socket.AF_VSOCK  # Will raise AttributeError if not available
+        socket.AF_VSOCK  # noqa: B018 - attribute access is the test
+        return True
     except AttributeError:
-        sys.stderr.write(
-            "WARNING: Vsock module not available, falling back to serial\n"
-        )
-        sys.stderr.flush()
         return False
 
-    for attempt in range(retry):
-        try:
-            sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-            sock.settimeout(10)  # 10s connection timeout
 
-            # Connect to host (CID=2) on specified port
-            sock.connect((VSOCK_CID_HOST, port))
+def _vsock_probe(port: int) -> bool:
+    """Attempt a quick AF_VSOCK connection to verify vsock works.
 
-            with _vsock_lock:
-                VSOCK_SOCKET = sock
-                VSOCK_ENABLED = True
-
-            sys.stderr.write(
-                f"INFO: Connected to vsock: CID={VSOCK_CID_HOST}, Port={port}\n"
-            )
-            sys.stderr.flush()
-            return True
-
-        except Exception as e:
-            if attempt < retry - 1:
-                sys.stderr.write(
-                    f"DEBUG: Vsock connection attempt {attempt + 1} failed: {e}\n"
-                )
-                sys.stderr.flush()
-                time.sleep(1)  # 1s backoff
-            else:
-                sys.stderr.write(
-                    f"WARNING: Vsock connection failed after {retry} attempts: {e}\n"
-                )
-                sys.stderr.flush()
-                with _vsock_lock:
-                    VSOCK_ENABLED = False
-                return False
-
-    return False
-
-
-def _vsock_reconnect_loop(port: int, max_retries: int = 30):
-    """Background reconnection loop for vsock.
-
-    Retries vsock connection every 10 seconds until successful or max retries
-    reached. Runs as a daemon thread after initial connection failure.
-
-    Args:
-        port: Port number to connect to
-        max_retries: Maximum number of attempts (default 30 = ~5 minutes)
+    We do a single fast probe (1 second timeout), close the socket, and
+    cache the result. Callers treat a False result as "use serial" until
+    the reprobe interval elapses.
     """
-    global VSOCK_ENABLED, VSOCK_SOCKET
+    global _vsock_available, _vsock_last_probe_ts
+
+    if not _vsock_module_available():
+        with _vsock_available_lock:
+            _vsock_available = False
+            _vsock_last_probe_ts = time.time()
+        return False
 
     try:
-        socket.AF_VSOCK
-    except AttributeError:
-        return
-
-    for attempt in range(max_retries):
-        time.sleep(10)
-
-        with _vsock_lock:
-            if VSOCK_ENABLED:
-                # Already reconnected (e.g. by an inline vsock_connect call)
-                return
-
+        sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+        sock.settimeout(1.0)
         try:
-            sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-            sock.settimeout(10)
             sock.connect((VSOCK_CID_HOST, port))
-
-            with _vsock_lock:
-                VSOCK_SOCKET = sock
-                VSOCK_ENABLED = True
-
-            sys.stderr.write(
-                f"INFO: Vsock reconnected on attempt {attempt + 1}: "
-                f"CID={VSOCK_CID_HOST}, Port={port}\n"
-            )
-            sys.stderr.flush()
-            return
-
-        except Exception as e:
-            sys.stderr.write(
-                f"DEBUG: Vsock reconnect attempt {attempt + 1}/{max_retries} failed: {e}\n"
-            )
-            sys.stderr.flush()
-
-    sys.stderr.write(
-        f"WARNING: Vsock reconnect giving up after {max_retries} attempts\n"
-    )
-    sys.stderr.flush()
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+        with _vsock_available_lock:
+            _vsock_available = True
+            _vsock_last_probe_ts = time.time()
+        return True
+    except Exception:
+        with _vsock_available_lock:
+            _vsock_available = False
+            _vsock_last_probe_ts = time.time()
+        return False
 
 
-def start_vsock_reconnect(port: int):
-    """Starts a background daemon thread to retry vsock connection.
+def _vsock_can_use(port: int) -> bool:
+    """Return True if vsock is believed to work, probing on first call.
 
-    Args:
-        port: Port number to reconnect to
+    We avoid probing on every file transfer (which would add ~1s per
+    transfer on a broken VM). Instead we probe once, cache the result,
+    and re-probe at most once per minute.
     """
-    global _vsock_reconnect_thread
+    with _vsock_available_lock:
+        state = _vsock_available
+        since = time.time() - _vsock_last_probe_ts
 
-    if _vsock_reconnect_thread and _vsock_reconnect_thread.is_alive():
-        return  # Already running
+    if state is True:
+        return True
+    if state is False and since < _VSOCK_REPROBE_INTERVAL:
+        return False
 
-    _vsock_reconnect_thread = threading.Thread(
-        target=_vsock_reconnect_loop, args=(port,), daemon=True
-    )
-    _vsock_reconnect_thread.start()
+    # Unknown, or long enough since a failed probe -> probe now
+    return _vsock_probe(port)
 
 
-def vsock_send_json(data: dict):
-    """Sends JSON data over vsock connection.
+def _vsock_mark_broken():
+    """Record that a vsock connection just failed so subsequent calls skip it."""
+    global _vsock_available, _vsock_last_probe_ts
+    with _vsock_available_lock:
+        _vsock_available = False
+        _vsock_last_probe_ts = time.time()
 
-    Args:
-        data: Dictionary to send as JSON
+
+def vsock_create_connection(port: int, timeout: float = 10.0):
+    """Create a new vsock connection to the host for a single transfer.
+
+    Returns a connected socket or None if vsock is unavailable/broken.
     """
-    with _vsock_lock:
-        if not VSOCK_ENABLED or not VSOCK_SOCKET:
-            raise Exception("Vsock not connected")
-        sock = VSOCK_SOCKET
+    if not _vsock_module_available():
+        return None
 
-    message = (json.dumps(data) + "\n").encode("utf-8")
-    with _vsock_write_lock:
-        sock.sendall(message)
+    try:
+        sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((VSOCK_CID_HOST, port))
+        return sock
+    except Exception:
+        _vsock_mark_broken()
+        return None
 
 
-def vsock_read_line() -> str:
-    """Reads a newline-delimited line from vsock connection.
+def vsock_send_json_msg(sock, data: dict):
+    """Send a JSON message over a vsock connection (per-call, not shared)."""
+    message = json.dumps(data) + "\n"
+    sock.sendall(message.encode("utf-8"))
 
-    Returns:
-        Complete line as string
-    """
-    with _vsock_lock:
-        if not VSOCK_ENABLED or not VSOCK_SOCKET:
-            raise Exception("Vsock not connected")
-        sock = VSOCK_SOCKET
 
+def vsock_recv_json_msg(sock) -> dict:
+    """Receive a single newline-delimited JSON message from vsock."""
     buffer = b""
-    while True:
-        chunk = sock.recv(1024)
+    while b"\n" not in buffer:
+        chunk = sock.recv(4096)
         if not chunk:
             raise Exception("Vsock connection closed")
         buffer += chunk
-        if b"\n" in buffer:
-            line, buffer = buffer.split(b"\n", 1)
-            return line.decode("utf-8")
 
-
-def vsock_disconnect():
-    """Disconnects from vsock socket and cleans up."""
-    global VSOCK_SOCKET, VSOCK_ENABLED
-
-    with _vsock_lock:
-        if VSOCK_SOCKET:
-            VSOCK_SOCKET.close()
-            VSOCK_SOCKET = None
-            VSOCK_ENABLED = False
-    sys.stderr.write("INFO: Vsock disconnected\n")
-    sys.stderr.flush()
+    line, _ = buffer.split(b"\n", 1)
+    return json.loads(line.decode("utf-8"))
 
 
 # Global session registry
@@ -217,17 +167,33 @@ sessions = {}  # session_id -> process
 pty_masters = {}  # session_id -> master_fd
 
 
-_send_event_lock = threading.Lock()
+# Single lock serializes ALL writes to the serial console (stdout and stderr).
+# Without this, concurrent worker threads producing JSON events interleave
+# bytes on the host's serial parser, which drops events and wedges commands.
+# Historically we had a stdout-only lock; vsock reconnect chatter going to
+# stderr was still able to interleave and corrupt the framing, so stderr
+# writes now go through the same path.
+_console_lock = threading.Lock()
 
 
 def send_event(event_type, payload):
     msg = json.dumps({"type": event_type, "payload": payload})
-    # Serialize write+flush so concurrent worker threads can't interleave
-    # JSON lines on the serial console. Interleaved lines corrupt the JSON
-    # stream the host parses, which drops exit events and hangs commands.
-    with _send_event_lock:
+    with _console_lock:
         sys.stdout.write(msg + "\n")
         sys.stdout.flush()
+
+
+def log_stderr(msg: str):
+    """Write a diagnostic line to stderr under the console lock.
+
+    Keep calls to this sparse — each line costs bandwidth on the serial
+    console and competes with real event traffic.
+    """
+    with _console_lock:
+        sys.stderr.write(msg)
+        if not msg.endswith("\n"):
+            sys.stderr.write("\n")
+        sys.stderr.flush()
 
 
 def read_stream(stream, stream_name, cmd_id):
@@ -451,7 +417,7 @@ def handle_kill(cmd_id):
 
 def handle_read_file(cmd_id, path):
     """Reads a file and sends content in chunks to avoid buffer overflows.
-    
+
     Uses 2KB chunks (safe for serial buffer after base64 encoding).
     Sends file_chunk events for each chunk, then file_complete at end.
     """
@@ -462,10 +428,10 @@ def handle_read_file(cmd_id, path):
             return
 
         file_size = os.path.getsize(path)
-        
+
         # For small files (<= 2KB), use single-shot transfer for efficiency
         CHUNK_SIZE = 2 * 1024  # 2KB chunks
-        
+
         if file_size <= CHUNK_SIZE:
             # Small file - send all at once (backward compatible)
             with open(path, "rb") as f:
@@ -477,16 +443,16 @@ def handle_read_file(cmd_id, path):
             # Large file - send in chunks with throttling for serial console
             md5 = hashlib.md5()
             offset = 0
-            
+
             with open(path, "rb") as f:
                 while True:
                     chunk = f.read(CHUNK_SIZE)
                     if not chunk:
                         break
-                    
+
                     md5.update(chunk)
                     encoded = base64.b64encode(chunk).decode("utf-8")
-                    
+
                     send_event("file_chunk", {
                         "cmd_id": cmd_id,
                         "path": path,
@@ -494,14 +460,14 @@ def handle_read_file(cmd_id, path):
                         "offset": offset,
                         "size": len(chunk)
                     })
-                    
+
                     offset += len(chunk)
-                    
+
                     # Throttle output to prevent serial buffer overflow
                     # Serial console is slow (~115200 baud = ~11KB/s max)
                     # 2KB chunk + base64 overhead = ~2.7KB, needs ~250ms to transmit
                     time.sleep(0.2)  # 200ms delay between chunks for serial safety
-            
+
             # Send completion event with checksum
             send_event("file_complete", {
                 "cmd_id": cmd_id,
@@ -538,152 +504,110 @@ def handle_write_file(cmd_id, path, content, mode="wb", append=False):
         send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
 
 
-def handle_vsock_upload(cmd_id, path: str, size: int, checksum: str):
-    """Handles vsock-based file upload (raw binary).
+def handle_vsock_upload_to_host(cmd_id, path: str):
+    """Uploads a file from guest to host via vsock (guest-initiated).
 
-    Protocol:
-    1. Guest receives upload request with path, size, checksum
-    2. Guest sends "ready" response via vsock
-    3. Guest receives raw binary data until size bytes received
-    4. Guest verifies checksum
-    5. Guest sends "complete" or "error" response
+    Triggered by a read_file request from the host. The guest opens a new
+    vsock connection, sends the upload request, streams file contents, then
+    closes the connection. Each transfer uses its own short-lived socket so
+    concurrent transfers don't fight over shared state.
 
-    Args:
-        cmd_id: Command ID for responses
-        path: Destination path
-        size: File size in bytes
-        checksum: MD5 checksum for verification
+    Falls back to serial (handle_read_file) on any vsock failure.
     """
-    global vsock_socket
-    
-    try:
-        # Ensure directory exists
-        dirname = os.path.dirname(path)
-        if dirname:
-            os.makedirs(dirname, exist_ok=True)
+    vsock_port = int(os.environ.get("BANDSOX_VSOCK_PORT", "9000"))
+    sock = None
 
-        # Send ready response via vsock
-        ready_msg = json.dumps({"type": "ready", "cmd_id": cmd_id}).encode() + b"\n"
-        vsock_socket.sendall(ready_msg)
-
-        # Receive raw binary file data
-        received_bytes = 0
-        md5 = hashlib.md5()
-        
-        with open(path, "wb") as f:
-            while received_bytes < size:
-                remaining = size - received_bytes
-                chunk_size = min(65536, remaining)
-                chunk = vsock_socket.recv(chunk_size)
-                if not chunk:
-                    raise Exception("Connection closed during upload")
-                f.write(chunk)
-                md5.update(chunk)
-                received_bytes += len(chunk)
-
-        # Verify checksum
-        file_checksum = md5.hexdigest()
-        if file_checksum == checksum:
-            complete_msg = json.dumps({
-                "type": "complete",
-                "cmd_id": cmd_id,
-                "size": received_bytes
-            }).encode() + b"\n"
-            vsock_socket.sendall(complete_msg)
-            send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
-        else:
-            error_msg = json.dumps({
-                "type": "error",
-                "cmd_id": cmd_id,
-                "error": f"Checksum mismatch: expected {checksum}, got {file_checksum}"
-            }).encode() + b"\n"
-            vsock_socket.sendall(error_msg)
-            send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
-
-    except Exception as e:
-        try:
-            error_msg = json.dumps({
-                "type": "error",
-                "cmd_id": cmd_id,
-                "error": str(e)
-            }).encode() + b"\n"
-            vsock_socket.sendall(error_msg)
-        except:
-            pass
-        send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
-
-
-def handle_vsock_download(cmd_id, path: str):
-    """Handles vsock-based file download.
-
-    Protocol:
-    1. Guest receives download request from host
-    2. Guest reads file
-    3. Guest sends file data in chunks with JSON metadata
-    4. Guest sends "complete" response
-
-    Args:
-        cmd_id: Command ID for responses
-        path: Source file path
-    """
     try:
         if not os.path.exists(path):
-            vsock_send_json(
-                {
-                    "type": "error",
-                    "payload": {"cmd_id": cmd_id, "error": f"File not found: {path}"},
-                }
-            )
-            vsock_disconnect()
+            send_event("error", {"cmd_id": cmd_id, "error": f"File not found: {path}"})
             send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
             return
 
         file_size = os.path.getsize(path)
 
-        # Read file and send in chunks
-        chunk_size = 64 * 1024  # 64KB chunks
-        bytes_sent = 0
-
+        # Compute checksum up front so the host can verify the stream
+        md5 = hashlib.md5()
         with open(path, "rb") as f:
-            while bytes_sent < file_size:
-                chunk = f.read(chunk_size)
-                encoded = base64.b64encode(chunk).decode("utf-8")
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                md5.update(chunk)
+        checksum = md5.hexdigest()
 
-                # Send chunk with metadata
-                vsock_send_json(
-                    {
-                        "type": "status",
-                        "payload": {
-                            "cmd_id": cmd_id,
-                            "type": "chunk",
-                            "data": encoded,
-                            "size": len(chunk),
-                            "offset": bytes_sent,
-                        },
-                    }
-                )
+        sock = vsock_create_connection(vsock_port)
+        if sock is None:
+            # Vsock unavailable — silently fall back to serial. We do NOT write
+            # a diagnostic here; that noise historically interleaved with real
+            # events on the serial console and wedged the parser.
+            handle_read_file(cmd_id, path)
+            return
 
-                bytes_sent += len(chunk)
-
-        # Send complete response
-        vsock_send_json(
+        # Send the upload request
+        vsock_send_json_msg(
+            sock,
             {
-                "type": "status",
-                "payload": {"cmd_id": cmd_id, "type": "complete", "size": file_size},
-            }
+                "type": "upload",
+                "path": path,
+                "size": file_size,
+                "checksum": checksum,
+                "cmd_id": cmd_id,
+            },
         )
-        vsock_disconnect()
+
+        # Wait for ready
+        response = vsock_recv_json_msg(sock)
+        if response.get("type") == "error":
+            raise Exception(response.get("error", "host error"))
+        if response.get("type") != "ready":
+            raise Exception(f"unexpected response type: {response.get('type')}")
+
+        # Stream the file
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                sock.sendall(chunk)
+
+        # Wait for completion
+        response = vsock_recv_json_msg(sock)
+        if response.get("type") == "error":
+            raise Exception(response.get("error", "host error"))
+        if response.get("type") != "complete":
+            raise Exception(f"unexpected response type: {response.get('type')}")
+
+        # Tell the host side of the agent that the upload succeeded — the
+        # VM.download_file caller uses this status event to know the file
+        # was already written by the listener.
+        send_event(
+            "status",
+            {"cmd_id": cmd_id, "status": "uploaded", "size": file_size},
+        )
         send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
 
     except Exception as e:
-        vsock_send_json(
-            {
-                "type": "error",
-                "payload": {"cmd_id": cmd_id, "error": f"Vsock download failed: {e}"},
-            }
-        )
-        vsock_disconnect()
-        send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
+        # Close the vsock socket before we fall back so we don't leak FDs.
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            sock = None
+
+        # Treat failure as a signal that vsock is broken for this VM, at
+        # least for the next minute — forces subsequent reads to serial
+        # without another round of 1s connect timeouts.
+        _vsock_mark_broken()
+        # Fall back to the serial path so the caller still gets the file.
+        handle_read_file(cmd_id, path)
+        return
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
 
 
 def handle_file_info(cmd_id, path):
@@ -808,28 +732,18 @@ def main():
 
                 elif req_type == "read_file":
                     path = req.get("path")
-
-                    # Try vsock connection first
                     vsock_port = int(os.environ.get("BANDSOX_VSOCK_PORT", "9000"))
-                    with _vsock_lock:
-                        vsock_ok = VSOCK_ENABLED
-                    if not vsock_ok:
-                        vsock_ok = vsock_connect(vsock_port)
-                    if vsock_ok:
-                        # Vsock connected, use vsock handler
+
+                    # Fast path: if we've already determined vsock is broken,
+                    # go straight to serial without probing again.
+                    if _vsock_can_use(vsock_port):
                         t = threading.Thread(
-                            target=handle_vsock_download,
+                            target=handle_vsock_upload_to_host,
                             args=(cmd_id, path),
                             daemon=True,
                         )
                         t.start()
                     else:
-                        # Fall back to serial, start background reconnect
-                        start_vsock_reconnect(vsock_port)
-                        sys.stderr.write(
-                            f"WARNING: Vsock connection failed for read_file, using serial\n"
-                        )
-                        sys.stderr.flush()
                         t = threading.Thread(
                             target=handle_read_file, args=(cmd_id, path), daemon=True
                         )

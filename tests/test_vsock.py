@@ -228,16 +228,13 @@ class TestVsockRestoreIsolation:
         monkeypatch.setattr(MicroVM, "resume", noop)
         monkeypatch.setattr(MicroVM, "update_drive", noop)
         monkeypatch.setattr(MicroVM, "load_snapshot", fake_load_snapshot)
-        monkeypatch.setattr(MicroVM, "_vsock_bridge_loop", lambda self: None)
-
-        class DummySocket:
-            def connect(self, path):
-                return None
-
-            def settimeout(self, timeout):
-                return None
-
-        monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: DummySocket())
+        # The restore path calls setup_vsock_listener; stub it out so we
+        # don't actually bind a Unix socket in the test.
+        monkeypatch.setattr(
+            MicroVM,
+            "setup_vsock_listener",
+            lambda self, port=None: None,
+        )
 
         try:
             vm = bs.restore_vm(snapshot_id, enable_networking=False, detach=False)

@@ -683,6 +683,22 @@ class BandSox:
                     runner_cmd.extend(["--netns", netns_name])
                 if vm.vsock_isolation_dir:
                     runner_cmd.extend(["--vsock-isolation-dir", vm.vsock_isolation_dir])
+                # Restored VMs need the runner to start a VsockHostListener
+                # in the runner process (not the caller), since the listener
+                # must outlive the caller and live with the Firecracker
+                # process. We hand it the host-side path directly so the
+                # runner doesn't have to guess which path was mapped
+                # through the vsock isolation namespace.
+                if vsock_config and vsock_config.get("enabled"):
+                    runner_vsock_config = dict(vsock_config)
+                    host_path = vm.vsock_socket_path or vsock_config.get(
+                        "host_uds_path"
+                    )
+                    if host_path:
+                        runner_vsock_config["host_uds_path"] = host_path
+                    runner_cmd.extend(
+                        ["--vsock-config", json.dumps(runner_vsock_config)]
+                    )
 
                 logger.info(f"Spawning detached runner for VM {new_vm_id}")
                 with open(log_file, "w") as f:
@@ -826,45 +842,33 @@ class BandSox:
 
             configure_tap_offloading(netns_name, old_tap_name, vm.vm_id)
 
-        # Connect vsock bridge BEFORE resuming — the guest agent tries vsock
-        # immediately on wake, so the bridge must already be listening.
-        # The Firecracker vsock socket is created during snapshot load.
+        # Start the host-side vsock listener BEFORE resuming — the guest
+        # agent probes vsock on its first read_file, so the listener must
+        # already be accepting on <uds_path>_<port> by then.
+        #
+        # Firecracker recreates <uds_path> itself during snapshot load;
+        # we only need to bind our Unix listener at <uds_path>_<port> and
+        # start accepting. See ``vm.setup_vsock_listener``.
         vsock_socket_path = vm.vsock_socket_path
         if vsock_config and vsock_config.get("enabled") and vsock_socket_path:
             try:
-                # Wait for Firecracker to create the socket (safety net)
                 max_wait = 50
-                for i in range(max_wait):
+                for _ in range(max_wait):
                     if os.path.exists(vsock_socket_path):
                         break
                     time.sleep(0.1)
                 else:
                     raise Exception(f"Vsock socket not created: {vsock_socket_path}")
 
-                import socket as sock_module
-
-                vm.vsock_socket_path = vsock_socket_path
-                vm.vsock_bridge_socket = sock_module.socket(
-                    sock_module.AF_UNIX, sock_module.SOCK_STREAM
-                )
-                vm.vsock_bridge_socket.connect(vsock_socket_path)
-                vm.vsock_bridge_socket.settimeout(30)
-
                 vm.vsock_cid = vsock_config["cid"]
                 vm.vsock_port = vsock_config["port"]
-                vm.vsock_enabled = True
-                vm.vsock_bridge_running = True
-
-                vm.vsock_bridge_thread = threading.Thread(
-                    target=vm._vsock_bridge_loop, daemon=True
+                vm.setup_vsock_listener(vsock_config["port"])
+                logger.info(
+                    f"Vsock listener started for restored VM: "
+                    f"port={vsock_config['port']}, path={vsock_socket_path}"
                 )
-                vm.vsock_bridge_thread.start()
-
-                vm.env_vars["BANDSOX_VSOCK_PORT"] = str(vsock_config["port"])
-                logger.info(f"Vsock bridge connected: {vsock_socket_path}")
-
             except Exception as e:
-                logger.warning(f"Failed to setup vsock bridge: {e}")
+                logger.warning(f"Failed to setup vsock listener: {e}")
                 vm.vsock_enabled = False
 
         vm.resume()
@@ -1008,13 +1012,18 @@ class BandSox:
             if host_path:
                 vsock_config["host_uds_path"] = host_path
 
-        # Disconnect vsock bridge before snapshot to avoid "Address in use" error on restore
-        # Firecracker saves vsock device state to snapshot file, so we need to release the socket
-        had_vsock = vm.vsock_enabled and vm.vsock_bridge_running
+        # Tear down the vsock listener before snapshot. Firecracker persists
+        # the vsock device state into the snapshot; if our listener is still
+        # bound to <uds_path>_<port> when we take the snapshot, a later
+        # restore will hit EADDRINUSE when it tries to re-bind there.
+        # Covers both the new VsockHostListener path (vsock_listener) and
+        # the legacy bridge path (vsock_bridge_running).
+        had_vsock = vm.vsock_enabled and (
+            vm.vsock_listener is not None or vm.vsock_bridge_running
+        )
         if had_vsock:
-            logger.info(f"Disconnecting vsock bridge before snapshot for {vm.vm_id}")
+            logger.info(f"Stopping vsock listener before snapshot for {vm.vm_id}")
             vm._cleanup_vsock_bridge()
-            # Don't reconnect after snapshot - let guest re-establish vsock connections
             vm.vsock_enabled = False
 
         # Pause VM if it was running; keep paused VMs paused after snapshot
