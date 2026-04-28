@@ -15,6 +15,7 @@ import logging
 import os
 import socket
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -105,7 +106,11 @@ class VsockHostListener:
 
             try:
                 self.listener_socket.bind(self.listener_path)
-                self.listener_socket.listen(5)
+                # Deep backlog: file-heavy workloads burst many parallel
+                # connections (Read fanning out across subagents). A small
+                # listen() queue drops extras as ECONNREFUSED, which the
+                # guest sees as `Connection reset by peer`.
+                self.listener_socket.listen(128)
                 self.listener_socket.settimeout(
                     1.0
                 )  # Allow periodic checks for shutdown
@@ -188,15 +193,25 @@ class VsockHostListener:
             return self._pending_uploads.get(cmd_id)
 
     def _accept_loop(self):
-        """Accept incoming connections and spawn handler threads."""
+        """Accept incoming connections and spawn handler threads.
+
+        Transient errors (EMFILE, ENFILE, EINTR, per-client failures) must
+        not kill the loop — otherwise the socket file stays present but
+        no one accepts, and the guest sees `Connection reset by peer` on
+        every attempt. Only a closed/unlinked listener socket terminates
+        the loop.
+        """
         logger.debug(f"Accept loop started for {self.listener_path}")
 
         while self.running:
             try:
                 client_socket, _ = self.listener_socket.accept()
-                client_socket.settimeout(30)  # 30s timeout for operations
+                # Per-connection timeout sized for worst-case file
+                # transfers (large builds, slow guests). 5 minutes covers
+                # anything reasonable; the guest abandons faster on its
+                # end so a hang here is bounded regardless.
+                client_socket.settimeout(300)
 
-                # Spawn handler thread for this connection
                 handler = threading.Thread(
                     target=self._handle_connection,
                     args=(client_socket,),
@@ -206,16 +221,34 @@ class VsockHostListener:
                 handler.start()
 
             except socket.timeout:
-                # Normal timeout, check if still running
+                # Normal — periodic accept() timeout so we can check
+                # self.running for shutdown.
                 continue
             except OSError as e:
-                if self.running:
-                    logger.error(f"Accept error: {e}")
-                break
+                if not self.running:
+                    break
+                # EBADF / socket closed → listener is gone, bail so the
+                # supervisor can rebind.
+                if e.errno in (9, 22):  # EBADF, EINVAL
+                    logger.error(
+                        f"Listener socket closed on {self.listener_path}: {e}"
+                    )
+                    break
+                # EMFILE/ENFILE/ECONNABORTED/EINTR → transient, keep going
+                logger.warning(
+                    f"Transient accept error on {self.listener_path}: {e}"
+                )
+                time.sleep(0.1)
+                continue
             except Exception as e:
                 if self.running:
-                    logger.error(f"Unexpected accept error: {e}")
-                break
+                    logger.error(
+                        f"Unexpected accept error on {self.listener_path}: {e}",
+                        exc_info=True,
+                    )
+                # Don't die — keep accepting
+                time.sleep(0.1)
+                continue
 
         logger.debug(f"Accept loop ended for {self.listener_path}")
 

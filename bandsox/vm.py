@@ -329,19 +329,38 @@ class MicroVM:
         # self.agent_ready = True  <-- REMOVED
 
     def _socket_read_loop(self):
-        """Reads from console socket and parses events."""
+        """Reads from console socket and parses events.
+
+        On disconnect we clear console_conn so the next exec_command
+        triggers a fresh connect_to_console() instead of writing to a
+        dead socket (which would raise BrokenPipeError every time).
+        """
         buffer = ""
-        while True:
-            try:
-                data = self.console_conn.recv(4096)
-                if not data:
+        try:
+            while True:
+                try:
+                    data = self.console_conn.recv(4096)
+                    if not data:
+                        break
+                    buffer += data.decode("utf-8")
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        self._handle_stdout_line(line + "\n")
+                except Exception:
                     break
-                buffer += data.decode("utf-8")
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    self._handle_stdout_line(line + "\n")
+        finally:
+            # Tear down so the next send_request reconnects.
+            try:
+                self.console_conn.close()
             except Exception:
-                break
+                pass
+            self.console_conn = None
+            # agent_ready stays True — metadata says the agent is up;
+            # wait_for_agent will reconnect and resume.
+            logger.warning(
+                f"Console socket read loop exited for {self.vm_id}; "
+                "will reconnect on next request"
+            )
 
     def _handle_stdout_line(self, line):
         """Parses a line from stdout (event)."""
@@ -562,13 +581,45 @@ class MicroVM:
         return result["code"]
 
     def _write_to_agent(self, data: str):
-        """Writes data to the agent via multiplexer or socket."""
+        """Writes data to the agent via multiplexer or socket.
+
+        When the console socket is broken (e.g. the runner's multiplexer
+        dropped us or the runner restarted), try to reconnect once before
+        raising. A single BrokenPipeError without recovery would surface
+        as "Error executing command: [Errno 32] Broken pipe" on every
+        subsequent tool call, leaving the VM permanently wedged from
+        the caller's perspective.
+        """
         if self.multiplexer:
             self.multiplexer.write_input(data)
-        elif self.console_conn:
-            self.console_conn.sendall(data.encode("utf-8"))
-        else:
+            return
+
+        payload = data.encode("utf-8")
+
+        if self.console_conn:
+            try:
+                self.console_conn.sendall(payload)
+                return
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                logger.warning(
+                    f"Console write failed ({e}); attempting reconnect"
+                )
+                try:
+                    self.console_conn.close()
+                except Exception:
+                    pass
+                self.console_conn = None
+
+        # No connection or broken — try (re)connect.
+        try:
+            self.connect_to_console()
+        except Exception as e:
+            raise Exception(f"No connection to agent: {e}")
+
+        if not self.console_conn:
             raise Exception("No connection to agent")
+
+        self.console_conn.sendall(payload)
 
     def exec_command(self, command: str, on_stdout=None, on_stderr=None, timeout=30):
         """Executes a command in the VM via the agent (blocking)."""

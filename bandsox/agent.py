@@ -43,13 +43,19 @@ import time
 VSOCK_CID_HOST = 2  # Well-known CID for host
 
 
-# Cached vsock availability: None = unknown, True = works, False = known-broken
-# Once set False (after an explicit probe), we stop retrying and fall straight
-# to serial so we don't waste 3 × ~1s per file read on a broken VM.
+# Cached vsock availability. None = unknown, True = known-good (cached for
+# the lifetime of the VM — once it works it keeps working), False = recently
+# failed (reprobe after a short backoff).
+#
+# Early-boot races (listener not yet bound) must not permanently degrade
+# the VM to serial for a full minute. We use a short initial reprobe that
+# grows on repeat failures up to a cap.
 _vsock_available_lock = threading.Lock()
 _vsock_available = None  # type: ignore[assignment]
 _vsock_last_probe_ts = 0.0
-_VSOCK_REPROBE_INTERVAL = 60.0  # seconds before re-checking a broken vsock
+_vsock_fail_streak = 0
+_VSOCK_REPROBE_BASE = 2.0  # seconds for first reprobe after a failure
+_VSOCK_REPROBE_MAX = 30.0  # cap for repeated failures
 
 
 def _vsock_module_available() -> bool:
@@ -62,18 +68,14 @@ def _vsock_module_available() -> bool:
 
 
 def _vsock_probe(port: int) -> bool:
-    """Attempt a quick AF_VSOCK connection to verify vsock works.
-
-    We do a single fast probe (1 second timeout), close the socket, and
-    cache the result. Callers treat a False result as "use serial" until
-    the reprobe interval elapses.
-    """
-    global _vsock_available, _vsock_last_probe_ts
+    """Attempt a quick AF_VSOCK connection to verify vsock works."""
+    global _vsock_available, _vsock_last_probe_ts, _vsock_fail_streak
 
     if not _vsock_module_available():
         with _vsock_available_lock:
             _vsock_available = False
             _vsock_last_probe_ts = time.time()
+            _vsock_fail_streak += 1
         return False
 
     try:
@@ -89,31 +91,38 @@ def _vsock_probe(port: int) -> bool:
         with _vsock_available_lock:
             _vsock_available = True
             _vsock_last_probe_ts = time.time()
+            _vsock_fail_streak = 0
         return True
     except Exception:
         with _vsock_available_lock:
             _vsock_available = False
             _vsock_last_probe_ts = time.time()
+            _vsock_fail_streak += 1
         return False
 
 
 def _vsock_can_use(port: int) -> bool:
     """Return True if vsock is believed to work, probing on first call.
 
-    We avoid probing on every file transfer (which would add ~1s per
-    transfer on a broken VM). Instead we probe once, cache the result,
-    and re-probe at most once per minute.
+    Cached True means we keep using vsock. Cached False means we back
+    off with exponential growth (2s, 4s, 8s, ... capped at 30s) so a
+    one-shot early-boot race doesn't lock the VM into serial for long.
     """
     with _vsock_available_lock:
         state = _vsock_available
         since = time.time() - _vsock_last_probe_ts
+        fails = _vsock_fail_streak
 
     if state is True:
         return True
-    if state is False and since < _VSOCK_REPROBE_INTERVAL:
-        return False
 
-    # Unknown, or long enough since a failed probe -> probe now
+    if state is False:
+        # Exponential backoff: 2, 4, 8, 16, 30, 30, ...
+        backoff = min(_VSOCK_REPROBE_BASE * (2 ** max(0, fails - 1)), _VSOCK_REPROBE_MAX)
+        if since < backoff:
+            return False
+
+    # Unknown, or backoff elapsed → probe
     return _vsock_probe(port)
 
 
