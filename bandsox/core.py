@@ -846,30 +846,31 @@ class BandSox:
         # agent probes vsock on its first read_file, so the listener must
         # already be accepting on <uds_path>_<port> by then.
         #
-        # Firecracker recreates <uds_path> itself during snapshot load;
-        # we only need to bind our Unix listener at <uds_path>_<port> and
-        # start accepting. See ``vm.setup_vsock_listener``.
+        # In detached mode the runner process handles the listener (it
+        # lives inside the mount namespace where the vsock UDS is visible).
+        # Only start one here for non-detached (inline) mode.
         vsock_socket_path = vm.vsock_socket_path
         if vsock_config and vsock_config.get("enabled") and vsock_socket_path:
-            try:
-                max_wait = 50
-                for _ in range(max_wait):
-                    if os.path.exists(vsock_socket_path):
-                        break
-                    time.sleep(0.1)
-                else:
-                    raise Exception(f"Vsock socket not created: {vsock_socket_path}")
+            vm.vsock_cid = vsock_config["cid"]
+            vm.vsock_port = vsock_config["port"]
+            if not detach:
+                try:
+                    max_wait = 50
+                    for _ in range(max_wait):
+                        if os.path.exists(vsock_socket_path):
+                            break
+                        time.sleep(0.1)
+                    else:
+                        raise Exception(f"Vsock socket not created: {vsock_socket_path}")
 
-                vm.vsock_cid = vsock_config["cid"]
-                vm.vsock_port = vsock_config["port"]
-                vm.setup_vsock_listener(vsock_config["port"])
-                logger.info(
-                    f"Vsock listener started for restored VM: "
-                    f"port={vsock_config['port']}, path={vsock_socket_path}"
-                )
-            except Exception as e:
-                logger.warning(f"Failed to setup vsock listener: {e}")
-                vm.vsock_enabled = False
+                    vm.setup_vsock_listener(vsock_config["port"])
+                    logger.info(
+                        f"Vsock listener started for restored VM: "
+                        f"port={vsock_config['port']}, path={vsock_socket_path}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to setup vsock listener: {e}")
+                    vm.vsock_enabled = False
 
         vm.resume()
 
