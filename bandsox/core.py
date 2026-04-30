@@ -8,7 +8,7 @@ import base64
 import threading
 import requests
 from pathlib import Path
-from .vm import MicroVM, DEFAULT_KERNEL_PATH
+from .vm import MicroVM, DEFAULT_KERNEL_PATH, kill_process_tree
 from .image import build_rootfs
 from .network import setup_tap_device, cleanup_tap_device
 import time
@@ -1750,16 +1750,7 @@ class ManagedMicroVM(MicroVM):
         pid = meta.get("pid")
 
         if pid:
-            import signal
-
-            try:
-                os.kill(pid, signal.SIGTERM)
-                time.sleep(0.5)
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            except PermissionError:
-                logger.error(f"Permission denied killing PID {pid}")
+            kill_process_tree(pid, timeout=1)
 
         super().stop()
         self.bandsox.update_vm_status(self.vm_id, "stopped")
