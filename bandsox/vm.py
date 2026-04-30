@@ -15,6 +15,90 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _child_pids(pid: int) -> list:
+    """Return direct child PIDs by scanning /proc."""
+    children = []
+    proc_dir = Path("/proc")
+    if not proc_dir.exists():
+        return children
+
+    for entry in proc_dir.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            status = entry / "status"
+            ppid = None
+            with status.open() as f:
+                for line in f:
+                    if line.startswith("PPid:"):
+                        ppid = int(line.split()[1])
+                        break
+            if ppid == pid:
+                children.append(int(entry.name))
+        except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
+            continue
+    return children
+
+
+def _descendant_pids(pid: int) -> list:
+    """Return all descendant PIDs, children before grandchildren."""
+    descendants = []
+    queue = list(_child_pids(pid))
+    while queue:
+        child = queue.pop(0)
+        descendants.append(child)
+        queue.extend(_child_pids(child))
+    return descendants
+
+
+def kill_process_tree(pid: int, timeout: float = 1.0):
+    """Terminate a process and any descendants, escalating to SIGKILL.
+
+    Firecracker may be started through wrappers such as sudo/ip-netns/nsenter.
+    Killing only the wrapper can leave the real firecracker process orphaned,
+    so stop paths should tear down the whole tree rooted at the recorded PID.
+    """
+    import signal
+
+    if not pid or pid == os.getpid():
+        return
+
+    targets = list(reversed(_descendant_pids(pid))) + [pid]
+    for target in targets:
+        try:
+            os.kill(target, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            logger.error(f"Permission denied sending SIGTERM to PID {target}")
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not any(_pid_exists(target) for target in targets):
+            return
+        time.sleep(0.05)
+
+    targets = list(reversed(_descendant_pids(pid))) + [pid]
+    for target in targets:
+        try:
+            os.kill(target, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            logger.error(f"Permission denied sending SIGKILL to PID {target}")
+
+
 FIRECRACKER_BIN = "/usr/bin/firecracker"
 DEFAULT_KERNEL_PATH = "/var/lib/bandsox/vmlinux"
 DEFAULT_BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off"
@@ -1191,11 +1275,12 @@ class MicroVM:
 
     def stop(self):
         if self.process:
-            self.process.terminate()
+            kill_process_tree(self.process.pid, timeout=1)
             try:
-                self.process.wait(timeout=1)
+                self.process.wait(timeout=0.2)
             except subprocess.TimeoutExpired:
-                self.process.kill()
+                pass
+            self.process = None
 
         self._cleanup_vsock_bridge()
         self._cleanup_vsock_isolation()
