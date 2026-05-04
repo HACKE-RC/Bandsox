@@ -419,6 +419,33 @@ def _get_running_vm_or_404(vm_id: str):
         raise HTTPException(status_code=404, detail="VM not found or not running")
     return vm
 
+
+def _get_vm_for_file_access_or_404(vm_id: str):
+    """Return a VM object suitable for file access, even if not running.
+
+    For stopped or unreachable guests we synthesize a lightweight MicroVM
+    wrapper carrying only ``rootfs_path`` so file reads can fall back to
+    debugfs against the ext4 image on disk.
+    """
+    vm_info = bs.get_vm_info(vm_id)
+    if not vm_info:
+        raise HTTPException(status_code=404, detail="VM not found")
+
+    vm = bs.get_vm(vm_id)
+    if vm:
+        return vm
+
+    from .vm import MicroVM
+
+    vm = MicroVM(vm_id, "")
+    vm.rootfs_path = vm_info.get("rootfs_path")
+    if not vm.rootfs_path:
+        vm.rootfs_path = str(bs.images_dir / f"{vm_id}.ext4")
+        logger.warning(
+            f"rootfs_path missing in metadata for {vm_id}, using default: {vm.rootfs_path}"
+        )
+    return vm
+
 @app.post("/api/vms/{vm_id}/exec", dependencies=[Depends(require_auth)])
 def exec_command(vm_id: str, req: ExecRequest):
     """Run a blocking shell command inside a VM and capture stdout/stderr."""
@@ -458,7 +485,7 @@ def exec_python(vm_id: str, req: ExecPythonRequest):
 @app.get("/api/vms/{vm_id}/read-file", dependencies=[Depends(require_auth)])
 def read_file(vm_id: str, path: str):
     """Read a UTF-8 file from inside a VM."""
-    vm = _get_running_vm_or_404(vm_id)
+    vm = _get_vm_for_file_access_or_404(vm_id)
     try:
         return {"path": path, "content": vm.get_file_contents(path)}
     except Exception as e:
@@ -539,26 +566,7 @@ def proxy_http(vm_id: str, req: HttpProxyRequest):
 @app.get("/api/vms/{vm_id}/files", dependencies=[Depends(require_auth)])
 def list_directory(vm_id: str, path: str = "/"):
     """List files in a directory inside the VM."""
-    # Get VM metadata first
-    vm_info = bs.get_vm_info(vm_id)
-    if not vm_info:
-        raise HTTPException(status_code=404, detail="VM not found")
-    
-    # Try to get running VM first
-    vm = bs.get_vm(vm_id)
-    
-    # If VM is not running, create a temporary instance just for file access
-    if not vm:
-        # Create a temporary MicroVM instance with just the rootfs_path
-        # This allows us to use debugfs even when VM is stopped
-        from .vm import MicroVM
-        vm = MicroVM(vm_id, "")  # Socket path not needed for debugfs
-        vm.rootfs_path = vm_info.get("rootfs_path")
-        vm.rootfs_path = vm_info.get("rootfs_path")
-        if not vm.rootfs_path:
-            # Fallback for older VMs or restored VMs without rootfs_path in metadata
-            vm.rootfs_path = str(bs.images_dir / f"{vm_id}.ext4")
-            logger.warning(f"rootfs_path missing in metadata for {vm_id}, using default: {vm.rootfs_path}")
+    vm = _get_vm_for_file_access_or_404(vm_id)
     
     try:
         files = vm.list_dir(path)
@@ -601,25 +609,8 @@ def list_directory(vm_id: str, path: str = "/"):
 def download_file(vm_id: str, path: str):
     """Download a file from the VM."""
     from fastapi.responses import StreamingResponse
-    
-    # Get VM metadata first
-    vm_info = bs.get_vm_info(vm_id)
-    if not vm_info:
-        raise HTTPException(status_code=404, detail="VM not found")
-    
-    # Try to get running VM first
-    vm = bs.get_vm(vm_id)
-    
-    # If VM is not running, create a temporary instance just for file access
-    if not vm:
-        from .vm import MicroVM
-        vm = MicroVM(vm_id, "")
-        vm.rootfs_path = vm_info.get("rootfs_path")
-        vm.rootfs_path = vm_info.get("rootfs_path")
-        if not vm.rootfs_path:
-            # Fallback for older VMs or restored VMs without rootfs_path in metadata
-            vm.rootfs_path = str(bs.images_dir / f"{vm_id}.ext4")
-            logger.warning(f"rootfs_path missing in metadata for {vm_id}, using default: {vm.rootfs_path}")
+
+    vm = _get_vm_for_file_access_or_404(vm_id)
     
     try:
         # Create a temporary file to store the downloaded content
