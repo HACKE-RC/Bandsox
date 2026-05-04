@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import bandsox.server as server
+import bandsox.vm as vm_module
 from bandsox.core import BandSox, RemoteBandSox
 
 
@@ -341,6 +342,28 @@ def test_read_write_file(client, fake_bs):
     assert fake_bs.vm.uploads[-1] == (b"hello", "/tmp/out.txt")
 
 
+def test_read_file_falls_back_for_stopped_vm(client, fake_bs, monkeypatch):
+    fake_bs.get_vm = lambda vm_id: None
+
+    def fake_get_file_contents(self, path):
+        assert self.rootfs_path == fake_bs.vm_info["rootfs_path"]
+        assert path == "/workspace/reports/report.md"
+        return "fallback text"
+
+    monkeypatch.setattr(vm_module.MicroVM, "get_file_contents", fake_get_file_contents, raising=False)
+
+    resp = client.get(
+        f"/api/vms/{fake_bs.vm.vm_id}/read-file",
+        params={"path": "/workspace/reports/report.md"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "path": "/workspace/reports/report.md",
+        "content": "fallback text",
+    }
+
+
 def test_file_info_upload_and_http_proxy(client, fake_bs):
     info_resp = client.get(
         f"/api/vms/{fake_bs.vm.vm_id}/file-info",
@@ -380,6 +403,25 @@ def test_download_file(client, fake_bs):
     assert resp.status_code == 200
     assert resp.content == fake_bs.vm.download_content
     assert "attachment" in resp.headers["content-disposition"]
+
+
+def test_download_file_falls_back_for_stopped_vm(client, fake_bs, monkeypatch):
+    fake_bs.get_vm = lambda vm_id: None
+
+    def fake_download_file(self, remote, local):
+        assert self.rootfs_path == fake_bs.vm_info["rootfs_path"]
+        assert remote == "/workspace/reports/report.md"
+        Path(local).write_bytes(b"fallback bytes")
+
+    monkeypatch.setattr(vm_module.MicroVM, "download_file", fake_download_file, raising=False)
+
+    resp = client.get(
+        f"/api/vms/{fake_bs.vm.vm_id}/download",
+        params={"path": "/workspace/reports/report.md"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.content == b"fallback bytes"
 
 
 def test_terminal_websocket(client, fake_bs):

@@ -8,6 +8,7 @@ import threading
 import json
 import socket
 import shlex
+import tempfile
 from pathlib import Path
 from .firecracker import FirecrackerClient
 from .network import setup_tap_device, cleanup_tap_device, derive_host_mac
@@ -1506,57 +1507,135 @@ class MicroVM:
         )
         return vm
 
+    def _has_debugfs_rootfs(self) -> bool:
+        rootfs_path = getattr(self, "rootfs_path", None)
+        return bool(rootfs_path and os.path.exists(rootfs_path))
+
+    def _debugfs_download_file(self, remote_path: str, local_path: str) -> None:
+        """Read a file directly from the ext4 rootfs with debugfs.
+
+        This path is used when the guest agent is unavailable but the rootfs
+        image is still accessible on the host. We pause/resume the VM
+        best-effort when we own a live Firecracker socket to reduce the risk
+        of reading a mutating filesystem.
+        """
+        if not self._has_debugfs_rootfs():
+            raise Exception("debugfs fallback unavailable: rootfs_path is missing")
+
+        rootfs_path = os.path.abspath(self.rootfs_path)
+        local_path = os.path.abspath(local_path)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+        remote_quoted = remote_path.replace('"', '\\"')
+        paused = False
+        try:
+            if getattr(self, "socket_path", None) and os.path.exists(self.socket_path):
+                try:
+                    self.pause()
+                    paused = True
+                except Exception as exc:
+                    logger.warning(f"Failed to pause VM before debugfs read: {exc}")
+
+            cmd = [
+                "debugfs",
+                "-R",
+                f"dump -p \"{remote_quoted}\" \"{local_path}\"",
+                rootfs_path,
+            ]
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=300,
+            )
+            if proc.returncode != 0:
+                stderr = (proc.stderr or "").strip()
+                stdout = (proc.stdout or "").strip()
+                detail = stderr or stdout or f"debugfs exited with {proc.returncode}"
+                raise Exception(detail)
+        finally:
+            if paused:
+                try:
+                    self.resume()
+                except Exception as exc:
+                    logger.warning(f"Failed to resume VM after debugfs read: {exc}")
+
     def get_file_contents(self, path: str) -> str:
         """Reads the contents of a file inside the VM."""
-        if not self.agent_ready:
-            raise Exception("Agent not ready")
+        agent_error = None
+        if self.agent_ready:
+            result = {
+                "mode": None,
+                "content": None,
+                "chunks": bytearray(),
+                "checksum": None,
+                "total_size": None,
+            }
 
-        result = {
-            "mode": None,
-            "content": None,
-            "chunks": bytearray(),
-            "checksum": None,
-            "total_size": None,
-        }
+            def on_file_content(c):
+                result["mode"] = "single"
+                result["content"] = c
 
-        def on_file_content(c):
-            result["mode"] = "single"
-            result["content"] = c
+            def on_file_chunk(data, offset, size):
+                if result["mode"] is None:
+                    result["mode"] = "chunked"
+                result["chunks"].extend(base64.b64decode(data))
 
-        def on_file_chunk(data, offset, size):
-            if result["mode"] is None:
-                result["mode"] = "chunked"
-            result["chunks"].extend(base64.b64decode(data))
+            def on_file_complete(total_size, checksum):
+                result["total_size"] = total_size
+                result["checksum"] = checksum
 
-        def on_file_complete(total_size, checksum):
-            result["total_size"] = total_size
-            result["checksum"] = checksum
+            import base64
+            import hashlib
 
-        import base64
-        import hashlib
+            try:
+                self.send_request(
+                    "read_file",
+                    {"path": path},
+                    on_file_content=on_file_content,
+                    on_file_chunk=on_file_chunk,
+                    on_file_complete=on_file_complete,
+                )
 
-        self.send_request(
-            "read_file",
-            {"path": path},
-            on_file_content=on_file_content,
-            on_file_chunk=on_file_chunk,
-            on_file_complete=on_file_complete,
-        )
+                if result["mode"] == "single" and result["content"] is not None:
+                    return base64.b64decode(result["content"]).decode("utf-8")
 
-        if result["mode"] == "single" and result["content"] is not None:
-            return base64.b64decode(result["content"]).decode("utf-8")
+                if result["mode"] == "chunked":
+                    if result["checksum"]:
+                        md5 = hashlib.md5(result["chunks"]).hexdigest()
+                        if md5 != result["checksum"]:
+                            raise Exception(
+                                f"Checksum mismatch: expected {result['checksum']}, got {md5}"
+                            )
+                    return result["chunks"].decode("utf-8")
 
-        if result["mode"] == "chunked":
-            if result["checksum"]:
-                md5 = hashlib.md5(result["chunks"]).hexdigest()
-                if md5 != result["checksum"]:
-                    raise Exception(
-                        f"Checksum mismatch: expected {result['checksum']}, got {md5}"
-                    )
-            return result["chunks"].decode("utf-8")
+                raise Exception(f"Failed to read {path} via agent")
+            except Exception as exc:
+                agent_error = exc
+                logger.warning(
+                    f"Agent read failed for {path}; trying debugfs fallback: {exc}"
+                )
 
+        if self._has_debugfs_rootfs():
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                temp_path = tmp.name
+            try:
+                self._debugfs_download_file(path, temp_path)
+                with open(temp_path, "r", encoding="utf-8") as f:
+                    return f.read()
+            finally:
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
+
+        if agent_error is not None:
+            raise Exception(
+                f"Failed to read {path} via agent and debugfs fallback unavailable: {agent_error}"
+            )
         raise Exception(
-            f"Failed to read {path} via agent. You may need to use a different tool to read this file"
+            f"Failed to read {path}: agent unavailable and debugfs fallback unavailable"
         )
 
     def list_dir(self, path: str) -> list:
@@ -1588,6 +1667,9 @@ class MicroVM:
             timeout: Timeout in seconds (default 300 for large files over serial)
         """
         if not self.agent_ready:
+            if self._has_debugfs_rootfs():
+                self._debugfs_download_file(remote_path, local_path)
+                return
             raise Exception("Agent not ready")
 
         import base64
@@ -1643,6 +1725,7 @@ class MicroVM:
                 result["vsock_success"] = True
                 result["mode"] = "vsock"
 
+        agent_error = None
         try:
             self._send_request_with_id(
                 cmd_id,
@@ -1678,6 +1761,8 @@ class MicroVM:
                 return
 
             raise Exception(f"Failed to download {remote_path} via agent")
+        except Exception as exc:
+            agent_error = exc
 
         finally:
             if result.get("file_handle"):
@@ -1686,6 +1771,17 @@ class MicroVM:
             # a reference to local_path beyond this call.
             if self.vsock_enabled and self.vsock_listener is not None:
                 self.vsock_listener.unregister_pending_upload(cmd_id)
+
+        if self._has_debugfs_rootfs():
+            logger.warning(
+                f"Agent download path failed for {remote_path}; trying debugfs fallback: {agent_error}"
+            )
+            self._debugfs_download_file(remote_path, local_path)
+            return
+
+        raise Exception(
+            f"Failed to download {remote_path} via agent and debugfs fallback unavailable: {agent_error}"
+        )
 
     def upload_file(self, local_path: str, remote_path: str, timeout: int = None):
         """Uploads a file from local filesystem to the VM.
