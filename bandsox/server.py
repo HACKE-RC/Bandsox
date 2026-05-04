@@ -379,6 +379,7 @@ class WriteFileRequest(BaseModel):
     path: str
     content: str
     encoding: str = "utf-8"
+    append: bool = False
 
 class HttpProxyRequest(BaseModel):
     port: int
@@ -505,10 +506,31 @@ def write_file(vm_id: str, req: WriteFileRequest):
             tmp.write(raw)
             tmp_path = tmp.name
         try:
-            vm.upload_file(tmp_path, req.path)
+            vm.upload_file(tmp_path, req.path, append=req.append)
         finally:
             os.unlink(tmp_path)
-        return {"status": "written", "path": req.path}
+        return {"status": "appended" if req.append else "written", "path": req.path}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/vms/{vm_id}/append-file", dependencies=[Depends(require_auth)])
+def append_file(vm_id: str, req: WriteFileRequest):
+    """Append string content to a file inside a VM."""
+    vm = _get_running_vm_or_404(vm_id)
+    try:
+        raw = (
+            base64.b64decode(req.content)
+            if req.encoding == "base64"
+            else req.content.encode("utf-8")
+        )
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(raw)
+            tmp_path = tmp.name
+        try:
+            vm.upload_file(tmp_path, req.path, append=True)
+        finally:
+            os.unlink(tmp_path)
+        return {"status": "appended", "path": req.path}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

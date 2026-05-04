@@ -1618,6 +1618,47 @@ class RemoteMicroVM:
                 timeout=request_timeout,
             )
 
+    def append_file(self, local_path: str, remote_path: str, timeout: int = None):
+        """Append the contents of a local file onto a file in the VM.
+
+        Goes through the agent's chunked write_file path with append=True so
+        large appends complete in a single SDK call instead of dozens of
+        exec_command round-trips on the host side.
+        """
+        if not os.path.exists(local_path):
+            raise FileNotFoundError(f"Local file not found: {local_path}")
+        import base64 as _b64
+
+        with open(local_path, "rb") as f:
+            encoded = _b64.b64encode(f.read()).decode("ascii")
+        request_timeout = timeout or self.bandsox.timeout
+        self.bandsox._request(
+            "POST",
+            f"/api/vms/{self.vm_id}/append-file",
+            json={
+                "path": remote_path,
+                "content": encoded,
+                "encoding": "base64",
+                "append": True,
+            },
+            timeout=request_timeout,
+        )
+
+    def append_text(self, remote_path: str, content: str, timeout: int = None):
+        """Append a string to a file in the VM."""
+        request_timeout = timeout or self.bandsox.timeout
+        self.bandsox._request(
+            "POST",
+            f"/api/vms/{self.vm_id}/append-file",
+            json={
+                "path": remote_path,
+                "content": content,
+                "encoding": "utf-8",
+                "append": True,
+            },
+            timeout=request_timeout,
+        )
+
     def upload_folder(
         self,
         local_path: str,

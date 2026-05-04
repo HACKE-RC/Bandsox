@@ -69,8 +69,8 @@ class DummyVM:
     def get_file_contents(self, path):
         return "file text"
 
-    def upload_file(self, local, remote):
-        self.uploads.append((Path(local).read_bytes(), remote))
+    def upload_file(self, local, remote, append=False):
+        self.uploads.append((Path(local).read_bytes(), remote, append))
 
     def get_file_info(self, path):
         return {"size": 9}
@@ -339,7 +339,7 @@ def test_read_write_file(client, fake_bs):
         json={"path": "/tmp/out.txt", "content": "hello"},
     )
     assert write_resp.status_code == 200
-    assert fake_bs.vm.uploads[-1] == (b"hello", "/tmp/out.txt")
+    assert fake_bs.vm.uploads[-1] == (b"hello", "/tmp/out.txt", False)
 
 
 def test_read_file_falls_back_for_stopped_vm(client, fake_bs, monkeypatch):
@@ -378,7 +378,7 @@ def test_file_info_upload_and_http_proxy(client, fake_bs):
         files={"file": ("upload.txt", b"uploaded")},
     )
     assert upload_resp.status_code == 200
-    assert fake_bs.vm.uploads[-1] == (b"uploaded", "/tmp/upload.txt")
+    assert fake_bs.vm.uploads[-1] == (b"uploaded", "/tmp/upload.txt", False)
 
     http_resp = client.post(
         f"/api/vms/{fake_bs.vm.vm_id}/http",
@@ -422,6 +422,51 @@ def test_download_file_falls_back_for_stopped_vm(client, fake_bs, monkeypatch):
 
     assert resp.status_code == 200
     assert resp.content == b"fallback bytes"
+
+
+def test_write_file_with_append_flag(client, fake_bs):
+    """write-file should forward the append flag to vm.upload_file."""
+    resp = client.post(
+        f"/api/vms/{fake_bs.vm.vm_id}/write-file",
+        json={"path": "/tmp/log.txt", "content": "line\n", "append": True},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "appended", "path": "/tmp/log.txt"}
+    assert fake_bs.vm.uploads[-1] == (b"line\n", "/tmp/log.txt", True)
+
+
+def test_append_file_endpoint_utf8(client, fake_bs):
+    resp = client.post(
+        f"/api/vms/{fake_bs.vm.vm_id}/append-file",
+        json={"path": "/tmp/log.txt", "content": "more\n"},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "appended", "path": "/tmp/log.txt"}
+    assert fake_bs.vm.uploads[-1] == (b"more\n", "/tmp/log.txt", True)
+
+
+def test_append_file_endpoint_base64(client, fake_bs):
+    import base64 as _b64
+
+    payload = b"\x00binary\xff"
+    resp = client.post(
+        f"/api/vms/{fake_bs.vm.vm_id}/append-file",
+        json={
+            "path": "/tmp/blob.bin",
+            "content": _b64.b64encode(payload).decode("ascii"),
+            "encoding": "base64",
+        },
+    )
+    assert resp.status_code == 200
+    assert fake_bs.vm.uploads[-1] == (payload, "/tmp/blob.bin", True)
+
+
+def test_append_file_endpoint_vm_not_found(client):
+    resp = client.post(
+        "/api/vms/unknown/append-file",
+        json={"path": "/tmp/x", "content": "x"},
+    )
+    assert resp.status_code == 404
 
 
 def test_terminal_websocket(client, fake_bs):

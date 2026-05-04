@@ -1783,7 +1783,13 @@ class MicroVM:
             f"Failed to download {remote_path} via agent and debugfs fallback unavailable: {agent_error}"
         )
 
-    def upload_file(self, local_path: str, remote_path: str, timeout: int = None):
+    def upload_file(
+        self,
+        local_path: str,
+        remote_path: str,
+        timeout: int = None,
+        append: bool = False,
+    ):
         """Uploads a file from local filesystem to the VM.
 
         Uses chunked uploads for large files to avoid serial buffer overflows.
@@ -1792,6 +1798,8 @@ class MicroVM:
             local_path: Path to local file
             remote_path: Path in VM to write to
             timeout: Optional timeout in seconds (default: scales with file size)
+            append: If True, append to remote_path instead of overwriting it.
+                Subsequent chunks always append regardless of this flag.
         """
         if not os.path.exists(local_path):
             raise FileNotFoundError(f"Local file not found: {local_path}")
@@ -1814,38 +1822,37 @@ class MicroVM:
         # So 2KB raw = ~2.7KB base64 = safe for serial
         CHUNK_SIZE = 2 * 1024  # 2KB chunks
 
-        if file_size <= CHUNK_SIZE:
-            # Small file - send in one request
-            import base64
+        import base64
 
+        if file_size <= CHUNK_SIZE:
             encoded = base64.b64encode(content).decode("utf-8")
             self.send_request(
-                "write_file", {"path": remote_path, "content": encoded}, timeout=timeout
-            )
-        else:
-            # Large file - send in chunks with append mode
-            import base64
-
-            # First chunk creates the file
-            first_chunk = content[:CHUNK_SIZE]
-            encoded = base64.b64encode(first_chunk).decode("utf-8")
-            self.send_request(
                 "write_file",
-                {"path": remote_path, "content": encoded, "append": False},
+                {"path": remote_path, "content": encoded, "append": append},
                 timeout=timeout,
             )
+            return
 
-            # Remaining chunks append
-            offset = CHUNK_SIZE
-            while offset < file_size:
-                chunk = content[offset : offset + CHUNK_SIZE]
-                encoded = base64.b64encode(chunk).decode("utf-8")
-                self.send_request(
-                    "write_file",
-                    {"path": remote_path, "content": encoded, "append": True},
-                    timeout=timeout,
-                )
-                offset += CHUNK_SIZE
+        # Large file - send in chunks. The first chunk honors `append`; the
+        # rest must always append so the file isn't truncated mid-upload.
+        first_chunk = content[:CHUNK_SIZE]
+        encoded = base64.b64encode(first_chunk).decode("utf-8")
+        self.send_request(
+            "write_file",
+            {"path": remote_path, "content": encoded, "append": append},
+            timeout=timeout,
+        )
+
+        offset = CHUNK_SIZE
+        while offset < file_size:
+            chunk = content[offset : offset + CHUNK_SIZE]
+            encoded = base64.b64encode(chunk).decode("utf-8")
+            self.send_request(
+                "write_file",
+                {"path": remote_path, "content": encoded, "append": True},
+                timeout=timeout,
+            )
+            offset += CHUNK_SIZE
 
     def upload_folder(
         self,
