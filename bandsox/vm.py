@@ -1549,9 +1549,18 @@ class MicroVM:
                 text=True,
                 timeout=300,
             )
-            if proc.returncode != 0:
-                stderr = (proc.stderr or "").strip()
-                stdout = (proc.stdout or "").strip()
+            stderr = (proc.stderr or "").strip()
+            stdout = (proc.stdout or "").strip()
+            combined = f"{stderr}\n{stdout}".lower()
+            if proc.returncode != 0 or any(
+                marker in combined
+                for marker in (
+                    "file not found",
+                    "not found by ext2_lookup",
+                    "no such file",
+                    "does not exist",
+                )
+            ):
                 detail = stderr or stdout or f"debugfs exited with {proc.returncode}"
                 raise Exception(detail)
         finally:
@@ -1561,8 +1570,25 @@ class MicroVM:
                 except Exception as exc:
                     logger.warning(f"Failed to resume VM after debugfs read: {exc}")
 
-    def get_file_contents(self, path: str) -> str:
-        """Reads the contents of a file inside the VM."""
+    def get_file_contents(
+        self,
+        path: str,
+        offset: int = 0,
+        limit: int = 0,
+        show_line_numbers: bool = False,
+        show_header: bool = True,
+        show_footer: bool = True,
+    ) -> str:
+        """Reads the contents of a file inside the VM.
+
+        Args:
+            path: File path in VM
+            offset: Lines to skip from beginning (0 = start at line 1)
+            limit: Max lines to return (0 = unlimited)
+            show_line_numbers: Prefix each line with "N\\t"
+            show_header: If offset>0, show "... skipped N lines" header
+            show_footer: If limit>0 and more lines remain, show "... N lines left" footer
+        """
         agent_error = None
         if self.agent_ready:
             result = {
@@ -1598,19 +1624,24 @@ class MicroVM:
                     on_file_complete=on_file_complete,
                 )
 
+                raw_bytes = None
                 if result["mode"] == "single" and result["content"] is not None:
-                    return base64.b64decode(result["content"]).decode("utf-8")
-
-                if result["mode"] == "chunked":
+                    raw_bytes = base64.b64decode(result["content"])
+                elif result["mode"] == "chunked":
                     if result["checksum"]:
                         md5 = hashlib.md5(result["chunks"]).hexdigest()
                         if md5 != result["checksum"]:
                             raise Exception(
                                 f"Checksum mismatch: expected {result['checksum']}, got {md5}"
                             )
-                    return result["chunks"].decode("utf-8")
+                    raw_bytes = bytes(result["chunks"])
 
-                raise Exception(f"Failed to read {path} via agent")
+                if raw_bytes is None:
+                    raise Exception(f"Failed to read {path} via agent")
+
+                return self._format_file_content(
+                    raw_bytes, offset, limit, show_line_numbers, show_header, show_footer
+                )
             except Exception as exc:
                 agent_error = exc
                 logger.warning(
@@ -1621,9 +1652,17 @@ class MicroVM:
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
                 temp_path = tmp.name
             try:
-                self._debugfs_download_file(path, temp_path)
-                with open(temp_path, "r", encoding="utf-8") as f:
-                    return f.read()
+                try:
+                    self._debugfs_download_file(path, temp_path)
+                except Exception as dfs_err:
+                    if agent_error is not None:
+                        raise agent_error
+                    raise dfs_err
+                with open(temp_path, "rb") as f:
+                    raw_bytes = f.read()
+                return self._format_file_content(
+                    raw_bytes, offset, limit, show_line_numbers, show_header, show_footer
+                )
             finally:
                 try:
                     os.unlink(temp_path)
@@ -1631,12 +1670,51 @@ class MicroVM:
                     pass
 
         if agent_error is not None:
-            raise Exception(
-                f"Failed to read {path} via agent and debugfs fallback unavailable: {agent_error}"
-            )
+            raise agent_error
         raise Exception(
             f"Failed to read {path}: agent unavailable and debugfs fallback unavailable"
         )
+
+    @staticmethod
+    def _format_file_content(
+        raw_bytes: bytes,
+        offset: int = 0,
+        limit: int = 0,
+        show_line_numbers: bool = False,
+        show_header: bool = True,
+        show_footer: bool = True,
+    ) -> str:
+        """Apply offset, limit, line numbers, header, and footer to raw file content."""
+        text = raw_bytes.decode("utf-8", errors="replace")
+        lines = text.split("\n")
+
+        total_lines = len(lines)
+        start = min(offset, total_lines)
+        end = total_lines
+
+        if limit > 0:
+            end = min(start + limit, total_lines)
+
+        selected = lines[start:end]
+        result_lines = []
+
+        # Header: skipped lines indicator
+        if show_header and start > 0:
+            result_lines.append(f"... skipped {start} lines")
+
+        # Line numbers
+        if show_line_numbers:
+            for i, line in enumerate(selected, start=start + 1):
+                result_lines.append(f"{i}\t{line}")
+        else:
+            result_lines.extend(selected)
+
+        # Footer: remaining lines indicator
+        if show_footer and end < total_lines:
+            remaining = total_lines - end
+            result_lines.append(f"... {remaining} lines left")
+
+        return "\n".join(result_lines)
 
     def list_dir(self, path: str) -> list:
         """Lists directory contents."""
@@ -1727,10 +1805,13 @@ class MicroVM:
 
         agent_error = None
         try:
+            payload = {"path": remote_path, "use_vsock": bool(self.vsock_enabled)}
+            if self.vsock_port:
+                payload["vsock_port"] = self.vsock_port
             self._send_request_with_id(
                 cmd_id,
                 "read_file",
-                {"path": remote_path},
+                payload,
                 on_file_content=on_file_content,
                 on_file_chunk=on_file_chunk,
                 on_file_complete=on_file_complete,
@@ -1792,14 +1873,14 @@ class MicroVM:
     ):
         """Uploads a file from local filesystem to the VM.
 
-        Uses chunked uploads for large files to avoid serial buffer overflows.
+        Uses the vsock fast path when available (guest downloads directly from
+        listener), falling back to chunked serial uploads.
 
         Args:
             local_path: Path to local file
             remote_path: Path in VM to write to
             timeout: Optional timeout in seconds (default: scales with file size)
             append: If True, append to remote_path instead of overwriting it.
-                Subsequent chunks always append regardless of this flag.
         """
         if not os.path.exists(local_path):
             raise FileNotFoundError(f"Local file not found: {local_path}")
@@ -1812,17 +1893,39 @@ class MicroVM:
 
         file_size = len(content)
 
-        # Calculate timeout based on file size: minimum 60s, +30s per MB
+        # Calculate timeout based on file size: minimum 30s, +10s per MB
         if timeout is None:
             file_size_mb = file_size / (1024 * 1024)
-            timeout = max(60, int(60 + file_size_mb * 30))
+            timeout = max(30, int(30 + file_size_mb * 10))
 
-        # For files larger than 2KB, use chunked uploads to avoid serial buffer overflows
-        # Serial console typically has ~4KB buffer, base64 encoding adds 33% overhead
-        # So 2KB raw = ~2.7KB base64 = safe for serial
-        CHUNK_SIZE = 2 * 1024  # 2KB chunks
+        # Vsock fast path: register content for download, tell guest to fetch it.
+        # Only for non-append full writes; append requires merging on guest side.
+        if (
+            not append
+            and getattr(self, "vsock_enabled", False)
+            and getattr(self, "vsock_listener", None) is not None
+            and file_size > 512  # Small files are faster via serial
+        ):
+            cmd_id = str(uuid.uuid4())
+            self.vsock_listener.register_pending_download(cmd_id, content)
+            try:
+                self._send_request_with_id(
+                    cmd_id,
+                    "write_file_vsock",
+                    {"path": remote_path, "vsock_port": self.vsock_port},
+                    timeout=timeout,
+                )
+                return
+            except Exception:
+                logger.debug(
+                    f"Vsock write_file failed, falling back to serial for {remote_path}"
+                )
+            finally:
+                self.vsock_listener.unregister_pending_download(cmd_id)
 
         import base64
+
+        CHUNK_SIZE = 2 * 1024  # 2KB serial chunks
 
         if file_size <= CHUNK_SIZE:
             encoded = base64.b64encode(content).decode("utf-8")
@@ -1833,8 +1936,6 @@ class MicroVM:
             )
             return
 
-        # Large file - send in chunks. The first chunk honors `append`; the
-        # rest must always append so the file isn't truncated mid-upload.
         first_chunk = content[:CHUNK_SIZE]
         encoded = base64.b64encode(first_chunk).decode("utf-8")
         self.send_request(

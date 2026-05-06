@@ -1,5 +1,5 @@
 # BandSox
-<img width="100" height="200" alt="image" src="https://github.com/user-attachments/assets/d80944af-45ac-407d-b2f2-70c95d68be97"/>
+<img width="200" alt="BandSox logo" src="https://github.com/user-attachments/assets/d80944af-45ac-407d-b2f2-70c95d68be97"/>
 
 Python library and CLI for managing Firecracker microVMs. Create, snapshot, and restore sandboxes from Docker images. Runs untrusted code or isolates workloads.
 

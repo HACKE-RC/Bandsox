@@ -513,7 +513,7 @@ def handle_write_file(cmd_id, path, content, mode="wb", append=False):
         send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
 
 
-def handle_vsock_upload_to_host(cmd_id, path: str):
+def handle_vsock_upload_to_host(cmd_id, path: str, vsock_port: int = None):
     """Uploads a file from guest to host via vsock (guest-initiated).
 
     Triggered by a read_file request from the host. The guest opens a new
@@ -523,7 +523,8 @@ def handle_vsock_upload_to_host(cmd_id, path: str):
 
     Falls back to serial (handle_read_file) on any vsock failure.
     """
-    vsock_port = int(os.environ.get("BANDSOX_VSOCK_PORT", "9000"))
+    if vsock_port is None:
+        vsock_port = int(os.environ.get("BANDSOX_VSOCK_PORT", "9000"))
     sock = None
 
     try:
@@ -741,14 +742,17 @@ def main():
 
                 elif req_type == "read_file":
                     path = req.get("path")
-                    vsock_port = int(os.environ.get("BANDSOX_VSOCK_PORT", "9000"))
+                    vsock_port = int(req.get("vsock_port") or os.environ.get("BANDSOX_VSOCK_PORT", "9000"))
+                    use_vsock = bool(req.get("use_vsock", False))
 
-                    # Fast path: if we've already determined vsock is broken,
-                    # go straight to serial without probing again.
-                    if _vsock_can_use(vsock_port):
+                    # Only use the guest->host vsock upload fast path for
+                    # download_file(), where the host pre-registers a destination
+                    # for this cmd_id. Plain read_file callers need serial
+                    # file_content/file_chunk events back on the request stream.
+                    if use_vsock and _vsock_can_use(vsock_port):
                         t = threading.Thread(
                             target=handle_vsock_upload_to_host,
-                            args=(cmd_id, path),
+                            args=(cmd_id, path, vsock_port),
                             daemon=True,
                         )
                         t.start()
