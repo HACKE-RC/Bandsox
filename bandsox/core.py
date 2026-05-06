@@ -280,7 +280,7 @@ class BandSox:
                 f"VM '{vm_id}' requires vsock support. "
                 "This VM was created before vsock was enabled. "
                 "Please recreate the VM using the create command. "
-                "See VSOCK_MIGRATION.md for detailed migration instructions."
+                "See docs/VSOCK_MIGRATION.md for detailed migration instructions."
             )
         return meta
 

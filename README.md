@@ -6,7 +6,7 @@ Python library and CLI for managing Firecracker microVMs. Create, snapshot, and 
 ## Features
 
 - Millisecond boot times via Firecracker
-- Create VMs from Docker images (requires Python 3 in the image)
+- Create VMs from Docker images (guest agent is a static Go binary; Python is not required in the image)
 - Pause, resume, and snapshot VMs for instant restore
 - Web dashboard with login, API key management, and terminal sessions
 - CLI for all operations, including auth management
@@ -195,7 +195,7 @@ zcat /proc/config.gz | grep VSOCK
 
 ### Upgrading from older versions
 
-VMs created before vsock support need to be recreated. See [`VSOCK_MIGRATION.md`](VSOCK_MIGRATION.md) for details.
+VMs created before vsock support need to be recreated. See [`docs/VSOCK_MIGRATION.md`](docs/VSOCK_MIGRATION.md) for details.
 
 ## Prerequisites
 
@@ -252,32 +252,6 @@ bandsox init --rootfs-url ./bandsox-base.ext4
     Default URLs are provided for kernel and CNI. For the rootfs, build one locally (instructions below) and point `--rootfs-url` to a local path or `file://` URL. Use `--skip-*` flags to omit specific downloads or `--force` to re-download.
 
 
-## Web UI screenshots
-#### Home page
-<img width="1564" height="931" alt="image" src="https://github.com/user-attachments/assets/e3bba19c-dba5-4f5d-a5ef-e38df43bbee8" />
-
----
-
-#### Details page
-<img width="1446" height="852" alt="image" src="https://github.com/user-attachments/assets/135512d7-2212-49aa-9454-fa2ae2e918fc" />
-
-##### File browser
-###### Browse files inside the VM from the details page.
-<img width="1618" height="852" alt="image" src="https://github.com/user-attachments/assets/13191fa2-5b2c-4935-a448-e5d8810a9a1e" />
-
-##### Markdown viewer
-###### Click the view button next to any `.md` file to open it in the viewer.
-<img width="1261" height="369" alt="image" src="https://github.com/user-attachments/assets/54ca063a-9885-497c-b2be-83ef7180da52" />
-
-
----
-
-#### Terminal
-###### Open a terminal from the dashboard by clicking the terminal button.
-<img width="613" height="219" alt="image" src="https://github.com/user-attachments/assets/2c0148bf-9820-431f-87c0-620c45d4bd03" />
-
-
-
 ## Architecture
 
 BandSox has four main modules:
@@ -313,8 +287,8 @@ Default: `/var/lib/bandsox` (override with `BANDSOX_STORAGE` env var)
 
 ## Docs and API reference
 
-- Full library, CLI, and HTTP endpoint reference: [`API_DOCUMENTATION.md`](API_DOCUMENTATION.md)
-- Vsock migration guide: [`VSOCK_MIGRATION.md`](VSOCK_MIGRATION.md)
+- Full library, CLI, and HTTP endpoint reference: [`docs/API.md`](docs/API.md)
+- Vsock migration guide: [`docs/VSOCK_MIGRATION.md`](docs/VSOCK_MIGRATION.md)
 - Vsock restoration fix: [`VSOCK_RESTORATION_FIX.md`](VSOCK_RESTORATION_FIX.md)
 - REST base path: `http://<host>:<port>/api` (all endpoints require auth -- see API docs)
 

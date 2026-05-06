@@ -161,10 +161,11 @@ else:
 
 ### File operations
 
-File transfers go through the guest agent.
+File transfers go through the guest agent (static Go binary by default) with a
+vsock fast path and automatic serial fallback.
 
 ```python
-# Upload a file (timeout scales with file size: 60s minimum + 30s per MB)
+# Upload a file (timeout scales with file size: min 30s + 10s per MiB)
 vm.upload_file("./local_script.py", "/app/script.py")
 
 # Download a file
@@ -172,7 +173,22 @@ vm.download_file("/app/result.txt", "./result.txt")
 
 # Read file contents as a string
 content = vm.get_file_contents("/etc/hostname")
+
+# Read a slice with formatting applied on the host
+partial = vm.get_file_contents(
+    "/var/log/app.log",
+    offset=200,
+    limit=50,
+    show_line_numbers=True,
+    show_header=True,
+    show_footer=True,
+)
 ```
+
+Performance note (single VM on typical laptop/desktop): in our benchmark
+(`verification/benchmark_go_agent.py`) we see ~2.3ms mean latency for `exec_command("true")`,
+~190 MiB/s upload for an 8 MiB file, and up to ~1 GiB/s download for an 8 MiB file.
+(Exact numbers vary by host I/O + CPU.)
 
 ### Snapshots
 
@@ -348,9 +364,9 @@ All pages redirect to `/login` if not authenticated.
 | `exec_python(code, cwd, packages, ...)` | Run Python code with isolated env using `uv`. |
 | `exec_python_capture(code, packages, ...)` | Run Python and return output dict. |
 | `start_session(cmd)` | Run a command (background). |
-| `upload_file(local, remote, timeout=None)` | Upload a file. Timeout scales with file size (60s + 30s/MB). |
-| `download_file(remote, local)` | Download a file (pauses VM). |
-| `get_file_contents(remote)` | Read file content (pauses VM). |
+| `upload_file(local, remote, timeout=None, append=False)` | Upload a file. Prefers vsock (fast), falls back to chunked serial. Timeout scales with file size (min 30s + 10s/MiB). |
+| `download_file(remote, local)` | Download a file. Prefers vsock (fast), falls back to chunked serial. |
+| `get_file_contents(remote, offset=0, limit=0, show_line_numbers=False, show_header=True, show_footer=True)` | Read file content with optional host-side formatting. |
 
 ## Caveats and troubleshooting
 
@@ -362,9 +378,15 @@ Networking (`enable_networking=True`) requires sudo.
 - Run the script as root or have passwordless sudo for networking commands.
 - If you don't have sudo access, create VMs with `enable_networking=False`.
 
-### 2. File operations pause the VM
+### 2. File operations and VM pausing
 
-`upload_file` and `download_file` use `debugfs` on the ext4 filesystem, so the VM is paused during transfer to avoid corruption. Network connections may time out and real-time processes will be interrupted. For small files, `cat` via `exec_command` avoids the pause but is less reliable for binary data.
+By default, file operations use the guest agent (vsock/serial) and do **not**
+pause the VM.
+
+BandSox has an emergency fallback path using `debugfs` (direct ext4 reads) when
+`agent_ready` is false but the host still has access to the rootfs image.
+That fallback may pause/resume the VM to reduce the risk of reading a mutating
+filesystem.
 
 ### 3. Kernel dependencies
 

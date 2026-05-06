@@ -122,12 +122,14 @@ The new implementation follows Firecracker's documented vsock model where:
 **Request Types:**
 - `ping` - Health check
 - `upload` - Guest sends file to host (guest-initiated upload)
-- `download` - Guest requests file from host
+- `download` - Guest requests file from host (JSON/base64 chunks)
+- `download_raw` - Guest requests file from host (one JSON header + raw bytes)
 
 **Response Types:**
 - `pong` - Response to ping
 - `ready` - Host ready to receive/send data
-- `success` - Operation completed
+- `chunk` - Chunk of data (for `download`)
+- `complete` - Transfer completed (for `download`)
 - `error` - Operation failed with error message
 
 ### Connection Flow
@@ -197,6 +199,17 @@ The new implementation follows Firecracker's documented vsock model where:
 3. Consider chunking large transfers
 
 ## Performance Expectations
+
+Vsock performance depends heavily on host disk + CPU. As a ballpark from our
+Go-agent benchmark (`verification/benchmark_go_agent.py`) on a typical dev box:
+
+- `exec_command("true")`: ~2.3ms mean, ~2.6–3.1ms p95
+- File transfers (8 MiB payload):
+  - upload: ~190 MiB/s
+  - download: up to ~1 GiB/s when using `download_raw`
+
+These are end-to-end times including hashing + file I/O; expect lower numbers
+on slower disks.
 
 ### Throughput
 
