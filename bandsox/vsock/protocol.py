@@ -28,7 +28,8 @@ class RequestType(str, Enum):
 
     # File transfer requests
     UPLOAD = "upload"  # Guest wants to send file TO host
-    DOWNLOAD = "download"  # Guest wants to receive file FROM host
+    DOWNLOAD = "download"  # Guest wants to receive file FROM host as JSON/base64 chunks
+    DOWNLOAD_RAW = "download_raw"  # Guest wants raw bytes after a JSON header
 
     # Utility requests
     PING = "ping"  # Connection health check
@@ -54,7 +55,7 @@ class UploadRequest:
 
     path: str  # Destination path on host
     size: int  # File size in bytes
-    checksum: str  # MD5 checksum for verification
+    checksum: str  # Optional MD5 checksum for verification
     cmd_id: str  # Command ID for correlation
 
     def to_dict(self) -> Dict[str, Any]:
@@ -71,7 +72,7 @@ class UploadRequest:
         return cls(
             path=data["path"],
             size=data["size"],
-            checksum=data["checksum"],
+            checksum=data.get("checksum", ""),
             cmd_id=data["cmd_id"],
         )
 
@@ -86,6 +87,7 @@ class DownloadRequest:
 
     path: str  # Source path on host
     cmd_id: str  # Command ID for correlation
+    raw: bool = False  # Stream raw bytes after JSON header instead of chunk JSON
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -193,8 +195,10 @@ def parse_request(data: Dict[str, Any]) -> Optional[Any]:
 
     if req_type == RequestType.UPLOAD.value:
         return UploadRequest.from_dict(data)
-    elif req_type == RequestType.DOWNLOAD.value:
-        return DownloadRequest.from_dict(data)
+    elif req_type in (RequestType.DOWNLOAD.value, RequestType.DOWNLOAD_RAW.value):
+        req = DownloadRequest.from_dict(data)
+        req.raw = req_type == RequestType.DOWNLOAD_RAW.value
+        return req
     elif req_type == RequestType.PING.value:
         return {"type": "ping", "cmd_id": data.get("cmd_id", "ping")}
 

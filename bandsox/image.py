@@ -7,11 +7,18 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-def run_command(cmd, check=True, capture_output=True):
+def run_command(cmd, check=True, capture_output=True, cwd=None, env=None):
     """Helper to run shell commands."""
     logger.debug(f"Running command: {' '.join(cmd)}")
     try:
-        result = subprocess.run(cmd, check=check, capture_output=capture_output, text=True)
+        result = subprocess.run(
+            cmd,
+            check=check,
+            capture_output=capture_output,
+            text=True,
+            cwd=cwd,
+            env=env,
+        )
         return result
     except subprocess.CalledProcessError as e:
         logger.error(f"Command failed: {e.cmd}")
@@ -19,8 +26,33 @@ def run_command(cmd, check=True, capture_output=True):
         logger.error(f"Stderr: {e.stderr}")
         raise e
 
-    logger.info(f"Rootfs created at {output_path}")
-    return str(output_path)
+
+def ensure_go_agent_binary() -> Path:
+    """Return the Go guest-agent binary, building it when needed."""
+    agent_dir = Path(__file__).parent / "agent"
+    agent_src = agent_dir / "main.go"
+    agent_bin = agent_dir / "agent"
+
+    if agent_bin.exists() and agent_bin.stat().st_mtime >= agent_src.stat().st_mtime:
+        return agent_bin
+
+    go = shutil.which("go")
+    if not go:
+        raise FileNotFoundError(
+            "Go agent binary is missing and `go` is not installed. "
+            f"Install Go or build {agent_bin} before creating rootfs images."
+        )
+
+    logger.info("Building BandSox Go guest agent")
+    env = os.environ.copy()
+    env.update({"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"})
+    run_command(
+        [go, "build", "-ldflags=-s -w", "-o", str(agent_bin), "."],
+        cwd=agent_dir,
+        env=env,
+    )
+    agent_bin.chmod(0o755)
+    return agent_bin
 
 def build_rootfs(docker_image: str, output_path: str, size_mb: int = 4096):
     """
@@ -97,35 +129,9 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mkdir -p /dev/pts
 mount -t devpts devpts /dev/pts
-# Search for python3 in common locations
-P=""
-for path in /usr/local/bin/python3 /usr/bin/python3 /usr/local/bin/python /usr/bin/python; do
-  if [ -x "$path" ]; then
-    P="$path"
-    break
-  fi
-done
 
-if [ -z "$P" ]; then
-  # Try to find via command/which as fallback
-  P=$(which python3 2>/dev/null || which python 2>/dev/null)
-fi
-
-# Fallback: check for existence if executable check failed (e.g. some filesystems)
-if [ -z "$P" ]; then
-  if [ -f "/usr/bin/python3" ]; then
-    P="/usr/bin/python3"
-  elif [ -f "/usr/bin/python" ]; then
-    P="/usr/bin/python"
-  fi
-fi
-
-if [ -z "$P" ]; then
-  echo "Warning: Python 3 not detected. Attempting to run agent directly (relying on shebang)..."
-  exec /usr/local/bin/agent.py 2>&1
-else
-  exec $P /usr/local/bin/agent.py 2>&1
-fi
+# Run the BandSox Go agent (static binary, no Python needed)
+exec /usr/local/bin/bandsox-agent 2>&1
 EOF
             chmod +x {extract_dir}/init
 
@@ -133,17 +139,12 @@ EOF
             mkfs.ext4 -O ^metadata_csum,^64bit -F -d {extract_dir} {output_path}
             """
             
-            # We need to copy agent.py into the rootfs BEFORE mkfs
-            # But we are outside fakeroot here.
-            # We can copy it to extract_dir.
-            agent_src = Path(__file__).parent / "agent.py"
-            agent_dst = extract_dir / "usr/local/bin/agent.py"
-            
-            # We need to make sure /usr/local/bin exists
+            # Copy Go agent binary into the rootfs BEFORE mkfs.
+            agent_src = ensure_go_agent_binary()
+            agent_dst = extract_dir / "usr/local/bin/bandsox-agent"
+
             (extract_dir / "usr/local/bin").mkdir(parents=True, exist_ok=True)
             shutil.copy2(agent_src, agent_dst)
-            
-            # Make it executable
             agent_dst.chmod(0o755)
             
             run_command(["fakeroot", "sh", "-c", script])

@@ -78,6 +78,12 @@ class VsockHostListener:
         self._pending_uploads: dict[str, str] = {}
         self._pending_uploads_lock = threading.Lock()
 
+        # Pending downloads: maps cmd_id -> bytes for write_file_vsock operations
+        # When VM.upload_file() uses the vsock fast path, it registers the file
+        # content here so the guest can download it via vsock.
+        self._pending_downloads: dict[str, bytes] = {}
+        self._pending_downloads_lock = threading.Lock()
+
     def start(self):
         """Start listening for guest connections."""
         with self._lock:
@@ -191,6 +197,25 @@ class VsockHostListener:
         """Get the local path for a pending upload, if registered."""
         with self._pending_uploads_lock:
             return self._pending_uploads.get(cmd_id)
+
+    def register_pending_download(self, cmd_id: str, data: bytes):
+        """Register in-memory data for a guest download (write_file_vsock fast path).
+
+        When VM.upload_file() uses vsock, it registers the binary content here
+        so _handle_download can serve it without touching the host filesystem.
+        """
+        with self._pending_downloads_lock:
+            self._pending_downloads[cmd_id] = data
+
+    def unregister_pending_download(self, cmd_id: str):
+        """Unregister a pending download."""
+        with self._pending_downloads_lock:
+            self._pending_downloads.pop(cmd_id, None)
+
+    def get_pending_download_data(self, cmd_id: str) -> Optional[bytes]:
+        """Get in-memory data for a pending download, if registered."""
+        with self._pending_downloads_lock:
+            return self._pending_downloads.get(cmd_id)
 
     def _accept_loop(self):
         """Accept incoming connections and spawn handler threads.
@@ -356,10 +381,79 @@ class VsockHostListener:
             },
         )
 
-        # Receive file data
+        # Fast path for VM.download_file(): stream directly to the registered
+        # destination instead of buffering the whole file in memory and copying it
+        # again after checksum verification. If the guest provides a checksum we
+        # verify it; Go agent uploads omit it for a single-pass transfer over the
+        # reliable vsock stream.
+        if dest_path:
+            dest = Path(dest_path)
+            tmp_path = dest.with_name(f".{dest.name}.{request.cmd_id}.tmp")
+            received = 0
+            md5 = hashlib.md5() if request.checksum else None
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with open(tmp_path, "wb") as f:
+                    if initial_data:
+                        data = initial_data[: request.size]
+                        f.write(data)
+                        received += len(data)
+                        if md5:
+                            md5.update(data)
+                    while received < request.size:
+                        chunk = client.recv(min(CHUNK_SIZE, request.size - received))
+                        if not chunk:
+                            self._send_error(
+                                client,
+                                request.cmd_id,
+                                "Connection closed during upload",
+                            )
+                            return
+                        f.write(chunk)
+                        received += len(chunk)
+                        if md5:
+                            md5.update(chunk)
+
+                if md5:
+                    file_hash = md5.hexdigest()
+                    if file_hash != request.checksum:
+                        self._send_error(
+                            client,
+                            request.cmd_id,
+                            f"Checksum mismatch: expected {request.checksum}, got {file_hash}",
+                        )
+                        return
+
+                os.replace(tmp_path, dest)
+                self.unregister_pending_upload(request.cmd_id)
+                self._send_message(
+                    client,
+                    {
+                        "type": ResponseType.COMPLETE.value,
+                        "cmd_id": request.cmd_id,
+                        "size": received,
+                    },
+                )
+                logger.info(f"Upload complete: {dest_path} ({received} bytes)")
+                return
+            except socket.timeout:
+                self._send_error(client, request.cmd_id, "Upload timed out")
+                return
+            except Exception as e:
+                self._send_error(client, request.cmd_id, f"Failed to write file: {e}")
+                return
+            finally:
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except Exception:
+                    pass
+
+        # Legacy/callback path: receive into memory.
         received = len(initial_data)
-        md5 = hashlib.md5()
-        md5.update(initial_data)
+        md5 = hashlib.md5() if request.checksum else None
+        if md5:
+            md5.update(initial_data)
         chunks = [initial_data] if initial_data else []
 
         while received < request.size:
@@ -371,35 +465,27 @@ class VsockHostListener:
                     )
                     return
                 chunks.append(chunk)
-                md5.update(chunk)
+                if md5:
+                    md5.update(chunk)
                 received += len(chunk)
             except socket.timeout:
                 self._send_error(client, request.cmd_id, "Upload timed out")
                 return
 
-        # Verify checksum
-        file_hash = md5.hexdigest()
-        if file_hash != request.checksum:
-            self._send_error(
-                client,
-                request.cmd_id,
-                f"Checksum mismatch: expected {request.checksum}, got {file_hash}",
-            )
-            return
+        if md5:
+            file_hash = md5.hexdigest()
+            if file_hash != request.checksum:
+                self._send_error(
+                    client,
+                    request.cmd_id,
+                    f"Checksum mismatch: expected {request.checksum}, got {file_hash}",
+                )
+                return
 
-        # Write file
         data = b"".join(chunks)
 
         try:
-            if dest_path:
-                # Write to registered destination path (from download_file)
-                Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
-                with open(dest_path, "wb") as f:
-                    f.write(data)
-                # Unregister after successful write
-                self.unregister_pending_upload(request.cmd_id)
-                final_path = dest_path
-            elif self.on_upload:
+            if self.on_upload:
                 # Use callback
                 success = self.on_upload(request.path, data, request.checksum)
                 if not success:
@@ -438,8 +524,21 @@ class VsockHostListener:
         1. Guest sends DownloadRequest with path
         2. Host sends ChunkResponse messages with base64-encoded data
         3. Host sends CompleteResponse with checksum
+
+        Checks pending downloads (in-memory data from write_file_vsock) first,
+        then falls back to on_download callback or direct filesystem read.
         """
         logger.info(f"Handling download: {request.path}")
+
+        # Check pending downloads first (write_file_vsock fast path)
+        pending_data = self.get_pending_download_data(request.cmd_id)
+        if pending_data is not None:
+            if getattr(request, "raw", False):
+                self._serve_download_raw_data(client, request, pending_data)
+            else:
+                self._serve_download_data(client, request, pending_data)
+            self.unregister_pending_download(request.cmd_id)
+            return
 
         # Get file data
         if self.on_download:
@@ -467,6 +566,10 @@ class VsockHostListener:
             except Exception as e:
                 self._send_error(client, request.cmd_id, f"Failed to read file: {e}")
                 return
+
+        if getattr(request, "raw", False):
+            self._serve_download_raw_data(client, request, data)
+            return
 
         # Send file in chunks
         md5 = hashlib.md5()
@@ -503,6 +606,61 @@ class VsockHostListener:
         )
 
         logger.info(f"Download complete: {request.path} ({len(data)} bytes)")
+
+    def _serve_download_data(self, client: socket.socket, request, data: bytes):
+        """Serve download data from an in-memory buffer (write_file_vsock path)."""
+        import base64
+        import hashlib
+
+        md5 = hashlib.md5()
+        offset = 0
+
+        while offset < len(data):
+            chunk = data[offset: offset + CHUNK_SIZE]
+            md5.update(chunk)
+            encoded = base64.b64encode(chunk).decode("utf-8")
+            self._send_message(
+                client,
+                {
+                    "type": ResponseType.CHUNK.value,
+                    "cmd_id": request.cmd_id,
+                    "data": encoded,
+                    "offset": offset,
+                    "size": len(chunk),
+                },
+            )
+            offset += len(chunk)
+
+        self._send_message(
+            client,
+            {
+                "type": ResponseType.COMPLETE.value,
+                "cmd_id": request.cmd_id,
+                "size": len(data),
+                "checksum": md5.hexdigest(),
+            },
+        )
+
+        logger.debug(
+            f"Vsock download served from memory: {request.path} ({len(data)} bytes)"
+        )
+
+    def _serve_download_raw_data(self, client: socket.socket, request, data: bytes):
+        """Serve download data as one JSON header followed by raw bytes."""
+        md5 = hashlib.md5(data).hexdigest()
+        self._send_message(
+            client,
+            {
+                "type": ResponseType.READY.value,
+                "cmd_id": request.cmd_id,
+                "size": len(data),
+                "checksum": md5,
+            },
+        )
+        client.sendall(data)
+        logger.debug(
+            f"Vsock raw download served: {request.path} ({len(data)} bytes)"
+        )
 
     def _send_message(self, client: socket.socket, msg: dict):
         """Send a JSON message to the client."""
