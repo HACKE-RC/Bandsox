@@ -403,7 +403,7 @@ class TestVsockCompatibility:
                 bs._check_vsock_compatibility("old-vm")
 
             assert "requires vsock support" in str(exc_info.value)
-            assert "VSOCK_MIGRATION.md" in str(exc_info.value)
+            assert "docs/VSOCK_MIGRATION.md" in str(exc_info.value)
 
 
 # ============================================================================
@@ -414,14 +414,14 @@ class TestVsockCompatibility:
 def test_readme_migration_guide_exists():
     """Test that migration guide exists."""
     root = Path(__file__).resolve().parents[1]
-    migration_guide = root / "VSOCK_MIGRATION.md"
-    assert migration_guide.exists(), "VSOCK_MIGRATION.md should exist"
+    migration_guide = root / "docs" / "VSOCK_MIGRATION.md"
+    assert migration_guide.exists(), "docs/VSOCK_MIGRATION.md should exist"
 
 
 def test_migration_guide_has_required_sections():
     """Test that migration guide has all required sections."""
     root = Path(__file__).resolve().parents[1]
-    migration_guide = root / "VSOCK_MIGRATION.md"
+    migration_guide = root / "docs" / "VSOCK_MIGRATION.md"
     content = migration_guide.read_text()
 
     # Required sections

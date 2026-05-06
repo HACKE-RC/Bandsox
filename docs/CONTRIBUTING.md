@@ -19,11 +19,28 @@
 
 ## Running tests
 
-Verification scripts live in `verification/`. They need `sudo` because they create network devices.
+Unit tests:
 
 ```bash
-sudo python3 verification/verify_bandsox.py
+uv run python -m pytest -q
 ```
+
+Verification scripts live in `verification/`. Most need `sudo` (network devices,
+KVM, Firecracker).
+
+```bash
+sudo env PATH=$PATH uv run python verification/verify_bandsox.py
+sudo env PATH=$PATH uv run python verification/verify_go_agent.py
+```
+
+Benchmarking:
+
+```bash
+sudo env PATH=$PATH uv run python verification/benchmark_go_agent.py
+```
+
+On a typical dev machine the benchmark reports ~2.3ms mean `exec_command("true")`
+and ~190 MiB/s upload + up to ~1 GiB/s download for an 8 MiB file (vsock raw path).
 
 ## Code style
 

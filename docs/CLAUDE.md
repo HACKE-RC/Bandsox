@@ -45,7 +45,8 @@ sudo python3 verification/verify_internet.py
 
 - **core.py**: `BandSox` class -- VM lifecycle, storage, snapshots
 - **vm.py**: `MicroVM` class -- wraps Firecracker process, config, networking, console multiplexing
-- **agent.py**: lightweight Python agent inside guest VMs on ttyS0, runs commands via JSON protocol
+- **agent/main.go**: static Go guest agent inside VMs on ttyS0, runs commands/file ops via JSON protocol (+ vsock fast paths)
+- **agent.py**: legacy Python agent kept for compatibility/testing (not required in guest images)
 - **auth.py**: authentication -- API keys (SHA-256 hashed), HMAC-signed session tokens, rate-limited login, FastAPI dependency. All persistent state in `auth.json`.
 - **server.py**: FastAPI web server with REST API, dashboard, and auth middleware
 - **cli.py**: command-line interface including `auth` subcommands
