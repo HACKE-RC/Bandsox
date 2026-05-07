@@ -72,6 +72,8 @@ def _make_vm_with_recorder():
         def __init__(self):
             # Skip MicroVM.__init__ — we only exercise upload_file.
             self.agent_ready = True
+            self.vsock_enabled = False
+            self.vsock_listener = None
 
         def send_request(self, op, payload, timeout=None):
             sent.append((op, payload, timeout))
@@ -109,12 +111,12 @@ def test_vm_upload_file_chunked_first_chunk_honors_append(tmp_path):
     """When append=True, the FIRST chunk must also append (not truncate)."""
     vm, sent = _make_vm_with_recorder()
     local = tmp_path / "big.bin"
-    payload = b"A" * (5 * 1024)  # 5KB > 2KB chunk size
+    payload = b"A" * (600 * 1024)  # > 512KB optimized serial chunk size
     local.write_bytes(payload)
 
     vm.upload_file(str(local), "/remote/big.bin", append=True)
 
-    assert len(sent) >= 3  # 5KB / 2KB chunks => 3 chunks
+    assert len(sent) == 2
     # All chunks must have append=True so we never truncate the destination.
     appends = [p["append"] for _, p, _ in sent]
     assert appends == [True] * len(sent)
@@ -128,13 +130,41 @@ def test_vm_upload_file_chunked_default_first_chunk_truncates(tmp_path):
     """Default behavior: first chunk overwrites, subsequent chunks append."""
     vm, sent = _make_vm_with_recorder()
     local = tmp_path / "big.bin"
-    local.write_bytes(b"B" * (5 * 1024))
+    local.write_bytes(b"B" * (600 * 1024))
 
     vm.upload_file(str(local), "/remote/big.bin")
 
     appends = [p["append"] for _, p, _ in sent]
     assert appends[0] is False
     assert all(a is True for a in appends[1:])
+
+
+def test_vm_write_text_small_uses_direct_text_request():
+    vm, sent = _make_vm_with_recorder()
+
+    vm.write_text("/remote/out.txt", "hello\n")
+
+    assert sent == [
+        (
+            "write_text",
+            {"path": "/remote/out.txt", "content": "hello\n", "append": False},
+            30,
+        )
+    ]
+
+
+def test_vm_write_text_large_uses_large_serial_chunks():
+    vm, sent = _make_vm_with_recorder()
+    payload = "A" * (600 * 1024)
+
+    vm.write_text("/remote/big.txt", payload)
+
+    assert len(sent) == 2
+    assert all(op == "write_file" for op, _, _ in sent)
+    assert sent[0][1]["append"] is False
+    assert sent[1][1]["append"] is True
+    reconstructed = b"".join(base64.b64decode(p["content"]) for _, p, _ in sent)
+    assert reconstructed == payload.encode()
 
 
 # ---------- Client SDK (RemoteMicroVM): append_text / append_file ----------
@@ -155,12 +185,28 @@ def test_remote_vm_append_text_posts_to_append_endpoint():
     bs._request.assert_called_once()
     args, kwargs = bs._request.call_args
     assert args[0] == "POST"
-    assert args[1] == "/api/vms/vm-test/append-file"
+    assert args[1] == "/api/vms/vm-test/write-file"
     assert kwargs["json"] == {
         "path": "/tmp/out.log",
         "content": "hello world",
         "encoding": "utf-8",
         "append": True,
+    }
+
+
+def test_remote_vm_write_text_posts_to_write_endpoint():
+    vm, bs = _make_remote_vm()
+    vm.write_text("/tmp/out.log", "hello world")
+
+    bs._request.assert_called_once()
+    args, kwargs = bs._request.call_args
+    assert args[0] == "POST"
+    assert args[1] == "/api/vms/vm-test/write-file"
+    assert kwargs["json"] == {
+        "path": "/tmp/out.log",
+        "content": "hello world",
+        "encoding": "utf-8",
+        "append": False,
     }
 
 

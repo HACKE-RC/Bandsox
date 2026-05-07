@@ -1,0 +1,40 @@
+{
+  "name": "bandsox",
+  "version": "1.0.0",
+  "description": "TypeScript client for managing Firecracker microVMs through the BandSox REST API",
+  "author": "rc <crretsim@gmail.com>",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HACKE-RC/Bandsox.git",
+    "directory": "bandsox-sdk"
+  },
+  "homepage": "https://github.com/HACKE-RC/Bandsox#readme",
+  "bugs": {
+    "url": "https://github.com/HACKE-RC/Bandsox/issues"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "firecracker",
+    "microvm",
+    "sandbox",
+    "bandsox"
+  ],
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

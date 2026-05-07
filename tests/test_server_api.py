@@ -29,6 +29,8 @@ class DummyVM:
         self.resizes = []
         self.killed_sessions = []
         self.uploads = []
+        self.text_writes = []
+        self.byte_writes = []
 
     def stop(self):
         self.stopped = True
@@ -71,6 +73,15 @@ class DummyVM:
 
     def upload_file(self, local, remote, append=False):
         self.uploads.append((Path(local).read_bytes(), remote, append))
+
+    def write_text(self, remote, content, timeout=None, append=False):
+        self.text_writes.append((remote, content, append))
+
+    def append_text(self, remote, content, timeout=None):
+        self.write_text(remote, content, timeout=timeout, append=True)
+
+    def write_bytes(self, remote, content, timeout=None, append=False):
+        self.byte_writes.append((remote, bytes(content), append))
 
     def get_file_info(self, path):
         return {"size": 9}
@@ -339,7 +350,7 @@ def test_read_write_file(client, fake_bs):
         json={"path": "/tmp/out.txt", "content": "hello"},
     )
     assert write_resp.status_code == 200
-    assert fake_bs.vm.uploads[-1] == (b"hello", "/tmp/out.txt", False)
+    assert fake_bs.vm.text_writes[-1] == ("/tmp/out.txt", "hello", False)
 
 
 def test_read_file_falls_back_for_stopped_vm(client, fake_bs, monkeypatch):
@@ -425,14 +436,14 @@ def test_download_file_falls_back_for_stopped_vm(client, fake_bs, monkeypatch):
 
 
 def test_write_file_with_append_flag(client, fake_bs):
-    """write-file should forward the append flag to vm.upload_file."""
+    """write-file should forward the append flag to the direct text writer."""
     resp = client.post(
         f"/api/vms/{fake_bs.vm.vm_id}/write-file",
         json={"path": "/tmp/log.txt", "content": "line\n", "append": True},
     )
     assert resp.status_code == 200
     assert resp.json() == {"status": "appended", "path": "/tmp/log.txt"}
-    assert fake_bs.vm.uploads[-1] == (b"line\n", "/tmp/log.txt", True)
+    assert fake_bs.vm.text_writes[-1] == ("/tmp/log.txt", "line\n", True)
 
 
 def test_append_file_endpoint_utf8(client, fake_bs):
@@ -442,7 +453,7 @@ def test_append_file_endpoint_utf8(client, fake_bs):
     )
     assert resp.status_code == 200
     assert resp.json() == {"status": "appended", "path": "/tmp/log.txt"}
-    assert fake_bs.vm.uploads[-1] == (b"more\n", "/tmp/log.txt", True)
+    assert fake_bs.vm.text_writes[-1] == ("/tmp/log.txt", "more\n", True)
 
 
 def test_append_file_endpoint_base64(client, fake_bs):
@@ -458,7 +469,7 @@ def test_append_file_endpoint_base64(client, fake_bs):
         },
     )
     assert resp.status_code == 200
-    assert fake_bs.vm.uploads[-1] == (payload, "/tmp/blob.bin", True)
+    assert fake_bs.vm.byte_writes[-1] == ("/tmp/blob.bin", payload, True)
 
 
 def test_append_file_endpoint_vm_not_found(client):
