@@ -8,6 +8,7 @@ import threading
 import json
 import socket
 import shlex
+import base64
 import tempfile
 from pathlib import Path
 from .firecracker import FirecrackerClient
@@ -15,6 +16,41 @@ from .network import setup_tap_device, cleanup_tap_device, derive_host_mac
 import requests
 
 logger = logging.getLogger(__name__)
+
+_DIRECT_TEXT_WRITE_MAX_BYTES = 2 * 1024  # ~2 KiB
+# Anything bigger goes through _write_bytes which prefers the fastwrite
+# RPC (vsock). The previous 512 KiB threshold pushed athena's typical
+# 5–50 KiB appends through the serial console — which deadlocked around
+# the 4 KiB mark because of Firecracker's tiny UART FIFO. The host saw
+# write() succeed, the guest never assembled a full JSON line, and the
+# request timed out at 30s.
+_SERIAL_WRITE_CHUNK_SIZE = 512 * 1024
+
+
+class FastIOError(Exception):
+    """Structured error from FastRead/FastWrite RPC.
+
+    Callers (athena UI / agent tools) inspect ``code`` to decide whether
+    to retry transient failures (saturated, listener_down, timeout)
+    versus surface a real problem to the user (not_found, too_large,
+    bad_request, agent_error).
+    """
+
+    def __init__(self, code: str, msg: str):
+        self.code = code
+        self.msg = msg
+        super().__init__(f"[{code}] {msg}")
+
+
+def _parse_fastio_error(body: bytes) -> Exception:
+    """Decode an error frame body into a FastIOError; tolerate old format."""
+    try:
+        obj = json.loads(body.decode("utf-8"))
+        if isinstance(obj, dict) and "code" in obj:
+            return FastIOError(obj.get("code", "internal"), obj.get("msg", ""))
+    except Exception:
+        pass
+    return FastIOError("internal", body.decode("utf-8", errors="replace"))
 
 
 def _pid_exists(pid: int) -> bool:
@@ -111,6 +147,7 @@ class ConsoleMultiplexer:
         self.process = process
         self.clients = []  # list of client sockets
         self.lock = threading.Lock()
+        self._input_lock = threading.Lock()
         self.running = True
         self.server_socket = None
         self.callbacks = []  # list of funcs to call with stdout data
@@ -143,17 +180,33 @@ class ConsoleMultiplexer:
             self.callbacks.append(callback)
 
     def write_input(self, data: str):
-        """Writes data to the process stdin."""
-        try:
-            self.process.stdin.write(data)
-            self.process.stdin.flush()
-        except Exception as e:
-            logger.error(f"Failed to write to process stdin: {e}")
+        """Writes data to the process stdin.
+
+        Serialized via _input_lock — without it, parallel writers (e.g.
+        many fastread handlers) interleave bytes inside the kernel pipe,
+        the agent's JSON parser sees garbage and the corresponding reads
+        stall until their timeout, fall back to slow serial chunked, and
+        produce the 60-second outliers we saw under burst load.
+        """
+        with self._input_lock:
+            try:
+                self.process.stdin.write(data)
+                self.process.stdin.flush()
+            except Exception as e:
+                logger.error(f"Failed to write to process stdin: {e}")
 
     def _accept_loop(self):
         while self.running:
             try:
                 client, _ = self.server_socket.accept()
+                # Big SO_SNDBUF buys headroom so the broadcast loop's
+                # sendall doesn't block on slow consumers. With 4 MiB the
+                # kernel can absorb a flurry of agent events while athena's
+                # python read loop is briefly held under the GIL.
+                try:
+                    client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+                except Exception:
+                    pass
                 with self.lock:
                     self.clients.append(client)
 
@@ -191,13 +244,20 @@ class ConsoleMultiplexer:
 
             # Broadcast to clients outside the lock; per-send timeout bounds
             # how long any single slow client can stall the drain.
+            #
+            # Bumped 2s → 5s. The 2s budget was too aggressive under
+            # athena GIL pressure: a client could fall behind for slightly
+            # over 2s and get falsely dropped, surfacing as "Console
+            # socket disconnected mid-request" repeatedly even with no
+            # actual fault. 5s + 4 MiB SO_SNDBUF on accept (for kernel
+            # buffer headroom) handles steady-state GIL hiccups while
+            # still bounding how long a truly wedged client can block.
             if clients:
                 data = line.encode("utf-8")
                 dead_clients = []
                 for client in clients:
                     try:
-                        # Bound blocking so a wedged client can't freeze us.
-                        client.settimeout(2.0)
+                        client.settimeout(5.0)
                         client.sendall(data)
                     except Exception as exc:
                         dead_clients.append((client, exc))
@@ -280,6 +340,10 @@ class MicroVM:
         self.vsock_socket_path = None
         self.vsock_baked_path = None
         self.vsock_isolation_dir = None
+        self._fastread_server = None
+        self.fastread_socket_path = None
+        self._fastwrite_server = None
+        self.fastwrite_socket_path = None
         # New architecture: the host runs a VsockHostListener that accepts
         # guest-initiated AF_VSOCK connections (Firecracker routes them to
         # a Unix socket at <uds_path>_<port>). We no longer keep a long-lived
@@ -293,6 +357,7 @@ class MicroVM:
         self.vsock_bridge_socket = None
         self.vsock_bridge_thread = None
         self.vsock_bridge_running = False
+        self._agent_write_lock = threading.Lock()
 
     def start_process(self):
         """Starts the Firecracker process."""
@@ -419,18 +484,31 @@ class MicroVM:
         On disconnect we clear console_conn so the next exec_command
         triggers a fresh connect_to_console() instead of writing to a
         dead socket (which would raise BrokenPipeError every time).
+
+        We accumulate raw bytes and only decode whole lines. The previous
+        implementation called bytes.decode('utf-8') on every recv() return,
+        which silently raised whenever a multi-byte sequence (or, more
+        commonly, kernel log noise containing odd chars) was split across
+        the 4096-byte recv boundary. The exception broke the read loop
+        and tore down the connection — but more insidiously, when wrapped
+        differently it could cause partial drops that surfaced as
+        checksum mismatches on chunked file reads.
         """
-        buffer = ""
+        buffer = b""
         try:
             while True:
                 try:
-                    data = self.console_conn.recv(4096)
+                    data = self.console_conn.recv(65536)
                     if not data:
                         break
-                    buffer += data.decode("utf-8")
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        self._handle_stdout_line(line + "\n")
+                    buffer += data
+                    while b"\n" in buffer:
+                        line, buffer = buffer.split(b"\n", 1)
+                        try:
+                            decoded = line.decode("utf-8") + "\n"
+                        except UnicodeDecodeError:
+                            decoded = line.decode("utf-8", errors="replace") + "\n"
+                        self._handle_stdout_line(decoded)
                 except Exception:
                     break
         finally:
@@ -440,8 +518,30 @@ class MicroVM:
             except Exception:
                 pass
             self.console_conn = None
-            # agent_ready stays True — metadata says the agent is up;
-            # wait_for_agent will reconnect and resume.
+            # Fail any in-flight callbacks so callers don't hang on a
+            # completion_event that will never fire — without this, a
+            # console drop wedges every concurrent read for the full
+            # 30s/60s timeout and athena reports "timed out". The agent
+            # may reconnect and resume the next request, but commands
+            # already in flight cannot be recovered cleanly.
+            try:
+                pending = list(self.event_callbacks.items())
+                self.event_callbacks.clear()
+                for cmd_id, cbs in pending:
+                    on_error = cbs.get("on_error")
+                    on_exit = cbs.get("on_exit")
+                    try:
+                        if on_error:
+                            on_error("Console socket disconnected mid-request")
+                    except Exception:
+                        pass
+                    try:
+                        if on_exit:
+                            on_exit(-1)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             logger.warning(
                 f"Console socket read loop exited for {self.vm_id}; "
                 "will reconnect on next request"
@@ -485,6 +585,12 @@ class MicroVM:
                 cmd_id = payload.get("cmd_id")
                 stream = payload.get("stream")
                 data = payload.get("data")
+                encoding = payload.get("encoding")
+                if encoding == "base64" and isinstance(data, str):
+                    try:
+                        data = base64.b64decode(data).decode("utf-8", errors="replace")
+                    except Exception:
+                        pass
                 if cmd_id in self.event_callbacks:
                     cb = self.event_callbacks[cmd_id].get(f"on_{stream}")
                     if cb:
@@ -660,6 +766,53 @@ class MicroVM:
         if not completion_event.wait(timeout):
             raise TimeoutError("Command timed out")
 
+        # Auto-reconnect-and-retry on transient console drops. Up to 3
+        # extra attempts with brief backoff. Hides multiplexer blips and
+        # GIL-pressure broadcast drops from athena.
+        retry_attempts = 0
+        max_retries = 3
+        while (
+            retry_attempts < max_retries
+            and result["error"]
+            and "console socket disconnected" in result["error"].lower()
+        ):
+            retry_attempts += 1
+            logger.info(
+                f"Console disconnect during cmd {cmd_id}; reconnect+retry "
+                f"{retry_attempts}/{max_retries}"
+            )
+            # Force a fresh connection before retrying.
+            try:
+                if self.console_conn:
+                    self.console_conn.close()
+            except Exception:
+                pass
+            self.console_conn = None
+            # Backoff a touch: gives the multiplexer a moment to drain
+            # any backlog so we don't immediately get dropped again.
+            time.sleep(0.05 * retry_attempts)
+            # Reset state for the retry
+            result["error"] = None
+            result["code"] = -1
+            completion_event.clear()
+            self.event_callbacks[cmd_id] = {
+                "on_stdout": on_stdout,
+                "on_stderr": on_stderr,
+                "on_file_content": on_file_content,
+                "on_file_chunk": on_file_chunk,
+                "on_file_complete": on_file_complete,
+                "on_dir_list": on_dir_list,
+                "on_file_info": on_file_info,
+                "on_status": on_status,
+                "on_exit": on_exit,
+                "on_error": on_error,
+            }
+            self._write_to_agent(req_str + "\n")
+            if not completion_event.wait(timeout):
+                raise TimeoutError(
+                    f"Command timed out (after {retry_attempts} reconnect retries)"
+                )
+
         if result["error"]:
             raise Exception(f"Agent error: {result['error']}")
 
@@ -676,35 +829,37 @@ class MicroVM:
         the caller's perspective.
         """
         if self.multiplexer:
-            self.multiplexer.write_input(data)
+            with self._agent_write_lock:
+                self.multiplexer.write_input(data)
             return
 
         payload = data.encode("utf-8")
 
-        if self.console_conn:
-            try:
-                self.console_conn.sendall(payload)
-                return
-            except (BrokenPipeError, ConnectionResetError, OSError) as e:
-                logger.warning(
-                    f"Console write failed ({e}); attempting reconnect"
-                )
+        with self._agent_write_lock:
+            if self.console_conn:
                 try:
-                    self.console_conn.close()
-                except Exception:
-                    pass
-                self.console_conn = None
+                    self.console_conn.sendall(payload)
+                    return
+                except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                    logger.warning(
+                        f"Console write failed ({e}); attempting reconnect"
+                    )
+                    try:
+                        self.console_conn.close()
+                    except Exception:
+                        pass
+                    self.console_conn = None
 
-        # No connection or broken — try (re)connect.
-        try:
-            self.connect_to_console()
-        except Exception as e:
-            raise Exception(f"No connection to agent: {e}")
+            # No connection or broken — try (re)connect.
+            try:
+                self.connect_to_console()
+            except Exception as e:
+                raise Exception(f"No connection to agent: {e}")
 
-        if not self.console_conn:
-            raise Exception("No connection to agent")
+            if not self.console_conn:
+                raise Exception("No connection to agent")
 
-        self.console_conn.sendall(payload)
+            self.console_conn.sendall(payload)
 
     def exec_command(self, command: str, on_stdout=None, on_stderr=None, timeout=30):
         """Executes a command in the VM via the agent (blocking)."""
@@ -1438,6 +1593,186 @@ class MicroVM:
             f"Vsock listener started for restored VM: port={port}, path={listener_path}"
         )
 
+        # Bring up the fast-read AND fast-write RPC servers alongside
+        # the listener so any remote ManagedMicroVM (e.g. athena's webui
+        # process, which lives outside the runner's mount namespace) can
+        # route file ops through this listener instead of falling back
+        # to the slow serial path.
+        try:
+            self._start_fastread_server()
+        except Exception as e:
+            logger.warning(f"Failed to start fast-read RPC server: {e}")
+        try:
+            self._start_fastwrite_server()
+        except Exception as e:
+            logger.warning(f"Failed to start fast-write RPC server: {e}")
+
+    def _fastread_socket_path_for_remote(self) -> str:
+        """Return the canonical fastread UDS path the runner would expose.
+
+        Used by remote callers (ManagedMicroVM) that don't own a local
+        listener but want to ask the runner to do a vsock read on their
+        behalf.
+        """
+        if getattr(self, "fastread_socket_path", None):
+            return self.fastread_socket_path
+        try:
+            from .vsock.fastread_server import fastread_socket_path_for
+            return fastread_socket_path_for(self.socket_path, self.vm_id)
+        except Exception:
+            return None
+
+    def _fastread_remote(self, sock_path: str, path: str, timeout: float = 60.0, op: str = "read") -> bytes:
+        """Synchronous fast-read RPC client.
+
+        Connects to the runner's fastread UDS, sends the request, returns
+        the response bytes (file content for op="read", JSON-encoded
+        listing for op="list_dir"). On error raises FastIOError with
+        .code and .msg.
+        """
+        import struct as _struct
+        import uuid as _uuid
+
+        cmd_id = str(_uuid.uuid4())
+        body = json.dumps({"path": path, "cmd_id": cmd_id, "op": op}).encode("utf-8")
+
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(timeout)
+            sock.connect(sock_path)
+            sock.sendall(_struct.pack(">I", len(body)) + body)
+
+            hdr = self._recvn(sock, 4)
+            (length,) = _struct.unpack(">I", hdr)
+            if length == 0xFFFFFFFF:
+                err_hdr = self._recvn(sock, 4)
+                (err_len,) = _struct.unpack(">I", err_hdr)
+                err_body = self._recvn(sock, err_len) if err_len else b""
+                raise _parse_fastio_error(err_body)
+            if length == 0:
+                return b""
+            return self._recvn(sock, length)
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    def _fastwrite_socket_path_for_remote(self) -> str:
+        if getattr(self, "fastwrite_socket_path", None):
+            return self.fastwrite_socket_path
+        try:
+            from .vsock.fastwrite_server import fastwrite_socket_path_for
+            return fastwrite_socket_path_for(self.socket_path, self.vm_id)
+        except Exception:
+            return None
+
+    def _fastwrite_remote(
+        self,
+        sock_path: str,
+        remote_path: str,
+        content: bytes,
+        append: bool = False,
+        timeout: float = 60.0,
+    ):
+        """Synchronous fast-write RPC client. Raises on error."""
+        import struct as _struct
+        import uuid as _uuid
+
+        cmd_id = str(_uuid.uuid4())
+        header = json.dumps(
+            {"op": "write", "path": remote_path, "cmd_id": cmd_id, "append": bool(append)}
+        ).encode("utf-8")
+
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(timeout)
+            sock.connect(sock_path)
+            sock.sendall(_struct.pack(">I", len(header)) + header)
+            sock.sendall(_struct.pack(">I", len(content)))
+            if content:
+                sock.sendall(content)
+
+            hdr = self._recvn(sock, 4)
+            (length,) = _struct.unpack(">I", hdr)
+            if length == 0xFFFFFFFF:
+                err_hdr = self._recvn(sock, 4)
+                (err_len,) = _struct.unpack(">I", err_hdr)
+                err_body = self._recvn(sock, err_len) if err_len else b""
+                raise _parse_fastio_error(err_body)
+            # length == 0 → success, no payload.
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _recvn(sock: socket.socket, n: int) -> bytes:
+        out = bytearray()
+        while len(out) < n:
+            chunk = sock.recv(min(65536, n - len(out)))
+            if not chunk:
+                raise ConnectionResetError("server closed mid-frame")
+            out.extend(chunk)
+        return bytes(out)
+
+    def _start_fastread_server(self):
+        """Start the fast-read RPC server for this VM.
+
+        Idempotent — re-binds if already running. Safe to call from the
+        runner (where vsock_listener is local) but a no-op on processes
+        without a local listener.
+        """
+        from .vsock.fastread_server import (
+            FastReadServer,
+            fastread_socket_path_for,
+        )
+
+        if self.vsock_listener is None:
+            return
+        if getattr(self, "_fastread_server", None) is not None:
+            return
+
+        sock_path = fastread_socket_path_for(self.socket_path, self.vm_id)
+
+        def _writer(data: str):
+            self._write_to_agent(data)
+
+        # Pass a getter rather than the listener instance so the server
+        # tracks supervisor-driven listener restarts.
+        srv = FastReadServer(
+            socket_path=sock_path,
+            vsock_listener=lambda: self.vsock_listener,
+            write_to_agent=_writer,
+            vsock_port=self.vsock_port,
+        )
+        srv.start()
+        self._fastread_server = srv
+        self.fastread_socket_path = sock_path
+
+    def _start_fastwrite_server(self):
+        from .vsock.fastwrite_server import (
+            FastWriteServer,
+            fastwrite_socket_path_for,
+        )
+
+        if self.vsock_listener is None:
+            return
+        if getattr(self, "_fastwrite_server", None) is not None:
+            return
+
+        sock_path = fastwrite_socket_path_for(self.socket_path, self.vm_id)
+        srv = FastWriteServer(
+            socket_path=sock_path,
+            vsock_listener=lambda: self.vsock_listener,
+            send_request_with_id=self._send_request_with_id,
+            vsock_port=self.vsock_port,
+        )
+        srv.start()
+        self._fastwrite_server = srv
+        self.fastwrite_socket_path = sock_path
+
     def _cleanup_vsock_bridge(self):
         """Stop the vsock listener and release its socket.
 
@@ -1591,61 +1926,273 @@ class MicroVM:
         """
         agent_error = None
         if self.agent_ready:
-            result = {
-                "mode": None,
-                "content": None,
-                "chunks": bytearray(),
-                "checksum": None,
-                "total_size": None,
-            }
-
-            def on_file_content(c):
-                result["mode"] = "single"
-                result["content"] = c
-
-            def on_file_chunk(data, offset, size):
-                if result["mode"] is None:
-                    result["mode"] = "chunked"
-                result["chunks"].extend(base64.b64decode(data))
-
-            def on_file_complete(total_size, checksum):
-                result["total_size"] = total_size
-                result["checksum"] = checksum
-
             import base64
             import hashlib
 
-            try:
-                self.send_request(
-                    "read_file",
-                    {"path": path},
-                    on_file_content=on_file_content,
-                    on_file_chunk=on_file_chunk,
-                    on_file_complete=on_file_complete,
-                )
+            raw_bytes = None
 
-                raw_bytes = None
-                if result["mode"] == "single" and result["content"] is not None:
-                    raw_bytes = base64.b64decode(result["content"])
-                elif result["mode"] == "chunked":
-                    if result["checksum"]:
-                        md5 = hashlib.md5(result["chunks"]).hexdigest()
-                        if md5 != result["checksum"]:
+            # Fast-read RPC: when the local process doesn't own the vsock
+            # listener (e.g. athena's webui talking to a detached runner),
+            # ask the runner to do the read via its in-namespace listener
+            # and stream the bytes back over a side-channel UDS. This is
+            # what unlocks vsock speed for ManagedMicroVM callers.
+            if self.vsock_listener is None and offset == 0 and limit == 0 and not show_line_numbers:
+                fr_path = self._fastread_socket_path_for_remote()
+                if fr_path:
+                    # Briefly poll for the socket — closes the race where
+                    # the runner is still binding its fastread server when
+                    # athena issues the first read after restore_vm. Without
+                    # this, the first athena read loses to the listener-bind
+                    # and silently falls back to the slow serial path.
+                    deadline = time.time() + 1.5
+                    while not os.path.exists(fr_path) and time.time() < deadline:
+                        time.sleep(0.025)
+                    if os.path.exists(fr_path):
+                        # Retry once on transient errors (saturated, listener_down,
+                        # connection reset). One retry hides multiplexer/runner
+                        # blips from athena's UI without masking real failures
+                        # like not_found.
+                        for attempt in range(2):
+                            try:
+                                raw_bytes = self._fastread_remote(fr_path, path)
+                                # Empty buffer with no error usually means
+                                # the listener slot fired before the agent
+                                # actually uploaded — a race. Treat as a
+                                # soft failure on first attempt so we
+                                # retry; on second, fall through to serial
+                                # so the caller doesn't get a phantom-empty.
+                                if not raw_bytes and attempt == 0:
+                                    logger.info(
+                                        f"FastRead returned 0 bytes for {path}; retrying"
+                                    )
+                                    raw_bytes = None
+                                    time.sleep(0.05)
+                                    continue
+                                if not raw_bytes:
+                                    logger.info(
+                                        f"FastRead still 0 bytes for {path}; falling through to serial"
+                                    )
+                                    raw_bytes = None
+                                break
+                            except FastIOError as exc:
+                                if attempt == 0 and exc.code in (
+                                    "saturated", "listener_down", "timeout", "internal"
+                                ):
+                                    logger.info(
+                                        f"FastRead transient {exc.code} for {path}; retrying"
+                                    )
+                                    time.sleep(0.05)
+                                    continue
+                                logger.info(
+                                    f"FastRead RPC failed for {path}: {exc}"
+                                )
+                                raw_bytes = None
+                                break
+                            except (ConnectionResetError, BrokenPipeError, OSError) as exc:
+                                if attempt == 0:
+                                    logger.info(
+                                        f"FastRead transient socket error for {path}: {exc}; retrying"
+                                    )
+                                    time.sleep(0.05)
+                                    continue
+                                logger.info(
+                                    f"FastRead RPC failed for {path}: {exc}"
+                                )
+                                raw_bytes = None
+                                break
+                            except Exception as exc:
+                                logger.info(
+                                    f"FastRead RPC failed for {path} via {fr_path}: {exc}"
+                                )
+                                raw_bytes = None
+                                break
+
+            # Vsock fast path: ask the guest to upload the file directly into
+            # an in-memory buffer on the listener. We do NOT synchronously
+            # wait for the agent's serial "exit" event — that would queue
+            # N exits through the single serial console under heavy parallel
+            # reads. Instead we wait on the listener's done-event, which
+            # fires the moment the bytes have all landed. The exit/status
+            # serial events arrive asynchronously and clean up callbacks
+            # via the existing dispatch loop.
+            vsock_ready = (
+                raw_bytes is None
+                and self.vsock_enabled
+                and self.vsock_listener is not None
+                and getattr(self, "vsock_port", None)
+            )
+            if vsock_ready:
+                cmd_id = str(uuid.uuid4())
+                slot = self.vsock_listener.register_pending_buffer(cmd_id)
+
+                # Lightweight callback set so _handle_stdout_line can clean
+                # up event_callbacks when the agent's exit event eventually
+                # arrives. We don't block on it.
+                vsock_error_holder = {"err": None, "exited_nonzero": False}
+
+                def _vsock_on_error(msg, _e=vsock_error_holder, _slot=slot):
+                    _e["err"] = msg
+                    # Wake the waiter — guest reported failure (e.g. file not
+                    # found) and will never upload, so don't block 60s.
+                    _slot["done"].set()
+
+                def _vsock_on_exit(code, _e=vsock_error_holder, _slot=slot):
+                    if code != 0:
+                        _e["exited_nonzero"] = True
+                        _slot["done"].set()
+
+                self.event_callbacks[cmd_id] = {
+                    "on_stdout": None,
+                    "on_stderr": None,
+                    "on_file_content": None,
+                    "on_file_chunk": None,
+                    "on_file_complete": None,
+                    "on_dir_list": None,
+                    "on_file_info": None,
+                    "on_status": None,
+                    "on_exit": _vsock_on_exit,
+                    "on_error": _vsock_on_error,
+                }
+
+                payload_dict = {
+                    "id": cmd_id,
+                    "type": "read_file",
+                    "path": path,
+                    "use_vsock": True,
+                    "vsock_port": self.vsock_port,
+                }
+                try:
+                    self._write_to_agent(json.dumps(payload_dict) + "\n")
+                    woke = slot["done"].wait(timeout=60)
+                    if vsock_error_holder["err"]:
+                        # Guest reported an error (e.g. file not found).
+                        # Don't fall back to serial — it'd hit the same error.
+                        raise Exception(vsock_error_holder["err"])
+                    if not woke:
+                        raise TimeoutError(f"Vsock read of {path} timed out")
+                    if slot["error"]:
+                        raise Exception(slot["error"])
+                    if vsock_error_holder["exited_nonzero"] and not slot["buf"]:
+                        raise Exception("Agent exited non-zero before upload")
+                    raw_bytes = bytes(slot["buf"])
+                except Exception as exc:
+                    # Use INFO so we can see in the bench/server log when the
+                    # fast path is being skipped or failing — without this, a
+                    # silent fallback to serial looks identical to "vsock
+                    # never tried".
+                    logger.info(f"Vsock read fast-path failed for {path}: {exc}")
+                    raw_bytes = None
+                finally:
+                    self.vsock_listener.unregister_pending_buffer(cmd_id)
+
+            if raw_bytes is None:
+                result = {
+                    "mode": None,
+                    "content": None,
+                    "chunks": bytearray(),
+                    "checksum": None,
+                    "total_size": None,
+                }
+
+                def on_file_content(c):
+                    result["mode"] = "single"
+                    result["content"] = c
+
+                def on_file_chunk(data, offset, size):
+                    if result["mode"] is None:
+                        result["mode"] = "chunked"
+                    result["chunks"].extend(base64.b64decode(data))
+
+                def on_file_complete(total_size, checksum):
+                    result["total_size"] = total_size
+                    result["checksum"] = checksum
+
+                # Retry the agent read up to 3 times on empty/missing content
+                # before giving up. The agent under heavy concurrency can
+                # emit a file_content event with empty content (or drop the
+                # event entirely after the retry-storm rebuilt the connection)
+                # — that surfaces as a phantom empty file in athena's UI.
+                # We detect "empty result with no error" and try again with a
+                # fresh result dict.
+                last_attempt_was_empty = False
+                for serial_attempt in range(3):
+                    # Fresh result dict per attempt so a stale empty from a
+                    # prior attempt doesn't poison this one.
+                    result = {
+                        "mode": None,
+                        "content": None,
+                        "chunks": bytearray(),
+                        "checksum": None,
+                        "total_size": None,
+                    }
+                    def on_file_content(c, _r=result):
+                        _r["mode"] = "single"
+                        _r["content"] = c
+                    def on_file_chunk(data, offset_, size, _r=result):
+                        if _r["mode"] is None:
+                            _r["mode"] = "chunked"
+                        _r["chunks"].extend(base64.b64decode(data))
+                    def on_file_complete(total_size, checksum, _r=result):
+                        _r["total_size"] = total_size
+                        _r["checksum"] = checksum
+
+                    try:
+                        self.send_request(
+                            "read_file",
+                            {
+                                "path": path,
+                                "offset": offset,
+                                "limit": limit,
+                                "show_line_numbers": show_line_numbers,
+                            },
+                            on_file_content=on_file_content,
+                            on_file_chunk=on_file_chunk,
+                            on_file_complete=on_file_complete,
+                        )
+                        if result["mode"] == "single" and result["content"] is not None:
+                            raw_bytes = base64.b64decode(result["content"])
+                        elif result["mode"] == "chunked":
+                            if result["checksum"]:
+                                md5 = hashlib.md5(result["chunks"]).hexdigest()
+                                if md5 != result["checksum"]:
+                                    raise Exception(
+                                        f"Checksum mismatch: expected {result['checksum']}, got {md5}"
+                                    )
+                            raw_bytes = bytes(result["chunks"])
+                        # Phantom-empty detection: agent acked the read but
+                        # the content callback either fired with "" or never
+                        # fired at all. Retry — the agent's view of the file
+                        # is fine, our pipeline raced.
+                        if raw_bytes is None or (raw_bytes == b"" and (limit > 0 or offset > 0)):
+                            if serial_attempt < 2:
+                                logger.info(
+                                    f"Agent read of {path} returned empty (mode={result['mode']}, "
+                                    f"attempt {serial_attempt + 1}/3); retrying"
+                                )
+                                last_attempt_was_empty = True
+                                raw_bytes = None
+                                time.sleep(0.05 * (serial_attempt + 1))
+                                continue
+                            # Out of retries — surface as failure so the
+                            # caller (athena) doesn't render a phantom-empty
+                            # markdown block. Better a visible error than
+                            # silent corruption.
                             raise Exception(
-                                f"Checksum mismatch: expected {result['checksum']}, got {md5}"
+                                f"Agent read of {path} returned empty after 3 attempts"
                             )
-                    raw_bytes = bytes(result["chunks"])
+                        break
+                    except Exception as exc:
+                        agent_error = exc
+                        logger.warning(
+                            f"Agent read failed for {path}; trying debugfs fallback: {exc}"
+                        )
+                        break
 
-                if raw_bytes is None:
-                    raise Exception(f"Failed to read {path} via agent")
-
+            if raw_bytes is not None:
+                if offset > 0 or limit > 0 or show_line_numbers:
+                    return raw_bytes.decode("utf-8", errors="replace")
                 return self._format_file_content(
                     raw_bytes, offset, limit, show_line_numbers, show_header, show_footer
-                )
-            except Exception as exc:
-                agent_error = exc
-                logger.warning(
-                    f"Agent read failed for {path}; trying debugfs fallback: {exc}"
                 )
 
         if self._has_debugfs_rootfs():
@@ -1717,9 +2264,63 @@ class MicroVM:
         return "\n".join(result_lines)
 
     def list_dir(self, path: str) -> list:
-        """Lists directory contents."""
+        """Lists directory contents.
+
+        Uses the fast-read RPC when available (athena → runner) to bypass
+        the slow serial console for the JSON listing. Falls back to the
+        legacy serial path if the fastread socket isn't reachable.
+        """
         if not self.agent_ready:
             raise Exception("Agent not ready")
+
+        # FastRead RPC list_dir variant — same socket, op="list_dir"
+        if self.vsock_listener is None:
+            fr_path = self._fastread_socket_path_for_remote()
+            if fr_path:
+                deadline = time.time() + 1.5
+                while not os.path.exists(fr_path) and time.time() < deadline:
+                    time.sleep(0.025)
+                if os.path.exists(fr_path):
+                    try:
+                        raw = self._fastread_remote(fr_path, path, op="list_dir")
+                        if raw:
+                            payload = json.loads(raw.decode("utf-8"))
+                            return payload.get("files", [])
+                    except Exception as exc:
+                        logger.info(f"FastRead list_dir failed for {path}: {exc}")
+
+        # Local-listener vsock fast path: send list_dir use_vsock=True and
+        # wait on a registered buffer.
+        if (
+            self.vsock_enabled
+            and self.vsock_listener is not None
+            and getattr(self, "vsock_port", None)
+        ):
+            try:
+                cmd_id = str(uuid.uuid4())
+                slot = self.vsock_listener.register_pending_buffer(cmd_id)
+                self.event_callbacks[cmd_id] = {
+                    "on_stdout": None, "on_stderr": None,
+                    "on_file_content": None, "on_file_chunk": None,
+                    "on_file_complete": None, "on_dir_list": None,
+                    "on_file_info": None, "on_status": None,
+                    "on_exit": lambda code, _s=slot: code != 0 and _s["done"].set(),
+                    "on_error": lambda msg, _s=slot: _s["done"].set(),
+                }
+                self._write_to_agent(json.dumps({
+                    "id": cmd_id, "type": "list_dir",
+                    "path": path, "use_vsock": True, "vsock_port": self.vsock_port,
+                }) + "\n")
+                if slot["done"].wait(timeout=15) and slot["buf"] and not slot["error"]:
+                    payload = json.loads(bytes(slot["buf"]).decode("utf-8"))
+                    return payload.get("files", [])
+            except Exception as exc:
+                logger.info(f"Local vsock list_dir failed for {path}: {exc}")
+            finally:
+                try:
+                    self.vsock_listener.unregister_pending_buffer(cmd_id)
+                except Exception:
+                    pass
 
         result = {}
 
@@ -1891,6 +2492,61 @@ class MicroVM:
         with open(local_path, "rb") as f:
             content = f.read()
 
+        self._write_bytes(remote_path, content, timeout=timeout, append=append)
+
+    def write_text(
+        self,
+        remote_path: str,
+        content: str,
+        timeout: int = None,
+        append: bool = False,
+    ):
+        """Write UTF-8 text directly to a file in the VM.
+
+        Small and medium text writes go as one JSON request without creating a
+        host temp file. Larger payloads use the raw bytes path so vsock can take
+        over when available, with serial chunking as the compatibility fallback.
+        """
+        if not self.agent_ready:
+            raise Exception("Agent not ready")
+
+        encoded = (content or "").encode("utf-8")
+        if len(encoded) <= _DIRECT_TEXT_WRITE_MAX_BYTES:
+            if timeout is None:
+                timeout = 30
+            self.send_request(
+                "write_text",
+                {"path": remote_path, "content": content or "", "append": append},
+                timeout=timeout,
+            )
+            return
+
+        self._write_bytes(remote_path, encoded, timeout=timeout, append=append)
+
+    def append_text(self, remote_path: str, content: str, timeout: int = None):
+        """Append UTF-8 text directly to a file in the VM."""
+        self.write_text(remote_path, content, timeout=timeout, append=True)
+
+    def write_bytes(
+        self,
+        remote_path: str,
+        content: bytes,
+        timeout: int = None,
+        append: bool = False,
+    ):
+        """Write bytes to a file in the VM without requiring a local temp file."""
+        self._write_bytes(remote_path, bytes(content), timeout=timeout, append=append)
+
+    def _write_bytes(
+        self,
+        remote_path: str,
+        content: bytes,
+        timeout: int = None,
+        append: bool = False,
+    ):
+        if not self.agent_ready:
+            raise Exception("Agent not ready")
+
         file_size = len(content)
 
         # Calculate timeout based on file size: minimum 30s, +10s per MB
@@ -1898,11 +2554,34 @@ class MicroVM:
             file_size_mb = file_size / (1024 * 1024)
             timeout = max(30, int(30 + file_size_mb * 10))
 
-        # Vsock fast path: register content for download, tell guest to fetch it.
-        # Only for non-append full writes; append requires merging on guest side.
+        # FastWrite RPC: when we don't own a local vsock listener (e.g.
+        # athena's webui talking to a detached runner) ask the runner to
+        # do the write via its in-namespace listener. This unlocks vsock
+        # speed for ManagedMicroVM uploads — without it large writes go
+        # through the serial chunked path and contend with reads.
         if (
-            not append
-            and getattr(self, "vsock_enabled", False)
+            getattr(self, "vsock_listener", None) is None
+            and file_size > 512
+        ):
+            fw_path = self._fastwrite_socket_path_for_remote()
+            if fw_path:
+                deadline = time.time() + 1.5
+                while not os.path.exists(fw_path) and time.time() < deadline:
+                    time.sleep(0.025)
+                if os.path.exists(fw_path):
+                    try:
+                        self._fastwrite_remote(
+                            fw_path, remote_path, content, append=append, timeout=timeout
+                        )
+                        return
+                    except Exception as exc:
+                        logger.info(
+                            f"FastWrite RPC failed for {remote_path}: {exc}"
+                        )
+
+        # Vsock fast path: register content for download, tell guest to fetch it.
+        if (
+            getattr(self, "vsock_enabled", False)
             and getattr(self, "vsock_listener", None) is not None
             and file_size > 512  # Small files are faster via serial
         ):
@@ -1912,7 +2591,11 @@ class MicroVM:
                 self._send_request_with_id(
                     cmd_id,
                     "write_file_vsock",
-                    {"path": remote_path, "vsock_port": self.vsock_port},
+                    {
+                        "path": remote_path,
+                        "vsock_port": self.vsock_port,
+                        "append": append,
+                    },
                     timeout=timeout,
                 )
                 return
@@ -1925,7 +2608,7 @@ class MicroVM:
 
         import base64
 
-        CHUNK_SIZE = 2 * 1024  # 2KB serial chunks
+        CHUNK_SIZE = _SERIAL_WRITE_CHUNK_SIZE
 
         if file_size <= CHUNK_SIZE:
             encoded = base64.b64encode(content).decode("utf-8")

@@ -129,8 +129,10 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mkdir -p /dev/pts
 mount -t devpts devpts /dev/pts
-
-# Run the BandSox Go agent (static binary, no Python needed)
+# Disable serial-console TTY echo so JSON commands written to the agent's
+# stdin are not echoed back onto stdout where the host parser would see
+# them concatenated with real agent responses and silently drop events.
+stty -echo -icanon -isig </dev/console >/dev/console 2>/dev/null || true
 exec /usr/local/bin/bandsox-agent 2>&1
 EOF
             chmod +x {extract_dir}/init

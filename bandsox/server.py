@@ -497,18 +497,29 @@ def write_file(vm_id: str, req: WriteFileRequest):
     """Write string content to a file inside a VM."""
     vm = _get_running_vm_or_404(vm_id)
     try:
-        raw = (
-            base64.b64decode(req.content)
-            if req.encoding == "base64"
-            else req.content.encode("utf-8")
-        )
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            tmp.write(raw)
-            tmp_path = tmp.name
-        try:
-            vm.upload_file(tmp_path, req.path, append=req.append)
-        finally:
-            os.unlink(tmp_path)
+        if req.encoding == "base64":
+            raw = base64.b64decode(req.content)
+            if hasattr(vm, "write_bytes"):
+                vm.write_bytes(req.path, raw, append=req.append)
+            else:
+                with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                    tmp.write(raw)
+                    tmp_path = tmp.name
+                try:
+                    vm.upload_file(tmp_path, req.path, append=req.append)
+                finally:
+                    os.unlink(tmp_path)
+        elif hasattr(vm, "write_text"):
+            vm.write_text(req.path, req.content, append=req.append)
+        else:
+            raw = req.content.encode("utf-8")
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                tmp.write(raw)
+                tmp_path = tmp.name
+            try:
+                vm.upload_file(tmp_path, req.path, append=req.append)
+            finally:
+                os.unlink(tmp_path)
         return {"status": "appended" if req.append else "written", "path": req.path}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -518,18 +529,31 @@ def append_file(vm_id: str, req: WriteFileRequest):
     """Append string content to a file inside a VM."""
     vm = _get_running_vm_or_404(vm_id)
     try:
-        raw = (
-            base64.b64decode(req.content)
-            if req.encoding == "base64"
-            else req.content.encode("utf-8")
-        )
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            tmp.write(raw)
-            tmp_path = tmp.name
-        try:
-            vm.upload_file(tmp_path, req.path, append=True)
-        finally:
-            os.unlink(tmp_path)
+        if req.encoding == "base64":
+            raw = base64.b64decode(req.content)
+            if hasattr(vm, "write_bytes"):
+                vm.write_bytes(req.path, raw, append=True)
+            else:
+                with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                    tmp.write(raw)
+                    tmp_path = tmp.name
+                try:
+                    vm.upload_file(tmp_path, req.path, append=True)
+                finally:
+                    os.unlink(tmp_path)
+        elif hasattr(vm, "append_text"):
+            vm.append_text(req.path, req.content)
+        elif hasattr(vm, "write_text"):
+            vm.write_text(req.path, req.content, append=True)
+        else:
+            raw = req.content.encode("utf-8")
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                tmp.write(raw)
+                tmp_path = tmp.name
+            try:
+                vm.upload_file(tmp_path, req.path, append=True)
+            finally:
+                os.unlink(tmp_path)
         return {"status": "appended", "path": req.path}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -17,7 +17,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/binary"
@@ -28,12 +27,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/creack/pty"
 )
 
 // =============================================================================
@@ -73,6 +73,7 @@ type Event struct {
 type Session struct {
 	Process *os.Process
 	Stdin   io.WriteCloser
+	PTY     *os.File
 	CmdID   string
 	IsPTY   bool
 }
@@ -170,6 +171,12 @@ func vsockProbe(port int) bool {
 }
 
 func vsockCanUse(port int) bool {
+	// No eager probe: the 1s connect timeout in vsockProbe used to be
+	// paid on every cold first-read, which is exactly the latency we're
+	// trying to remove. Instead, optimistically allow vsock unless we
+	// recently saw a hard failure (then back off). vsockCreateConn
+	// updates state on success/failure, so the actual transfer connect
+	// doubles as the probe.
 	state := atomic.LoadInt32(&vsockAvailable)
 	if state == 1 {
 		return true
@@ -190,7 +197,8 @@ func vsockCanUse(port int) bool {
 			return false
 		}
 	}
-	return vsockProbe(port)
+	// Unknown or backoff elapsed — let the real connect be the probe.
+	return true
 }
 
 func vsockMarkBroken() {
@@ -202,11 +210,19 @@ func vsockMarkBroken() {
 
 func vsockCreateConn(port int, timeout time.Duration) (*os.File, error) {
 	conn, err := dialVsock(vsockCIDHost, port, timeout)
-	if err != nil {
-		vsockMarkBroken()
-		return nil, err
+	if err == nil {
+		// A successful connect is the most reliable signal that vsock
+		// is healthy — clear any prior failure state so subsequent
+		// reads aren't gated by stale backoff.
+		vsockMu.Lock()
+		atomic.StoreInt32(&vsockAvailable, 1)
+		vsockLastCheck = time.Now()
+		vsockFailCount = 0
+		vsockMu.Unlock()
+		return conn, nil
 	}
-	return conn, nil
+	vsockMarkBroken()
+	return nil, err
 }
 
 func vsockSendJSON(conn *os.File, data interface{}) error {
@@ -278,11 +294,23 @@ func handleExec(cmdID, command string, background bool, env map[string]string) {
 			sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": ec})
 		}()
 	} else {
-		var outBuf, errBuf bytes.Buffer
-		cmd.Stdout = &outBuf
-		cmd.Stderr = &errBuf
+		stdout, _ := cmd.StdoutPipe()
+		stderr, _ := cmd.StderrPipe()
 
-		err := cmd.Run()
+		if err := cmd.Start(); err != nil {
+			sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": err.Error()})
+			sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 1})
+			return
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); streamRaw(stdout, "stdout", cmdID) }()
+		go func() { defer wg.Done(); streamRaw(stderr, "stderr", cmdID) }()
+
+		err := cmd.Wait()
+		wg.Wait()
+
 		ec := 0
 		if err != nil {
 			if ee, ok := err.(*exec.ExitError); ok {
@@ -291,33 +319,32 @@ func handleExec(cmdID, command string, background bool, env map[string]string) {
 				ec = 1
 			}
 		}
-
-		// Stream captured output line by line
-		for _, line := range strings.SplitAfter(outBuf.String(), "\n") {
-			if line != "" {
-				sendEvent("output", map[string]interface{}{
-					"cmd_id": cmdID, "stream": "stdout", "data": line,
-				})
-			}
-		}
-		for _, line := range strings.SplitAfter(errBuf.String(), "\n") {
-			if line != "" {
-				sendEvent("output", map[string]interface{}{
-					"cmd_id": cmdID, "stream": "stderr", "data": line,
-				})
-			}
-		}
 		sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": ec})
 	}
 }
 
 func readStream(r io.Reader, stream, cmdID string) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 65536), 65536)
-	for scanner.Scan() {
-		sendEvent("output", map[string]interface{}{
-			"cmd_id": cmdID, "stream": stream, "data": scanner.Text() + "\n",
-		})
+	streamRaw(r, stream, cmdID)
+}
+
+// streamRaw forwards raw byte chunks from r as base64-encoded output events.
+// Unlike a line-buffered scanner, this delivers data the moment it's available,
+// which matters for tools that emit progress with carriage returns and no
+// trailing newline (e.g. `git clone --progress`, curl, apt). Base64 keeps the
+// JSON event safe from non-UTF8 / control bytes.
+func streamRaw(r io.Reader, stream, cmdID string) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			encoded := base64.StdEncoding.EncodeToString(buf[:n])
+			sendEvent("output", map[string]interface{}{
+				"cmd_id": cmdID, "stream": stream, "data": encoded, "encoding": "base64",
+			})
+		}
+		if err != nil {
+			return
+		}
 	}
 }
 
@@ -331,12 +358,29 @@ func handleInput(cmdID, data, encoding string) {
 	}
 	var content []byte
 	if encoding == "base64" {
-		content, _ = base64.StdEncoding.DecodeString(data)
+		decoded, err := base64.StdEncoding.DecodeString(data)
+		if err != nil {
+			decoded, err = base64.RawStdEncoding.DecodeString(data)
+			if err != nil {
+				sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": fmt.Sprintf("base64 decode failed: %v", err)})
+				return
+			}
+		}
+		content = decoded
 	} else {
 		content = []byte(data)
 	}
-	if sess.Stdin != nil {
-		sess.Stdin.Write(content)
+
+	writer := sess.Stdin
+	if sess.IsPTY && sess.PTY != nil {
+		writer = sess.PTY
+	}
+	if writer == nil {
+		sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": "Session stdin not available"})
+		return
+	}
+	if _, err := writer.Write(content); err != nil {
+		sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": fmt.Sprintf("write failed: %v", err)})
 	}
 }
 
@@ -370,20 +414,33 @@ func handleReadFile(cmdID, path string, offset, limit int, showLineNumbers bool,
 		}
 	}
 
-	handleReadFileSerial(cmdID, path)
+	handleReadFileSerial(cmdID, path, offset, limit, showLineNumbers)
 }
 
-func handleReadFileSerial(cmdID, path string) {
-	// Serial fallback: send raw content, host applies formatting.
+func handleReadFileSerial(cmdID, path string, offset, limit int, showLineNumbers bool) {
 	info, err := os.Stat(path)
 	if err != nil {
 		sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": fmt.Sprintf("File not found: %s", path)})
 		sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 1})
 		return
 	}
+	if info.IsDir() {
+		sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": fmt.Sprintf("Path is a directory: %s", path)})
+		sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 1})
+		return
+	}
+
+	if offset > 0 || limit > 0 || showLineNumbers {
+		handleReadFileWindow(cmdID, path, offset, limit, showLineNumbers)
+		return
+	}
 
 	fileSize := info.Size()
-	chunkSize := int64(8 * 1024)
+	// Bigger chunks → fewer JSON events on the serial console, which
+	// matters when many parallel reads are in flight contending for
+	// consoleMu. Fewer hand-offs means each read drains faster and
+	// sibling reads aren't starved.
+	chunkSize := int64(64 * 1024)
 
 	// Small file — send in one shot
 	if fileSize <= chunkSize {
@@ -435,6 +492,53 @@ func handleReadFileSerial(cmdID, path string) {
 	sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 0})
 }
 
+func handleReadFileWindow(cmdID, path string, offset, limit int, showLineNumbers bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": err.Error()})
+		sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 1})
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+
+	var out []byte
+	lineNo := 0
+	emitted := 0
+	for scanner.Scan() {
+		lineNo++
+		if lineNo <= offset {
+			continue
+		}
+		if limit > 0 && emitted >= limit {
+			break
+		}
+		if showLineNumbers {
+			out = strconv.AppendInt(out, int64(lineNo), 10)
+			out = append(out, '\t')
+		}
+		out = append(out, scanner.Bytes()...)
+		out = append(out, '\n')
+		emitted++
+	}
+	if err := scanner.Err(); err != nil {
+		sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": err.Error()})
+		sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 1})
+		return
+	}
+	if len(out) > 0 && out[len(out)-1] == '\n' {
+		out = out[:len(out)-1]
+	}
+
+	encoded := base64.StdEncoding.EncodeToString(out)
+	sendEvent("file_content", map[string]interface{}{
+		"cmd_id": cmdID, "path": path, "content": encoded,
+	})
+	sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 0})
+}
+
 // =============================================================================
 // File write — with native append
 // =============================================================================
@@ -473,7 +577,42 @@ func handleWriteFile(cmdID, path, content string, appendMode bool) {
 		return
 	}
 
-	sendEvent("status", map[string]interface{}{"cmd_id": cmdID, "status": "written"})
+	// Skip "status: written" — under 200-concurrent writes the per-event
+	// syscall (Flush after each Write under consoleMu) is hot-path
+	// pressure. Callers gate on the exit event regardless.
+	sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 0})
+}
+
+func handleWriteText(cmdID, path, content string, appendMode bool) {
+	dir := filepath.Dir(path)
+	if dir != "" {
+		os.MkdirAll(dir, 0755)
+	}
+
+	flag := os.O_WRONLY | os.O_CREATE
+	if appendMode {
+		flag |= os.O_APPEND
+	} else {
+		flag |= os.O_TRUNC
+	}
+
+	f, err := os.OpenFile(path, flag, 0644)
+	if err != nil {
+		sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": err.Error()})
+		sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 1})
+		return
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(content); err != nil {
+		sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": err.Error()})
+		sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 1})
+		return
+	}
+
+	// Skip "status: written" — under 200-concurrent writes the per-event
+	// syscall (Flush after each Write under consoleMu) is hot-path
+	// pressure. Callers gate on the exit event regardless.
 	sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 0})
 }
 
@@ -481,7 +620,7 @@ func handleWriteFile(cmdID, path, content string, appendMode bool) {
 // List directory
 // =============================================================================
 
-func handleListDir(cmdID, path string) {
+func handleListDir(cmdID, path string, vsockPort int, useVsock bool) {
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": err.Error()})
@@ -506,8 +645,58 @@ func handleListDir(cmdID, path string) {
 		})
 	}
 
+	// Vsock fast path: upload the JSON listing as bytes to a host-side
+	// pending buffer registered for this cmd_id. Skips the serial console
+	// entirely so parallel list_dir calls don't queue at consoleMu.
+	if useVsock {
+		port := vsockPort
+		if port == 0 {
+			port = getVsockPort()
+		}
+		payload := map[string]interface{}{"path": path, "files": files}
+		if data, err := json.Marshal(payload); err == nil {
+			if vsockCanUse(port) && uploadBytesViaVsock(cmdID, data, port) {
+				sendEvent("status", map[string]interface{}{"cmd_id": cmdID, "status": "uploaded", "size": len(data)})
+				sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 0})
+				return
+			}
+		}
+		// Fall through to serial path on any failure.
+	}
+
 	sendEvent("dir_list", map[string]interface{}{"cmd_id": cmdID, "path": path, "files": files})
 	sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 0})
+}
+
+// uploadBytesViaVsock streams an in-memory blob to the host listener.
+// Mirrors handleVsockUpload's protocol but takes []byte instead of a path.
+// Returns true on success.
+func uploadBytesViaVsock(cmdID string, data []byte, port int) bool {
+	conn, err := vsockCreateConn(port, 10*time.Second)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+
+	if err := vsockSendJSON(conn, map[string]interface{}{
+		"type": "upload", "path": "<bytes>", "size": len(data), "checksum": "", "cmd_id": cmdID,
+	}); err != nil {
+		return false
+	}
+	resp, err := vsockRecvJSON(conn)
+	if err != nil || resp["type"] != "ready" {
+		return false
+	}
+	if _, err := conn.Write(data); err != nil {
+		vsockMarkBroken()
+		return false
+	}
+	resp, err = vsockRecvJSON(conn)
+	if err != nil || resp["type"] == "error" {
+		vsockMarkBroken()
+		return false
+	}
+	return true
 }
 
 // =============================================================================
@@ -600,7 +789,7 @@ func handleVsockUpload(cmdID, path string, port int) bool {
 // Vsock download (write_file fast path: host → guest)
 // =============================================================================
 
-func handleVsockDownload(cmdID, path string, port int) {
+func handleVsockDownload(cmdID, path string, port int, appendMode bool) {
 	conn, err := vsockCreateConn(port, 10*time.Second)
 	if err != nil {
 		sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": fmt.Sprintf("Vsock connect failed: %v", err)})
@@ -622,7 +811,13 @@ func handleVsockDownload(cmdID, path string, port int) {
 		os.MkdirAll(dir, 0755)
 	}
 
-	f, err := os.Create(path)
+	flag := os.O_WRONLY | os.O_CREATE
+	if appendMode {
+		flag |= os.O_APPEND
+	} else {
+		flag |= os.O_TRUNC
+	}
+	f, err := os.OpenFile(path, flag, 0644)
 	if err != nil {
 		sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": err.Error()})
 		sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 1})
@@ -679,7 +874,9 @@ func handleVsockDownload(cmdID, path string, port int) {
 		}
 	}
 
-	sendEvent("status", map[string]interface{}{"cmd_id": cmdID, "status": "written"})
+	// Skip "status: written" — under 200-concurrent writes the per-event
+	// syscall (Flush after each Write under consoleMu) is hot-path
+	// pressure. Callers gate on the exit event regardless.
 	sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 0})
 }
 
@@ -700,27 +897,25 @@ func handlePTYExec(cmdID, command string, cols, rows int, env map[string]string)
 	}
 	cmd.Env = append(cmd.Env, fmt.Sprintf("COLUMNS=%d", cols), fmt.Sprintf("LINES=%d", rows))
 
-	stdout, _ := cmd.StdoutPipe()
-	stderr, _ := cmd.StderrPipe()
-	stdin, _ := cmd.StdinPipe()
-
-	if err := cmd.Start(); err != nil {
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	if err != nil {
 		sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": err.Error()})
 		sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 1})
 		return
 	}
 
 	sessionsMu.Lock()
-	sessions[cmdID] = &Session{Process: cmd.Process, Stdin: stdin, CmdID: cmdID, IsPTY: true}
+	sessions[cmdID] = &Session{Process: cmd.Process, Stdin: ptmx, PTY: ptmx, CmdID: cmdID, IsPTY: true}
 	sessionsMu.Unlock()
 
 	sendEvent("status", map[string]interface{}{"cmd_id": cmdID, "status": "started"})
 
-	// Read stdout with base64 encoding for binary safety
+	// Read PTY output with base64 encoding for binary safety
 	go func() {
+		defer ptmx.Close()
 		buf := make([]byte, 1024)
 		for {
-			n, err := stdout.Read(buf)
+			n, err := ptmx.Read(buf)
 			if n > 0 {
 				encoded := base64.StdEncoding.EncodeToString(buf[:n])
 				sendEvent("output", map[string]interface{}{
@@ -732,8 +927,6 @@ func handlePTYExec(cmdID, command string, cols, rows int, env map[string]string)
 			}
 		}
 	}()
-
-	go readStream(stderr, "stderr", cmdID)
 
 	go func() {
 		err := cmd.Wait()
@@ -753,11 +946,13 @@ func handlePTYExec(cmdID, command string, cols, rows int, env map[string]string)
 }
 
 func handleResize(cmdID string, cols, rows int) {
-	// For pipe-based PTY we signal size via environment in the child,
-	// but can't do live resize without a real PTY. No-op.
-	_ = cmdID
-	_ = cols
-	_ = rows
+	sessionsMu.Lock()
+	sess, ok := sessions[cmdID]
+	sessionsMu.Unlock()
+	if !ok || !sess.IsPTY || sess.PTY == nil {
+		return
+	}
+	_ = pty.Setsize(sess.PTY, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 }
 
 // =============================================================================
@@ -780,8 +975,12 @@ func main() {
 
 	sendEvent("status", map[string]interface{}{"status": "ready"})
 
+	// Stdin reader: 1MB initial buffer, 64MB cap. The 1MB cap from the
+	// previous version silently dropped any JSON request larger than 1MB
+	// (e.g. write_file with base64 content > ~750KB binary), producing
+	// no response and a 30s timeout on the host.
 	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024)
 
 	for scanner.Scan() {
 		var req Request
@@ -794,7 +993,7 @@ func main() {
 			go handleExec(req.ID, req.Command, req.Bg, req.Env)
 
 		case "pty_exec":
-			go handlePTYExec(req.ID, req.Command, req.Cols, req.Rows, req.Env)
+			handlePTYExec(req.ID, req.Command, req.Cols, req.Rows, req.Env)
 
 		case "input":
 			handleInput(req.ID, req.Data, req.Encoding)
@@ -811,12 +1010,15 @@ func main() {
 		case "write_file":
 			go handleWriteFile(req.ID, req.Path, req.Content, req.Append)
 
+		case "write_text":
+			go handleWriteText(req.ID, req.Path, req.Content, req.Append)
+
 		case "write_file_vsock":
 			// Fast path: download file from host via vsock
-			go handleVsockDownload(req.ID, req.Path, req.VsockPort)
+			go handleVsockDownload(req.ID, req.Path, req.VsockPort, req.Append)
 
 		case "list_dir":
-			go handleListDir(req.ID, req.Path)
+			go handleListDir(req.ID, req.Path, req.VsockPort, req.UseVsock)
 
 		case "file_info":
 			go handleFileInfo(req.ID, req.Path)
