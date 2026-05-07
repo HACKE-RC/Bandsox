@@ -90,8 +90,12 @@
         const fitAddon = new FitAddon.FitAddon();
         term.loadAddon(fitAddon);
 
-        term.open(document.getElementById('terminal-container'));
+        const termContainer = document.getElementById('terminal-container');
+        term.open(termContainer);
         fitAddon.fit();
+        term.focus();
+        termContainer.addEventListener('click', () => term.focus());
+        window.addEventListener('focus', () => term.focus());
 
         // Initial connection
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -108,9 +112,7 @@
         };
 
         ws.onmessage = (event) => {
-            // Server sends base64 encoded data
-            const data = atob(event.data);
-            term.write(data);
+            term.write(event.data);
         };
 
         ws.onclose = (event) => {

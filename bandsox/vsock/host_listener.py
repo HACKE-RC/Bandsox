@@ -78,6 +78,12 @@ class VsockHostListener:
         self._pending_uploads: dict[str, str] = {}
         self._pending_uploads_lock = threading.Lock()
 
+        # Pending in-memory uploads: cmd_id -> {"buf": bytearray, "done": Event,
+        # "error": str|None}. Used by VM.get_file_contents() to receive an
+        # upload directly into RAM instead of going through a tempfile.
+        self._pending_buffers: dict[str, dict] = {}
+        self._pending_buffers_lock = threading.Lock()
+
         # Pending downloads: maps cmd_id -> bytes for write_file_vsock operations
         # When VM.upload_file() uses the vsock fast path, it registers the file
         # content here so the guest can download it via vsock.
@@ -113,10 +119,13 @@ class VsockHostListener:
             try:
                 self.listener_socket.bind(self.listener_path)
                 # Deep backlog: file-heavy workloads burst many parallel
-                # connections (Read fanning out across subagents). A small
-                # listen() queue drops extras as ECONNREFUSED, which the
-                # guest sees as `Connection reset by peer`.
-                self.listener_socket.listen(128)
+                # connections (Read fanning out across subagents, athena's
+                # webui under load). A small listen() queue drops extras
+                # as ECONNREFUSED, which the guest agent treats as a vsock
+                # failure and locks itself into the slow serial path for
+                # the backoff window — silently regressing every other
+                # in-flight read.
+                self.listener_socket.listen(1024)
                 self.listener_socket.settimeout(
                     1.0
                 )  # Allow periodic checks for shutdown
@@ -197,6 +206,34 @@ class VsockHostListener:
         """Get the local path for a pending upload, if registered."""
         with self._pending_uploads_lock:
             return self._pending_uploads.get(cmd_id)
+
+    def register_pending_buffer(self, cmd_id: str, max_bytes: int = 0) -> dict:
+        """Register an expected in-memory upload from the guest.
+
+        The caller waits on the returned ``done`` Event and then reads
+        ``buf`` (bytes) or ``error`` (str). Used by get_file_contents() to
+        avoid a host-side tempfile when reading via vsock.
+
+        ``max_bytes`` (0 = unlimited) caps the upload at the listener so a
+        guest can't OOM the host by reporting an absurd size.
+        """
+        slot = {
+            "buf": bytearray(),
+            "done": threading.Event(),
+            "error": None,
+            "max_bytes": int(max_bytes) if max_bytes else 0,
+        }
+        with self._pending_buffers_lock:
+            self._pending_buffers[cmd_id] = slot
+        return slot
+
+    def unregister_pending_buffer(self, cmd_id: str):
+        with self._pending_buffers_lock:
+            self._pending_buffers.pop(cmd_id, None)
+
+    def get_pending_buffer(self, cmd_id: str) -> Optional[dict]:
+        with self._pending_buffers_lock:
+            return self._pending_buffers.get(cmd_id)
 
     def register_pending_download(self, cmd_id: str, data: bytes):
         """Register in-memory data for a guest download (write_file_vsock fast path).
@@ -363,8 +400,92 @@ class VsockHostListener:
         2. Else if on_upload callback is set, call it with the data
         3. Else write to request.path (legacy behavior, not recommended)
         """
-        # Determine destination path - check pending uploads first
+        # In-memory destination takes priority — used by get_file_contents()
+        # to avoid round-tripping through the disk on cold reads.
+        #
+        # Brief poll for registration: the host registers the buffer BEFORE
+        # writing the read_file JSON to the agent, so by the time the guest
+        # uploads we should already see the slot. But on a fast guest +
+        # contended host event loop the connection can land before the
+        # registration map is populated. A short bounded wait here removes
+        # that race without hurting the common case.
+        buf_slot = self.get_pending_buffer(request.cmd_id)
+        if buf_slot is None:
+            for _ in range(20):  # up to ~200ms
+                buf_slot = self.get_pending_buffer(request.cmd_id)
+                if buf_slot is not None:
+                    break
+                time.sleep(0.01)
+        if buf_slot is not None:
+            cap = buf_slot.get("max_bytes") or 0
+            if cap and request.size > cap:
+                buf_slot["error"] = (
+                    f"Upload size {request.size} exceeds buffer cap {cap}"
+                )
+                buf_slot["done"].set()
+                self._send_error(client, request.cmd_id, buf_slot["error"])
+                return
+            self._send_message(
+                client,
+                {"type": ResponseType.READY.value, "cmd_id": request.cmd_id},
+            )
+            received = 0
+            md5 = hashlib.md5() if request.checksum else None
+            try:
+                if initial_data:
+                    data = initial_data[: request.size]
+                    buf_slot["buf"].extend(data)
+                    received += len(data)
+                    if md5:
+                        md5.update(data)
+                while received < request.size:
+                    chunk = client.recv(min(CHUNK_SIZE, request.size - received))
+                    if not chunk:
+                        buf_slot["error"] = "Connection closed during upload"
+                        buf_slot["done"].set()
+                        self._send_error(client, request.cmd_id, buf_slot["error"])
+                        return
+                    buf_slot["buf"].extend(chunk)
+                    received += len(chunk)
+                    if md5:
+                        md5.update(chunk)
+                if md5 and md5.hexdigest() != request.checksum:
+                    buf_slot["error"] = (
+                        f"Checksum mismatch: expected {request.checksum}, got {md5.hexdigest()}"
+                    )
+                    buf_slot["done"].set()
+                    self._send_error(client, request.cmd_id, buf_slot["error"])
+                    return
+                buf_slot["done"].set()
+                self._send_message(
+                    client,
+                    {
+                        "type": ResponseType.COMPLETE.value,
+                        "cmd_id": request.cmd_id,
+                        "size": received,
+                    },
+                )
+                return
+            except socket.timeout:
+                buf_slot["error"] = "Upload timed out"
+                buf_slot["done"].set()
+                self._send_error(client, request.cmd_id, buf_slot["error"])
+                return
+            except Exception as e:
+                buf_slot["error"] = str(e)
+                buf_slot["done"].set()
+                self._send_error(client, request.cmd_id, f"Buffer upload failed: {e}")
+                return
+
+        # Determine destination path - check pending uploads first.
+        # Same brief poll as the buffer path: closes the registration race.
         dest_path = self.get_pending_upload_path(request.cmd_id)
+        if dest_path is None:
+            for _ in range(20):
+                dest_path = self.get_pending_upload_path(request.cmd_id)
+                if dest_path is not None:
+                    break
+                time.sleep(0.01)
         if dest_path:
             logger.info(
                 f"Handling upload: {request.path} -> {dest_path} ({request.size} bytes)"
@@ -449,7 +570,16 @@ class VsockHostListener:
                 except Exception:
                     pass
 
-        # Legacy/callback path: receive into memory.
+        # Legacy/callback path: receive into memory. Hard-cap at 256 MiB so a
+        # bogus `size` from a misbehaving guest can't OOM the host.
+        _LEGACY_MAX = 256 * 1024 * 1024
+        if request.size > _LEGACY_MAX:
+            self._send_error(
+                client,
+                request.cmd_id,
+                f"Upload too large for in-memory path: {request.size} > {_LEGACY_MAX}",
+            )
+            return
         received = len(initial_data)
         md5 = hashlib.md5() if request.checksum else None
         if md5:
@@ -646,17 +776,26 @@ class VsockHostListener:
         )
 
     def _serve_download_raw_data(self, client: socket.socket, request, data: bytes):
-        """Serve download data as one JSON header followed by raw bytes."""
-        md5 = hashlib.md5(data).hexdigest()
+        """Serve download data as one JSON header followed by raw bytes.
+
+        We skip the MD5 here. Under burst load (200 parallel writes of
+        512KB), Python-side hashlib.md5 holds the GIL for ~3ms each →
+        ~600ms of aggregate serialization. The vsock stream is reliable
+        and the data came directly from the host process, so an integrity
+        check between two memory regions on the same machine is pure
+        overhead. Empty checksum tells the agent to skip verification.
+        """
         self._send_message(
             client,
             {
                 "type": ResponseType.READY.value,
                 "cmd_id": request.cmd_id,
                 "size": len(data),
-                "checksum": md5,
+                "checksum": "",
             },
         )
+        # sendall releases the GIL inside the kernel write — concurrent
+        # downloads can actually run in parallel here.
         client.sendall(data)
         logger.debug(
             f"Vsock raw download served: {request.path} ({len(data)} bytes)"

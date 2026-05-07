@@ -102,28 +102,29 @@ def _vsock_probe(port: int) -> bool:
 
 
 def _vsock_can_use(port: int) -> bool:
-    """Return True if vsock is believed to work, probing on first call.
+    """Return True if we should attempt vsock for this call.
 
-    Cached True means we keep using vsock. Cached False means we back
-    off with exponential growth (2s, 4s, 8s, ... capped at 30s) so a
-    one-shot early-boot race doesn't lock the VM into serial for long.
+    No active probe — that wastes a 1s connect on cold reads even when
+    vsock works. We optimistically say yes unless the module is missing
+    or a recent attempt failed (then back off exponentially). The real
+    connect inside vsock_create_connection acts as the probe and updates
+    state on failure.
     """
+    if not _vsock_module_available():
+        return False
+
     with _vsock_available_lock:
         state = _vsock_available
         since = time.time() - _vsock_last_probe_ts
         fails = _vsock_fail_streak
 
-    if state is True:
-        return True
-
     if state is False:
-        # Exponential backoff: 2, 4, 8, 16, 30, 30, ...
         backoff = min(_VSOCK_REPROBE_BASE * (2 ** max(0, fails - 1)), _VSOCK_REPROBE_MAX)
         if since < backoff:
             return False
 
-    # Unknown, or backoff elapsed → probe
-    return _vsock_probe(port)
+    # state is True or None (never tried) or backoff elapsed → try it.
+    return True
 
 
 def _vsock_mark_broken():
@@ -142,10 +143,17 @@ def vsock_create_connection(port: int, timeout: float = 10.0):
     if not _vsock_module_available():
         return None
 
+    global _vsock_available, _vsock_last_probe_ts, _vsock_fail_streak
     try:
         sock = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         sock.connect((VSOCK_CID_HOST, port))
+        # Successful connect doubles as our liveness signal — clear any
+        # prior failure state so subsequent reads skip the backoff gate.
+        with _vsock_available_lock:
+            _vsock_available = True
+            _vsock_last_probe_ts = time.time()
+            _vsock_fail_streak = 0
         return sock
     except Exception:
         _vsock_mark_broken()
@@ -438,8 +446,12 @@ def handle_read_file(cmd_id, path):
 
         file_size = os.path.getsize(path)
 
-        # For small files (<= 2KB), use single-shot transfer for efficiency
-        CHUNK_SIZE = 2 * 1024  # 2KB chunks
+        # 16KB chunks. Older code used 2KB + 200ms sleep, sized for a
+        # supposed 115200-baud serial limit. The Firecracker virtio-serial
+        # transport is much faster than that — kernel-level write() blocks
+        # if the channel can't drain, which is the right way to apply
+        # backpressure. Artificial sleeps just made cold reads take 100s/MB.
+        CHUNK_SIZE = 16 * 1024
 
         if file_size <= CHUNK_SIZE:
             # Small file - send all at once (backward compatible)
@@ -471,11 +483,8 @@ def handle_read_file(cmd_id, path):
                     })
 
                     offset += len(chunk)
-
-                    # Throttle output to prevent serial buffer overflow
-                    # Serial console is slow (~115200 baud = ~11KB/s max)
-                    # 2KB chunk + base64 overhead = ~2.7KB, needs ~250ms to transmit
-                    time.sleep(0.2)  # 200ms delay between chunks for serial safety
+                    # No artificial throttle — write() above blocks if the
+                    # serial buffer is full, which is the correct backpressure.
 
             # Send completion event with checksum
             send_event("file_complete", {
@@ -504,6 +513,24 @@ def handle_write_file(cmd_id, path, content, mode="wb", append=False):
 
         with open(path, file_mode) as f:
             f.write(decoded)
+
+        send_event("status", {"cmd_id": cmd_id, "status": "written"})
+        send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
+
+    except Exception as e:
+        send_event("error", {"cmd_id": cmd_id, "error": str(e)})
+        send_event("exit", {"cmd_id": cmd_id, "exit_code": 1})
+
+
+def handle_write_text(cmd_id, path, content, append=False):
+    try:
+        dirname = os.path.dirname(path)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
+
+        file_mode = "a" if append else "w"
+        with open(path, file_mode, encoding="utf-8") as f:
+            f.write(content or "")
 
         send_event("status", {"cmd_id": cmd_id, "status": "written"})
         send_event("exit", {"cmd_id": cmd_id, "exit_code": 0})
@@ -781,6 +808,17 @@ def main():
                     t = threading.Thread(
                         target=handle_write_file,
                         args=(cmd_id, path, content, "wb", append),
+                        daemon=True,
+                    )
+                    t.start()
+
+                elif req_type == "write_text":
+                    path = req.get("path")
+                    content = req.get("content", "")
+                    append = req.get("append", False)
+                    t = threading.Thread(
+                        target=handle_write_text,
+                        args=(cmd_id, path, content, append),
                         daemon=True,
                     )
                     t.start()

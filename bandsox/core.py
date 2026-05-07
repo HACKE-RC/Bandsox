@@ -1618,6 +1618,27 @@ class RemoteMicroVM:
                 timeout=request_timeout,
             )
 
+    def write_text(
+        self,
+        remote_path: str,
+        content: str,
+        timeout: int = None,
+        append: bool = False,
+    ):
+        """Write a string directly to a file in the VM."""
+        request_timeout = timeout or self.bandsox.timeout
+        self.bandsox._request(
+            "POST",
+            f"/api/vms/{self.vm_id}/write-file",
+            json={
+                "path": remote_path,
+                "content": content or "",
+                "encoding": "utf-8",
+                "append": append,
+            },
+            timeout=request_timeout,
+        )
+
     def append_file(self, local_path: str, remote_path: str, timeout: int = None):
         """Append the contents of a local file onto a file in the VM.
 
@@ -1646,18 +1667,7 @@ class RemoteMicroVM:
 
     def append_text(self, remote_path: str, content: str, timeout: int = None):
         """Append a string to a file in the VM."""
-        request_timeout = timeout or self.bandsox.timeout
-        self.bandsox._request(
-            "POST",
-            f"/api/vms/{self.vm_id}/append-file",
-            json={
-                "path": remote_path,
-                "content": content,
-                "encoding": "utf-8",
-                "append": True,
-            },
-            timeout=request_timeout,
-        )
+        self.write_text(remote_path, content, timeout=timeout, append=True)
 
     def upload_folder(
         self,

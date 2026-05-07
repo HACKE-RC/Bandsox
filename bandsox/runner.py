@@ -159,6 +159,14 @@ def _start_vsock_listener_async(vm):
                 logger.info(
                     f"Vsock listener bound: port={port}, path={listener_path}"
                 )
+                # The agent inside the snapshot was already "ready" when
+                # we snapshotted, and after resume_vm it's running again.
+                # The runner's MicroVM never sees a fresh "ready" event
+                # over stdout though, so its agent_ready stays False —
+                # which makes FastWriteServer (and any future RPC) refuse
+                # to dispatch with "Agent not ready". Mark it ready now
+                # that we have a working vsock listener.
+                vm.agent_ready = True
                 break
             except Exception as e:
                 logger.warning(
