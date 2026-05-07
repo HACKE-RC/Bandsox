@@ -318,6 +318,7 @@ When auth is enabled (`auth.json` exists), all `/api/` endpoints except auth log
 - `GET /api/vms/{vm_id}/files?path=/` -- list files inside the VM.
 - `GET /api/vms/{vm_id}/read-file?path=/etc/hosts` -- read a UTF-8 file.
 - `POST /api/vms/{vm_id}/write-file` -- write a UTF-8 or base64-encoded file.
+- `POST /api/vms/{vm_id}/append-file` -- append UTF-8 or base64-encoded content to a file.
 - `GET /api/vms/{vm_id}/file-info?path=/etc/hosts` -- get file metadata.
 - `POST /api/vms/{vm_id}/upload` -- upload a multipart file.
 - `GET /api/vms/{vm_id}/download?path=/etc/hosts` -- download a file.
@@ -364,6 +365,7 @@ All pages redirect to `/login` if not authenticated.
 | `exec_python(code, cwd, packages, ...)` | Run Python code with isolated env using `uv`. |
 | `exec_python_capture(code, packages, ...)` | Run Python and return output dict. |
 | `start_session(cmd)` | Run a command (background). |
+| `write_text(remote, content, timeout=None, append=False)` | Write UTF-8 text directly without creating a host temp file. |
 | `upload_file(local, remote, timeout=None, append=False)` | Upload a file. Prefers vsock (fast), falls back to chunked serial. Timeout scales with file size (min 30s + 10s/MiB). |
 | `download_file(remote, local)` | Download a file. Prefers vsock (fast), falls back to chunked serial. |
 | `get_file_contents(remote, offset=0, limit=0, show_line_numbers=False, show_header=True, show_footer=True)` | Read file content with optional host-side formatting. |

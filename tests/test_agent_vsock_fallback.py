@@ -121,64 +121,37 @@ class TestVsockBrokenCircuitBreaker:
         assert agent._vsock_can_use(9000) is False
 
     def test_reprobe_interval_is_respected(self, agent, monkeypatch):
-        """After the reprobe interval we must give vsock another chance."""
+        """After the reprobe interval we must give vsock another chance.
+
+        New design: _vsock_can_use no longer actively probes — it simply
+        unblocks the caller (returns True) so the next vsock_create_connection
+        can act as the probe. This avoids paying a 1s connect timeout twice
+        on cold reads.
+        """
+        monkeypatch.setattr(agent, "_vsock_module_available", lambda: True)
         with agent._vsock_available_lock:
             agent._vsock_available = False
             agent._vsock_last_probe_ts = time.time() - 120.0  # >60s ago
+            agent._vsock_fail_streak = 1
+        assert agent._vsock_can_use(9000) is True
 
-        probe_calls = []
-
-        def fake_probe(port):
-            probe_calls.append(port)
-            return False
-
-        monkeypatch.setattr(agent, "_vsock_probe", fake_probe)
-        assert agent._vsock_can_use(9000) is False
-        assert probe_calls == [9000], (
-            "once the reprobe interval elapses we must try again so a "
-            "transient issue doesn't doom the VM forever"
-        )
-
-    def test_fresh_broken_state_skips_probe(self, agent, monkeypatch):
-        """Within the reprobe interval we must NOT hit the network."""
+    def test_fresh_broken_state_skips_use(self, agent, monkeypatch):
+        """Within the reprobe interval we must NOT attempt vsock."""
+        monkeypatch.setattr(agent, "_vsock_module_available", lambda: True)
         with agent._vsock_available_lock:
             agent._vsock_available = False
             agent._vsock_last_probe_ts = time.time()
-
-        probe_calls = []
-
-        def fake_probe(port):
-            probe_calls.append(port)
-            return True
-
-        monkeypatch.setattr(agent, "_vsock_probe", fake_probe)
+            agent._vsock_fail_streak = 1
         assert agent._vsock_can_use(9000) is False
-        assert probe_calls == [], (
-            "circuit breaker must avoid hammering vsock on every read_file "
-            "when we already know it's broken"
-        )
 
-    def test_probe_success_caches_true(self, agent, monkeypatch):
-        """A successful probe must flip the state so subsequent calls skip probing."""
+    def test_unknown_state_allows_attempt(self, agent, monkeypatch):
+        """First-ever call must allow vsock — connect acts as the probe."""
+        monkeypatch.setattr(agent, "_vsock_module_available", lambda: True)
         with agent._vsock_available_lock:
             agent._vsock_available = None
             agent._vsock_last_probe_ts = 0.0
-
-        probe_calls = []
-
-        def fake_probe(port):
-            probe_calls.append(port)
-            with agent._vsock_available_lock:
-                agent._vsock_available = True
-                agent._vsock_last_probe_ts = time.time()
-            return True
-
-        monkeypatch.setattr(agent, "_vsock_probe", fake_probe)
+            agent._vsock_fail_streak = 0
         assert agent._vsock_can_use(9000) is True
-        assert agent._vsock_can_use(9000) is True
-        assert len(probe_calls) == 1, (
-            "once we know vsock works, additional calls must NOT re-probe"
-        )
 
 
 class TestVsockModuleFreeFallback:
