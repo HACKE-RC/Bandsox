@@ -19,6 +19,8 @@ SESSION_MAX_AGE = 86400
 LOGIN_RATE_LIMIT_WINDOW = 60
 LOGIN_RATE_LIMIT_MAX = 10
 API_KEY_PREFIX = "bsx_"
+WS_TERMINAL_PROTOCOL = "bandsox.terminal"
+WS_AUTH_PROTOCOL_PREFIX = "bandsox.auth."
 
 _login_attempts: dict = {}
 
@@ -226,12 +228,37 @@ def get_auth_dependency(storage_dir):
     return require_auth
 
 
+def _websocket_protocols(websocket: WebSocket) -> list[str]:
+    header = websocket.headers.get("sec-websocket-protocol", "")
+    return [part.strip() for part in header.split(",") if part.strip()]
+
+
+def _token_from_websocket_subprotocol(websocket: WebSocket) -> str:
+    for protocol in _websocket_protocols(websocket):
+        if not protocol.startswith(WS_AUTH_PROTOCOL_PREFIX):
+            continue
+        encoded = protocol[len(WS_AUTH_PROTOCOL_PREFIX):]
+        padding = "=" * (-len(encoded) % 4)
+        try:
+            return base64.urlsafe_b64decode(encoded + padding).decode("utf-8")
+        except Exception:
+            logger.debug("Ignoring invalid WebSocket auth subprotocol", exc_info=True)
+    return ""
+
+
+def websocket_accept_subprotocol(websocket: WebSocket) -> Optional[str]:
+    protocols = _websocket_protocols(websocket)
+    if WS_TERMINAL_PROTOCOL in protocols:
+        return WS_TERMINAL_PROTOCOL
+    return None
+
+
 async def authenticate_websocket(websocket: WebSocket, storage_dir: Path) -> bool:
     config = load_auth_config(storage_dir)
     if config is None:
         return True
 
-    token = websocket.query_params.get("token", "")
+    token = websocket.query_params.get("token", "") or _token_from_websocket_subprotocol(websocket)
     if not token:
         return False
 

@@ -7,7 +7,7 @@
 
 export type TerminalOutputCallback = (data: string) => void;
 export type TerminalCloseCallback = () => void;
-export type TerminalErrorCallback = (err: Event) => void;
+export type TerminalErrorCallback = (err: Event | Error) => void;
 
 function bytesToBase64Text(data: ArrayBuffer | ArrayBufferView): string {
   const bytes =
@@ -53,33 +53,51 @@ function decodeBase64Message(data: unknown): string | Promise<string> {
   );
 }
 
+function normalizeTerminalError(err: unknown): Event | Error {
+  if (err instanceof Error) {
+    return err;
+  }
+  if (typeof Event !== "undefined" && err instanceof Event) {
+    return err;
+  }
+  return new Error(String(err));
+}
+
 export class TerminalSession {
   private ws: WebSocket;
   private _closed = false;
+  private closeNotified = false;
   private outputCallback: TerminalOutputCallback | null = null;
   private closeCallback: TerminalCloseCallback | null = null;
   private errorCallback: TerminalErrorCallback | null = null;
+  private pendingOutput: string[] = [];
+  private pendingErrors: Array<Event | Error> = [];
+  private pendingClose = false;
 
   constructor(ws: WebSocket) {
     this.ws = ws;
     this.ws.addEventListener("message", (event) => {
-      const callback = this.outputCallback;
-      if (!callback) {
+      let decoded: string | Promise<string>;
+      try {
+        decoded = decodeBase64Message(event.data);
+      } catch (err) {
+        this.emitError(normalizeTerminalError(err));
         return;
       }
-      const decoded = decodeBase64Message(event.data);
       if (typeof decoded === "string") {
-        callback(decoded);
+        this.emitOutput(decoded);
       } else {
-        void decoded.then(callback);
+        void decoded.then(
+          (data) => this.emitOutput(data),
+          (err) => this.emitError(normalizeTerminalError(err))
+        );
       }
     });
     this.ws.addEventListener("close", () => {
-      this._closed = true;
-      this.closeCallback?.();
+      this.emitClose();
     });
     this.ws.addEventListener("error", (event) => {
-      this.errorCallback?.(event);
+      this.emitError(event);
     });
   }
 
@@ -89,14 +107,26 @@ export class TerminalSession {
 
   onOutput(callback: TerminalOutputCallback): void {
     this.outputCallback = callback;
+    const pending = this.pendingOutput.splice(0);
+    for (const data of pending) {
+      callback(data);
+    }
   }
 
   onClose(callback: TerminalCloseCallback): void {
     this.closeCallback = callback;
+    if (this.pendingClose) {
+      this.pendingClose = false;
+      callback();
+    }
   }
 
   onError(callback: TerminalErrorCallback): void {
     this.errorCallback = callback;
+    const pending = this.pendingErrors.splice(0);
+    for (const err of pending) {
+      callback(err);
+    }
   }
 
   sendInput(text: string): void {
@@ -108,7 +138,39 @@ export class TerminalSession {
   }
 
   close(): void {
-    this._closed = true;
+    this.emitClose();
     this.ws.close();
+  }
+
+  private emitOutput(data: string): void {
+    const callback = this.outputCallback;
+    if (callback) {
+      callback(data);
+    } else {
+      this.pendingOutput.push(data);
+    }
+  }
+
+  private emitError(err: Event | Error): void {
+    const callback = this.errorCallback;
+    if (callback) {
+      callback(err);
+    } else {
+      this.pendingErrors.push(err);
+    }
+  }
+
+  private emitClose(): void {
+    if (this.closeNotified) {
+      return;
+    }
+    this.closeNotified = true;
+    this._closed = true;
+    const callback = this.closeCallback;
+    if (callback) {
+      callback();
+    } else {
+      this.pendingClose = true;
+    }
   }
 }

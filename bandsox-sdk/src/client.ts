@@ -16,6 +16,8 @@ import { MicroVM } from "./microvm";
 import { TerminalSession } from "./terminal";
 
 const SESSION_COOKIE_NAME = "bandsox_session";
+const TERMINAL_SUBPROTOCOL = "bandsox.terminal";
+const TERMINAL_AUTH_PROTOCOL_PREFIX = "bandsox.auth.";
 
 function stripNulls(obj: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -54,6 +56,18 @@ function setHeader(
 
 function canSetCookieHeader(): boolean {
   return typeof window === "undefined";
+}
+
+function base64UrlEncode(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 }
 
 type RawAuthKeysResult = Omit<AuthKeysResult, "key_id"> & {
@@ -415,10 +429,15 @@ export class BandSox {
     const url = new URL(`${wsUrl}/api/vms/${vmId}/terminal`);
     url.searchParams.set("cols", String(cols));
     url.searchParams.set("rows", String(rows));
-    if (token) {
-      url.searchParams.set("token", token);
-    }
-    return new TerminalSession(new Ws(url.toString()));
+    const protocols = token
+      ? [
+          TERMINAL_SUBPROTOCOL,
+          `${TERMINAL_AUTH_PROTOCOL_PREFIX}${base64UrlEncode(token)}`,
+        ]
+      : undefined;
+    return new TerminalSession(
+      protocols ? new Ws(url.toString(), protocols) : new Ws(url.toString())
+    );
   }
 
   // ─── Internal: exposed for MicroVM ───

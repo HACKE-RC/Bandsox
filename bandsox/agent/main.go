@@ -374,6 +374,7 @@ func handleExec(cmdID, command string, background bool, env map[string]string, u
 			}
 		}
 
+		vsockOutputMeta := map[string]interface{}{}
 		if useVsockOutput {
 			port := vsockPort
 			if port == 0 {
@@ -387,14 +388,22 @@ func handleExec(cmdID, command string, background bool, env map[string]string, u
 			// caller still gets its output. Empty-stream failures
 			// don't trigger fallback because there's nothing to
 			// deliver.
+			vsockAttempted := false
 			okOut := true
 			okErr := true
 			if vsockCanUse(port) {
+				vsockAttempted = true
 				okOut = uploadBytesViaVsock(cmdID+":stdout", stdoutBuf.Bytes(), port)
 				okErr = uploadBytesViaVsock(cmdID+":stderr", stderrBuf.Bytes(), port)
 			} else {
 				okOut = false
 				okErr = false
+			}
+			vsockOutputMeta = map[string]interface{}{
+				"requested":       true,
+				"attempted":       vsockAttempted,
+				"stdout_uploaded": okOut,
+				"stderr_uploaded": okErr,
 			}
 			if !okOut && stdoutBuf.Len() > 0 {
 				flushBufferToSerial(stdoutBuf.Bytes(), "stdout", cmdID)
@@ -415,7 +424,11 @@ func handleExec(cmdID, command string, background bool, env map[string]string, u
 				})
 			}
 		}
-		sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": ec})
+		exitPayload := map[string]interface{}{"cmd_id": cmdID, "exit_code": ec}
+		if useVsockOutput {
+			exitPayload["vsock_output"] = vsockOutputMeta
+		}
+		sendEvent("exit", exitPayload)
 	}
 }
 

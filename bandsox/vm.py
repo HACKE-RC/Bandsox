@@ -25,6 +25,7 @@ _DIRECT_TEXT_WRITE_MAX_BYTES = 2 * 1024  # ~2 KiB
 # write() succeed, the guest never assembled a full JSON line, and the
 # request timed out at 30s.
 _SERIAL_WRITE_CHUNK_SIZE = 512 * 1024
+_DEBUGFS_FULL_FILE_FALLBACK_LOG_THRESHOLD = 8 * 1024 * 1024
 
 
 class FastIOError(Exception):
@@ -652,6 +653,9 @@ class MicroVM:
                 cmd_id = payload.get("cmd_id")
                 exit_code = payload.get("exit_code")
                 if cmd_id in self.event_callbacks:
+                    payload_cb = self.event_callbacks[cmd_id].get("on_exit_payload")
+                    if payload_cb:
+                        payload_cb(payload)
                     cb = self.event_callbacks[cmd_id].get("on_exit")
                     if cb:
                         cb(exit_code)
@@ -688,6 +692,7 @@ class MicroVM:
         on_dir_list=None,
         on_file_info=None,
         on_status=None,
+        exit_metadata=None,
         timeout=30,
     ):
         """Sends a JSON request to the agent."""
@@ -704,6 +709,7 @@ class MicroVM:
             on_dir_list=on_dir_list,
             on_file_info=on_file_info,
             on_status=on_status,
+            exit_metadata=exit_metadata,
             timeout=timeout,
         )
 
@@ -720,6 +726,7 @@ class MicroVM:
         on_dir_list=None,
         on_file_info=None,
         on_status=None,
+        exit_metadata=None,
         timeout=30,
     ):
         """Send a request with a caller-supplied cmd_id.
@@ -746,6 +753,11 @@ class MicroVM:
         completion_event = threading.Event()
         result = {"code": -1, "error": None}
 
+        def on_exit_payload(payload):
+            if exit_metadata is not None:
+                exit_metadata.clear()
+                exit_metadata.update(payload or {})
+
         def on_exit(code):
             result["code"] = code
             completion_event.set()
@@ -762,6 +774,7 @@ class MicroVM:
             "on_dir_list": on_dir_list,
             "on_file_info": on_file_info,
             "on_status": on_status,
+            "on_exit_payload": on_exit_payload,
             "on_exit": on_exit,
             "on_error": on_error,
         }
@@ -782,8 +795,13 @@ class MicroVM:
             try:
                 kill_req = json.dumps({"id": cmd_id, "type": "kill"}) + "\n"
                 self._write_to_agent(kill_req)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    "Failed to send kill for timed-out command %s: %s",
+                    cmd_id,
+                    e,
+                    exc_info=True,
+                )
             raise TimeoutError("Command timed out")
 
         # Auto-reconnect-and-retry on transient console drops. Up to 3
@@ -824,6 +842,7 @@ class MicroVM:
                 "on_dir_list": on_dir_list,
                 "on_file_info": on_file_info,
                 "on_status": on_status,
+                "on_exit_payload": on_exit_payload,
                 "on_exit": on_exit,
                 "on_error": on_error,
             }
@@ -832,8 +851,15 @@ class MicroVM:
                 try:
                     kill_req = json.dumps({"id": cmd_id, "type": "kill"}) + "\n"
                     self._write_to_agent(kill_req)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(
+                        "Failed to send kill for timed-out command %s after %s "
+                        "reconnect retries: %s",
+                        cmd_id,
+                        retry_attempts,
+                        e,
+                        exc_info=True,
+                    )
                 raise TimeoutError(
                     f"Command timed out (after {retry_attempts} reconnect retries)"
                 )
@@ -913,6 +939,12 @@ class MicroVM:
                 timeout=timeout,
             )
 
+        port = getattr(self, "vsock_port", None)
+        if not port:
+            raise RuntimeError(
+                "vsock output requested but vsock_port is not set"
+            )
+
         cmd_id = str(uuid.uuid4())
         exec_output_cap = 4 * 1024 * 1024
         stdout_slot = listener.register_pending_buffer(
@@ -921,12 +953,13 @@ class MicroVM:
         stderr_slot = listener.register_pending_buffer(
             cmd_id + ":stderr", max_bytes=exec_output_cap
         )
-        port = self.vsock_port or 9000
-        import os as _os
-        if _os.environ.get("BANDSOX_DEBUG_VSOCK_EXEC"):
-            print(f"[vsock-exec] cmd_id={cmd_id} port={port} "
-                  f"listener_path={listener.listener_path} "
-                  f"pending_buffers={list(listener._pending_buffers.keys())}", flush=True)
+        logger.debug(
+            "vsock-exec cmd_id=%s port=%s listener_path=%s",
+            cmd_id,
+            port,
+            getattr(listener, "listener_path", None),
+        )
+        exit_metadata = {}
         try:
             rc = self._send_request_with_id(
                 cmd_id,
@@ -944,6 +977,7 @@ class MicroVM:
                 # which we still want to forward to callers:
                 on_stdout=on_stdout,
                 on_stderr=on_stderr,
+                exit_metadata=exit_metadata,
                 timeout=timeout,
             )
         except Exception:
@@ -951,19 +985,53 @@ class MicroVM:
             listener.unregister_pending_buffer(cmd_id + ":stderr")
             raise
 
-        # The agent sends `exit` only AFTER its vsock upload attempts
-        # finish, so by the time we land here the buffers' done events
-        # are either set (vsock succeeded) or never will be (agent
-        # fell back to UART because vsock was unavailable). A tight
-        # bound avoids penalising the common case where vsock is broken
-        # for this VM — without it, every exec pays a 5s wait per stream.
-        for slot in (stdout_slot, stderr_slot):
-            slot["done"].wait(timeout=0.2)
-        if _os.environ.get("BANDSOX_DEBUG_VSOCK_EXEC"):
-            print(f"[vsock-exec] cmd_id={cmd_id} done out_size={len(stdout_slot['buf'])} "
-                  f"err_size={len(stderr_slot['buf'])} out_err={stdout_slot.get('error')} "
-                  f"err_err={stderr_slot.get('error')} out_done={stdout_slot['done'].is_set()} "
-                  f"err_done={stderr_slot['done'].is_set()}", flush=True)
+        # Newer agents include per-stream vsock metadata in the exit
+        # payload. If a stream was confirmed uploaded, give the listener
+        # enough time to observe the done marker. Legacy agents and UART
+        # fallback keep the short bound because done may never arrive.
+        vsock_output = exit_metadata.get("vsock_output")
+        if not isinstance(vsock_output, dict):
+            vsock_output = {}
+        try:
+            timeout_seconds = float(timeout)
+        except (TypeError, ValueError):
+            timeout_seconds = 30.0
+        confirmed_upload_wait = min(5.0, max(0.5, timeout_seconds * 0.1))
+        legacy_upload_wait = min(2.0, max(0.2, timeout_seconds * 0.02))
+        for name, slot in (("stdout", stdout_slot), ("stderr", stderr_slot)):
+            uploaded = vsock_output.get(f"{name}_uploaded")
+            if uploaded is True:
+                wait_timeout = confirmed_upload_wait
+            elif uploaded is False:
+                wait_timeout = 0.2
+            else:
+                wait_timeout = legacy_upload_wait
+            if not slot["done"].wait(timeout=wait_timeout):
+                logger.warning(
+                    "vsock-exec %s upload for command %s did not finish within %.1fs; "
+                    "bytes may still be pending, continuing with available UART output",
+                    name,
+                    cmd_id,
+                    wait_timeout,
+                )
+            if slot.get("error"):
+                logger.warning(
+                    "vsock-exec %s upload for command %s failed: %s",
+                    name,
+                    cmd_id,
+                    slot["error"],
+                )
+        logger.debug(
+            "vsock-exec cmd_id=%s done out_size=%s err_size=%s out_err=%s "
+            "err_err=%s out_done=%s err_done=%s",
+            cmd_id,
+            len(stdout_slot["buf"]),
+            len(stderr_slot["buf"]),
+            stdout_slot.get("error"),
+            stderr_slot.get("error"),
+            stdout_slot["done"].is_set(),
+            stderr_slot["done"].is_set(),
+        )
         try:
             if on_stdout and stdout_slot["done"].is_set() and not stdout_slot.get("error"):
                 buf = bytes(stdout_slot["buf"])
@@ -2147,6 +2215,9 @@ class MicroVM:
                 and self.vsock_enabled
                 and self.vsock_listener is not None
                 and getattr(self, "vsock_port", None)
+                and offset == 0
+                and limit == 0
+                and not show_line_numbers
             )
             if vsock_ready:
                 cmd_id = str(uuid.uuid4())
@@ -2349,6 +2420,16 @@ class MicroVM:
                     raise dfs_err
                 with open(temp_path, "rb") as f:
                     raw_bytes = f.read()
+                if (
+                    len(raw_bytes) >= _DEBUGFS_FULL_FILE_FALLBACK_LOG_THRESHOLD
+                    and (offset > 0 or limit > 0 or show_line_numbers)
+                ):
+                    logger.warning(
+                        "debugfs fallback read %s bytes from %s for host-side "
+                        "file formatting",
+                        len(raw_bytes),
+                        path,
+                    )
                 return self._format_file_content(
                     raw_bytes, offset, limit, show_line_numbers, show_header, show_footer
                 )

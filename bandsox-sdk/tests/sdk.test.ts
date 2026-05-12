@@ -31,9 +31,15 @@ function base64ToUtf8(encoded: string): string {
   return new TextDecoder().decode(bytes);
 }
 
+function base64UrlToUtf8(encoded: string): string {
+  const padded = encoded + "=".repeat((4 - (encoded.length % 4)) % 4);
+  return base64ToUtf8(padded.replace(/-/g, "+").replace(/_/g, "/"));
+}
+
 class MockWebSocket {
   static lastInstance: MockWebSocket | null = null;
   url: string;
+  protocols?: string | string[];
   private listeners: Record<string, Set<(event: any) => void>> = {
     message: new Set(),
     close: new Set(),
@@ -42,8 +48,9 @@ class MockWebSocket {
   sent: unknown[] = [];
   readyState = 1;
 
-  constructor(url: string) {
+  constructor(url: string, protocols?: string | string[]) {
     this.url = url;
+    this.protocols = protocols;
     MockWebSocket.lastInstance = this;
   }
 
@@ -1130,6 +1137,15 @@ describe("TerminalSession", () => {
     await vi.waitFor(() => expect(outputs).toEqual(["blob 中"]));
   });
 
+  it("buffers output until onOutput is registered", () => {
+    const outputs: string[] = [];
+    mockWs._emitMessage(btoa("early"));
+
+    session.onOutput((data) => outputs.push(data));
+
+    expect(outputs).toEqual(["early"]);
+  });
+
   it("onOutput replaces the previous callback", () => {
     const first: string[] = [];
     const second: string[] = [];
@@ -1174,6 +1190,16 @@ describe("TerminalSession", () => {
     expect(session.closed).toBe(true);
   });
 
+  it("buffers close until onClose is registered", () => {
+    let closed = false;
+    mockWs._emitClose();
+
+    session.onClose(() => { closed = true; });
+
+    expect(closed).toBe(true);
+    expect(session.closed).toBe(true);
+  });
+
   it("onClose replaces the previous callback", () => {
     let first = 0;
     let second = 0;
@@ -1195,17 +1221,40 @@ describe("TerminalSession", () => {
   });
 
   it("onError fires on socket error", () => {
-    let err: Event | null = null;
+    let err: Event | Error | null = null;
     const fakeEvent = new Event("error");
     session.onError((e) => { err = e; });
     mockWs._emitError(fakeEvent);
     expect(err).toBe(fakeEvent);
   });
 
+  it("buffers errors until onError is registered", () => {
+    const fakeEvent = new Event("error");
+    let err: Event | Error | null = null;
+    mockWs._emitError(fakeEvent);
+
+    session.onError((e) => { err = e; });
+
+    expect(err).toBe(fakeEvent);
+  });
+
+  it("routes malformed base64 messages through onError", () => {
+    const outputs: string[] = [];
+    const errors: Array<Event | Error> = [];
+    session.onOutput((data) => outputs.push(data));
+    session.onError((err) => errors.push(err));
+
+    mockWs._emitMessage("not base64!");
+
+    expect(outputs).toEqual([]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(Error);
+  });
+
   it("onError replaces the previous callback", () => {
     const fakeEvent = new Event("error");
-    let first: Event | null = null;
-    let second: Event | null = null;
+    let first: Event | Error | null = null;
+    let second: Event | Error | null = null;
     expect(mockWs.listenerCount("error")).toBe(1);
     session.onError((e) => { first = e; });
     session.onError((e) => { second = e; });
@@ -1264,7 +1313,7 @@ describe("BandSox connectTerminal", () => {
     globalThis.WebSocket = originalWs;
   });
 
-  it("strips Bearer prefix from auth token in ws URL", () => {
+  it("sends terminal auth over WebSocket subprotocols", () => {
     bs = new BandSox({
       baseUrl: "http://localhost:8000",
       headers: { Authorization: "Bearer mytoken" },
@@ -1272,9 +1321,12 @@ describe("BandSox connectTerminal", () => {
     });
 
     bs.connectTerminal("vm-abc");
-    const url = MockWebSocket.lastInstance!.url;
-    expect(url).toContain("token=mytoken");
-    expect(url).not.toContain("Bearer");
+    const url = new URL(MockWebSocket.lastInstance!.url);
+    const protocols = MockWebSocket.lastInstance!.protocols as string[];
+    const authProtocol = protocols.find((p) => p.startsWith("bandsox.auth."));
+    expect(url.searchParams.has("token")).toBe(false);
+    expect(protocols).toContain("bandsox.terminal");
+    expect(base64UrlToUtf8(authProtocol!.slice("bandsox.auth.".length))).toBe("mytoken");
   });
 
   it("reads lowercase authorization header for ws token", () => {
@@ -1285,7 +1337,9 @@ describe("BandSox connectTerminal", () => {
     });
 
     bs.connectTerminal("vm-abc");
-    expect(MockWebSocket.lastInstance!.url).toContain("token=lower-token");
+    const protocols = MockWebSocket.lastInstance!.protocols as string[];
+    const authProtocol = protocols.find((p) => p.startsWith("bandsox.auth."));
+    expect(base64UrlToUtf8(authProtocol!.slice("bandsox.auth.".length))).toBe("lower-token");
   });
 
   it("passes raw token through when no Bearer prefix", () => {
@@ -1296,7 +1350,9 @@ describe("BandSox connectTerminal", () => {
     });
 
     bs.connectTerminal("vm-abc");
-    expect(MockWebSocket.lastInstance!.url).toContain("token=raw-key-no-prefix");
+    const protocols = MockWebSocket.lastInstance!.protocols as string[];
+    const authProtocol = protocols.find((p) => p.startsWith("bandsox.auth."));
+    expect(base64UrlToUtf8(authProtocol!.slice("bandsox.auth.".length))).toBe("raw-key-no-prefix");
   });
 
   it("omits token query param when Authorization is not configured", () => {
@@ -1309,9 +1365,10 @@ describe("BandSox connectTerminal", () => {
     bs.connectTerminal("vm-abc");
     const url = new URL(MockWebSocket.lastInstance!.url);
     expect(url.searchParams.has("token")).toBe(false);
+    expect(MockWebSocket.lastInstance!.protocols).toBeUndefined();
   });
 
-  it("URL-encodes terminal auth tokens", () => {
+  it("base64url-encodes terminal auth tokens for subprotocol auth", () => {
     bs = new BandSox({
       baseUrl: "http://localhost:8000",
       headers: { Authorization: "Bearer key+with/slash=" },
@@ -1320,7 +1377,12 @@ describe("BandSox connectTerminal", () => {
 
     bs.connectTerminal("vm-abc");
     const url = new URL(MockWebSocket.lastInstance!.url);
-    expect(url.searchParams.get("token")).toBe("key+with/slash=");
+    const protocols = MockWebSocket.lastInstance!.protocols as string[];
+    const authProtocol = protocols.find((p) => p.startsWith("bandsox.auth."));
+    expect(url.searchParams.has("token")).toBe(false);
+    expect(authProtocol).not.toContain("/");
+    expect(authProtocol).not.toContain("=");
+    expect(base64UrlToUtf8(authProtocol!.slice("bandsox.auth.".length))).toBe("key+with/slash=");
   });
 
   it("builds proper ws URL from http baseUrl", () => {

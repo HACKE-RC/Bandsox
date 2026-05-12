@@ -10,12 +10,13 @@ from .auth import (
     create_api_key, list_api_keys, revoke_api_key,
     verify_password, verify_api_key, create_session,
     validate_session, check_rate_limit, authenticate_websocket,
-    get_auth_dependency, SESSION_COOKIE_NAME,
+    get_auth_dependency, websocket_accept_subprotocol, SESSION_COOKIE_NAME,
 )
 import logging
 import asyncio
 import json
 import base64
+import binascii
 import tempfile
 from typing import List
 
@@ -36,6 +37,27 @@ else:
     logger.info("Authentication disabled. Run 'bandsox auth init' to enable.")
 
 require_auth = get_auth_dependency(_auth_storage)
+
+_MAX_FILE_WRITE_BYTES = 256 * 1024 * 1024
+_MAX_BASE64_FILE_CONTENT_CHARS = ((_MAX_FILE_WRITE_BYTES + 2) // 3) * 4
+
+
+def _decode_file_base64_content(content: str) -> bytes:
+    if len(content) > _MAX_BASE64_FILE_CONTENT_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File content exceeds {_MAX_FILE_WRITE_BYTES} byte limit",
+        )
+    try:
+        raw = base64.b64decode(content, validate=True)
+    except binascii.Error:
+        raise HTTPException(status_code=400, detail="Invalid base64 file content")
+    if len(raw) > _MAX_FILE_WRITE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File content exceeds {_MAX_FILE_WRITE_BYTES} byte limit",
+        )
+    return raw
 
 
 # Serve static files
@@ -498,7 +520,7 @@ def write_file(vm_id: str, req: WriteFileRequest):
     vm = _get_running_vm_or_404(vm_id)
     try:
         if req.encoding == "base64":
-            raw = base64.b64decode(req.content)
+            raw = _decode_file_base64_content(req.content)
             if hasattr(vm, "write_bytes"):
                 vm.write_bytes(req.path, raw, append=req.append)
             else:
@@ -521,6 +543,8 @@ def write_file(vm_id: str, req: WriteFileRequest):
             finally:
                 os.unlink(tmp_path)
         return {"status": "appended" if req.append else "written", "path": req.path}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -530,7 +554,7 @@ def append_file(vm_id: str, req: WriteFileRequest):
     vm = _get_running_vm_or_404(vm_id)
     try:
         if req.encoding == "base64":
-            raw = base64.b64decode(req.content)
+            raw = _decode_file_base64_content(req.content)
             if hasattr(vm, "write_bytes"):
                 vm.write_bytes(req.path, raw, append=True)
             else:
@@ -555,6 +579,8 @@ def append_file(vm_id: str, req: WriteFileRequest):
             finally:
                 os.unlink(tmp_path)
         return {"status": "appended", "path": req.path}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -692,7 +718,7 @@ async def terminal_endpoint(websocket: WebSocket, vm_id: str, cols: int = 80, ro
         await websocket.close(code=4001, reason="Unauthorized")
         return
 
-    await websocket.accept()
+    await websocket.accept(subprotocol=websocket_accept_subprotocol(websocket))
 
     vm = bs.get_vm(vm_id)
     if not vm:

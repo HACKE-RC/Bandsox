@@ -171,6 +171,17 @@ const resp = await vm.sendHttpRequest({
 console.log(resp.status_code, resp.body);
 ```
 
+### Terminal sessions
+
+`connectTerminal` opens an interactive PTY WebSocket. In browsers, the SDK sends auth through the `Sec-WebSocket-Protocol` handshake instead of a query string so tokens are not embedded in logged URLs. The server still accepts the older `?token=` form for non-browser clients.
+
+```ts
+const terminal = vm.connectTerminal(120, 40);
+terminal.onOutput((data) => console.log(data));
+terminal.onError((err) => console.error(err));
+terminal.sendInput("ls -la\n");
+```
+
 ### Snapshots
 
 Save the full memory and disk state of a running VM and restore it later.
