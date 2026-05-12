@@ -167,7 +167,7 @@ export class MicroVM {
   }
 
   async appendText(path: string, content: string): Promise<void> {
-    await this.writeFile({ path, content, append: true });
+    await this.appendFile(path, content, "utf-8");
   }
 
   async getFileInfo(path: string): Promise<FileInfo> {

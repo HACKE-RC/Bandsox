@@ -843,16 +843,17 @@ describe("MicroVM", () => {
   });
 
   describe("appendText", () => {
-    it("delegates to writeFile with append=true", async () => {
+    it("delegates to appendFile (same endpoint as appendFile)", async () => {
       fetchMock.mockResolvedValueOnce(makeResponse({ status: "appended" }));
 
       await vm.appendText("/log.txt", "appended line\n");
 
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(url).toBe("http://localhost:8000/api/vms/vm-test/write-file");
+      expect(url).toBe("http://localhost:8000/api/vms/vm-test/append-file");
       const body = JSON.parse(init.body as string);
       expect(body.path).toBe("/log.txt");
       expect(body.content).toBe("appended line\n");
+      expect(body.encoding).toBe("utf-8");
       expect(body.append).toBe(true);
     });
   });
