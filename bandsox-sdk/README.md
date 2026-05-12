@@ -118,6 +118,12 @@ if (res.success) {
 // Write a file
 await vm.writeFile({ path: "/app/config.json", content: '{"debug": true}' });
 
+// Append text using a convenience helper
+await vm.appendText("/app/config.json", "\n{\"feature\": \"fast-read\"}");
+
+// Append with explicit encoding (utf-8 or base64)
+await vm.appendFile("/app/config.json", "\n{\"mode\": \"append\"}", "utf-8");
+
 // Read it back
 const content = await vm.readFile("/app/config.json");
 
@@ -215,6 +221,29 @@ await bs.renameVm(vmId, "new-name");
 await bs.updateVmMetadata(vmId, { deployed: true });
 ```
 
+You can also wait for a freshly created VM to become interactive:
+
+```ts
+const ready = await vm.waitForAgent(30);
+if (!ready) throw new Error("VM did not become ready in time");
+```
+
+### Authentication helpers
+
+```ts
+// Check whether current credentials/session are authenticated
+const status = await bs.authCheck();
+
+// Programmatic login/logout for session-based flows
+await bs.login("admin-password");
+await bs.logout();
+
+// API key management (requires existing auth)
+const created = await bs.createApiKey("ci-runner");
+const keys = await bs.listApiKeys();
+await bs.revokeApiKey(created.key_id);
+```
+
 ### Error handling
 
 All API errors throw `BandSoxError`, which carries the HTTP status code:
@@ -243,6 +272,7 @@ try {
 | `restoreVm(snapshotId, options?)` | Restore a VM from a snapshot. |
 | `getVm(vmId)` | Get a `MicroVM` handle with cached info. |
 | `getVmInfo(vmId)` | Get raw VM details as `VmInfo`. |
+| `listProjects(options?)` | Alias of `listVms(options?)` (used by UI/project views). |
 | `listVms(options?)` | List VMs. Supports `limit` and `metadata_equals` filters. |
 | `deleteVm(vmId)` | Delete a VM and its resources. |
 | `renameVm(vmId, newName)` | Rename a VM. |
@@ -255,6 +285,12 @@ try {
 | `deleteSnapshot(snapshotId)` | Delete a snapshot. |
 | `updateSnapshotMetadata(snapshotId, metadata)` | Update snapshot metadata. |
 | `renameSnapshot(snapshotId, newName)` | Rename a snapshot. |
+| `authCheck()` | Check auth state for current request context. |
+| `login(password)` | Log in and receive session token/cookie response. |
+| `logout()` | Log out the current session. |
+| `listApiKeys()` | List API keys. |
+| `createApiKey(name)` | Create an API key. |
+| `revokeApiKey(keyId)` | Revoke an API key. |
 
 ### `MicroVM`
 
@@ -266,6 +302,7 @@ try {
 | `delete()` | Delete the VM. |
 | `snapshot(options)` | Snapshot. Returns snapshot ID. |
 | `getInfo()` | Fetch current VM info from the server. |
+| `waitForAgent(timeout?)` | Poll until the VM agent is ready (or timeout). |
 | `info` | Cached `VmInfo` from the last `getInfo()` call. |
 | `rename(newName)` | Rename the VM. |
 | `updateMetadata(metadata)` | Replace VM metadata. |
@@ -274,6 +311,8 @@ try {
 | `listDir(path?)` | List directory contents. |
 | `readFile(path)` | Read a file as a string. |
 | `writeFile(options)` | Write a string to a file. Supports utf-8 and base64 encoding. |
+| `appendFile(path, content, encoding?)` | Append content directly with explicit encoding. |
+| `appendText(path, content)` | Append UTF-8 text convenience wrapper. |
 | `getFileInfo(path)` | Get file metadata (size, mode, mtime). |
 | `downloadFile(remotePath)` | Download a file as `Uint8Array`. |
 | `uploadFile(remotePath, content)` | Upload a `Uint8Array` or string. |
@@ -331,6 +370,8 @@ Every method in this SDK maps to its Python counterpart:
 | `vm.execCommand("ls")` | `vm.exec_command("ls")` |
 | `vm.execPython({ code, packages })` | `vm.exec_python_capture(code, packages=...)` |
 | `vm.readFile("/etc/hosts")` | `vm.get_file_contents("/etc/hosts")` |
+| `vm.appendText(path, text)` | `vm.append_text(path, text)` |
+| `vm.appendFile(path, content, "base64")` | `vm.write_bytes(path, data, append=True)` |
 | `vm.uploadFile(path, data)` | `vm.upload_file(local, remote)` |
 | `vm.sendHttpRequest({ port })` | `vm.send_http_request(port=...)` |
 | `vm.snapshot({ name })` | `bs.snapshot_vm(vm, name)` |

@@ -13,6 +13,7 @@ import {
 } from "./types";
 import { BandSoxError } from "./error";
 import { MicroVM } from "./microvm";
+import { TerminalSession } from "./terminal";
 
 function stripNulls(obj: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -28,11 +29,13 @@ export class BandSox {
   private baseUrl: string;
   private headers: Record<string, string>;
   private timeout: number;
+  private _WebSocket?: typeof WebSocket;
 
   constructor(config: BandSoxConfig) {
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
     this.headers = config.headers ?? {};
     this.timeout = config.timeout ?? 60_000;
+    this._WebSocket = config.WebSocket;
   }
 
   private async request<T>(
@@ -182,7 +185,14 @@ export class BandSox {
   // ─── VM queries ───
 
   async listProjects(options: ListVmsOptions = {}): Promise<VmInfo[]> {
-    return this.listVms(options);
+    const params: Record<string, string | null> = {};
+    if (options.limit != null) {
+      params["limit"] = String(options.limit);
+    }
+    if (options.metadata_equals) {
+      params["metadata_equals"] = JSON.stringify(options.metadata_equals);
+    }
+    return this.request<VmInfo[]>("GET", "/api/projects", { params });
   }
 
   async listVms(options: ListVmsOptions = {}): Promise<VmInfo[]> {
@@ -320,6 +330,26 @@ export class BandSox {
 
   async revokeApiKey(keyId: string): Promise<{ status: string }> {
     return this.request("DELETE", `/api/auth/keys/${keyId}`);
+  }
+
+  // ─── Terminal ───
+
+  connectTerminal(vmId: string, cols = 80, rows = 24): TerminalSession {
+    const Ws = this._WebSocket ?? globalThis.WebSocket;
+    if (!Ws) {
+      throw new Error(
+        "WebSocket is not available. Provide a WebSocket constructor in BandSoxConfig.WebSocket."
+      );
+    }
+    const wsUrl = this.baseUrl.replace(/^http/, "ws");
+    const token = this.headers["Authorization"];
+    const url = new URL(`${wsUrl}/api/vms/${vmId}/terminal`);
+    url.searchParams.set("cols", String(cols));
+    url.searchParams.set("rows", String(rows));
+    if (token) {
+      url.searchParams.set("token", token);
+    }
+    return new TerminalSession(new Ws(url.toString()));
   }
 
   // ─── Internal: exposed for MicroVM ───

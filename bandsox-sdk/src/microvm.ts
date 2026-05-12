@@ -12,6 +12,7 @@ import {
   SnapshotOptions,
 } from "./types";
 import { BandSox } from "./client";
+import { TerminalSession } from "./terminal";
 
 export class MicroVM {
   readonly vmId: string;
@@ -221,6 +222,12 @@ export class MicroVM {
       }
       await this.uploadFile(remotePath, content);
     }
+  }
+
+  // ─── Terminal ───
+
+  connectTerminal(cols = 80, rows = 24): TerminalSession {
+    return this.bandsox.connectTerminal(this.vmId, cols, rows);
   }
 
   // ─── Networking ───

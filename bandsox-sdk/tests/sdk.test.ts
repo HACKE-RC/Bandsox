@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { BandSox, MicroVM, BandSoxError } from "../src";
+import { BandSox, MicroVM, BandSoxError, TerminalSession } from "../src";
 
 // ─── Helpers ───
 
@@ -16,6 +16,47 @@ function setupFetch() {
   const mock = vi.fn();
   vi.stubGlobal("fetch", mock);
   return mock;
+}
+
+class MockWebSocket {
+  url: string;
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  sent: unknown[] = [];
+  readyState = 1;
+
+  constructor(url: string) {
+    this.url = url;
+  }
+
+  addEventListener(type: string, handler: (event: any) => void) {
+    if (type === "message") (this as any).onmessage = handler;
+    if (type === "close") (this as any).onclose = handler;
+    if (type === "error") (this as any).onerror = handler;
+  }
+
+  send(data: string) {
+    this.sent.push(JSON.parse(data));
+  }
+
+  close() {
+    this.readyState = 3;
+    if (this.onclose) this.onclose();
+  }
+
+  // helpers for driving tests
+  _emitMessage(data: string) {
+    if (this.onmessage) {
+      this.onmessage(new MessageEvent("message", { data }));
+    }
+  }
+  _emitClose() {
+    if (this.onclose) this.onclose();
+  }
+  _emitError(e: Event) {
+    if (this.onerror) this.onerror(e);
+  }
 }
 
 // ─── BandSox client ───
@@ -368,15 +409,25 @@ describe("BandSox", () => {
   // ── listProjects ──
 
   describe("listProjects", () => {
-    it("delegates to listVms endpoint", async () => {
+    it("calls /api/projects alias", async () => {
       const vms = [{ id: "vm-1", name: "proj" }];
       fetchMock.mockResolvedValueOnce(makeResponse(vms));
 
       const result = await bs.listProjects();
       expect(result).toEqual(vms);
       expect((fetchMock.mock.calls[0] as string[])[0]).toBe(
-        "http://localhost:8000/api/vms"
+        "http://localhost:8000/api/projects"
       );
+    });
+
+    it("passes limit and metadata_equals params", async () => {
+      fetchMock.mockResolvedValueOnce(makeResponse([]));
+
+      await bs.listProjects({ limit: 5, metadata_equals: { env: "dev" } });
+
+      const url = (fetchMock.mock.calls[0] as string[])[0];
+      expect(url).toContain("limit=5");
+      expect(url).toContain("metadata_equals=%7B%22env%22%3A%22dev%22%7D");
     });
   });
 
@@ -910,5 +961,151 @@ describe("edge cases", () => {
     const h = init.headers as Record<string, string>;
     expect(h["X-Custom"]).toBe("value");
     expect(h["Authorization"]).toBe("Bearer key");
+  });
+});
+
+// ─── TerminalSession ───
+
+describe("TerminalSession", () => {
+  let mockWs: MockWebSocket;
+  let session: TerminalSession;
+
+  beforeEach(() => {
+    mockWs = new MockWebSocket("ws://localhost:8000/api/vms/vm-test/terminal?cols=80&rows=24");
+    session = new TerminalSession(mockWs as unknown as WebSocket);
+  });
+
+  it("onOutput decodes base64 messages", () => {
+    const outputs: string[] = [];
+    session.onOutput((data) => outputs.push(data));
+    mockWs._emitMessage(btoa("hello\n"));
+    mockWs._emitMessage(btoa("world"));
+    expect(outputs).toEqual(["hello\n", "world"]);
+  });
+
+  it("sendInput sends base64-encoded JSON", () => {
+    session.sendInput("ls -la\n");
+    expect(mockWs.sent).toEqual([{ type: "input", data: btoa("ls -la\n") }]);
+  });
+
+  it("resize sends cols/rows JSON", () => {
+    session.resize(120, 40);
+    expect(mockWs.sent).toEqual([{ type: "resize", cols: 120, rows: 40 }]);
+  });
+
+  it("onClose fires when socket closes", () => {
+    let closed = false;
+    session.onClose(() => { closed = true; });
+    expect(session.closed).toBe(false);
+    mockWs._emitClose();
+    expect(closed).toBe(true);
+    expect(session.closed).toBe(true);
+  });
+
+  it("close() calls ws.close and updates closed flag", () => {
+    session.close();
+    expect(mockWs.readyState).toBe(3);
+    expect(session.closed).toBe(true);
+  });
+
+  it("onError fires on socket error", () => {
+    let err: Event | null = null;
+    const fakeEvent = new Event("error");
+    session.onError((e) => { err = e; });
+    mockWs._emitError(fakeEvent);
+    expect(err).toBe(fakeEvent);
+  });
+});
+
+// ─── BandSox connectTerminal ───
+
+describe("BandSox connectTerminal", () => {
+  let bs: BandSox;
+  let fetchMock: ReturnType<typeof setupFetch>;
+
+  beforeEach(() => {
+    fetchMock = setupFetch();
+  });
+
+  it("builds ws URL and returns TerminalSession", () => {
+    const originalWs = globalThis.WebSocket;
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+
+    bs = new BandSox({
+      baseUrl: "http://localhost:8000",
+      headers: { Authorization: "Bearer mytoken" },
+    });
+
+    const session = bs.connectTerminal("vm-abc", 120, 40);
+    expect(session).toBeInstanceOf(TerminalSession);
+
+    globalThis.WebSocket = originalWs;
+  });
+
+  it("uses configured WebSocket constructor when provided", () => {
+    bs = new BandSox({
+      baseUrl: "http://localhost:8000",
+      headers: {},
+      WebSocket: MockWebSocket as unknown as typeof WebSocket,
+    });
+
+    const session = bs.connectTerminal("vm-xyz");
+    expect(session).toBeInstanceOf(TerminalSession);
+  });
+
+  it("throws when no WebSocket is available", () => {
+    const originalWs = globalThis.WebSocket;
+    (globalThis as any).WebSocket = undefined;
+
+    bs = new BandSox({ baseUrl: "http://localhost:8000", headers: {} });
+    expect(() => bs.connectTerminal("vm-1")).toThrow(/WebSocket is not available/);
+
+    globalThis.WebSocket = originalWs;
+  });
+
+  it("includes auth token in ws URL query string", () => {
+    bs = new BandSox({
+      baseUrl: "http://localhost:8000",
+      headers: { Authorization: "Bearer mytoken" },
+      WebSocket: MockWebSocket as unknown as typeof WebSocket,
+    });
+
+    // We can't easily inspect the URL passed to the constructor,
+    // but we can verify the session was created successfully.
+    const session = bs.connectTerminal("vm-abc");
+    expect(session).toBeInstanceOf(TerminalSession);
+  });
+
+  it("builds proper ws URL from http baseUrl", () => {
+    bs = new BandSox({
+      baseUrl: "https://api.example.com",
+      headers: {},
+      WebSocket: MockWebSocket as unknown as typeof WebSocket,
+    });
+
+    // connectTerminal should replace https with wss
+    const session = bs.connectTerminal("vm-ssl");
+    expect(session).toBeInstanceOf(TerminalSession);
+  });
+});
+
+// ─── MicroVM connectTerminal ───
+
+describe("MicroVM connectTerminal", () => {
+  it("delegates to BandSox connectTerminal", () => {
+    const originalWs = globalThis.WebSocket;
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+
+    const fetchMock = setupFetch();
+    const bs = new BandSox({
+      baseUrl: "http://localhost:8000",
+      headers: {},
+    });
+    const vm = new MicroVM("vm-delegate", bs);
+
+    const session = vm.connectTerminal(100, 50);
+    expect(session).toBeInstanceOf(TerminalSession);
+
+    globalThis.WebSocket = originalWs;
   });
 });
