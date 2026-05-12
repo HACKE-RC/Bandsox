@@ -1,4 +1,4 @@
-import {
+import type {
   BandSoxConfig,
   CreateVmOptions,
   CreateVmFromDockerfileOptions,
@@ -15,6 +15,8 @@ import { BandSoxError } from "./error";
 import { MicroVM } from "./microvm";
 import { TerminalSession } from "./terminal";
 
+const SESSION_COOKIE_NAME = "bandsox_session";
+
 function stripNulls(obj: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(obj)) {
@@ -25,17 +27,52 @@ function stripNulls(obj: Record<string, unknown>): Record<string, unknown> {
   return result;
 }
 
+function getHeader(
+  headers: Record<string, string>,
+  name: string
+): string | undefined {
+  const lowerName = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === lowerName) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function setHeader(
+  headers: Record<string, string>,
+  name: string,
+  value: string
+): void {
+  const lowerName = name.toLowerCase();
+  const existing = Object.keys(headers).find(
+    (key) => key.toLowerCase() === lowerName
+  );
+  headers[existing ?? name] = value;
+}
+
+function canSetCookieHeader(): boolean {
+  return typeof window === "undefined";
+}
+
+type RawAuthKeysResult = Omit<AuthKeysResult, "key_id"> & {
+  key_id?: string;
+  id?: string;
+};
+
 export class BandSox {
   private baseUrl: string;
   private headers: Record<string, string>;
   private timeout: number;
-  private _WebSocket?: typeof WebSocket;
+  private wsCtor?: typeof WebSocket;
+  private sessionToken?: string;
 
   constructor(config: BandSoxConfig) {
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
     this.headers = config.headers ?? {};
     this.timeout = config.timeout ?? 60_000;
-    this._WebSocket = config.WebSocket;
+    this.wsCtor = config.WebSocket;
   }
 
   private async request<T>(
@@ -60,7 +97,8 @@ export class BandSox {
 
     const init: RequestInit = {
       method,
-      headers: { ...this.headers },
+      headers: this.requestHeaders(),
+      credentials: "include",
     };
 
     if (options.json !== undefined) {
@@ -304,22 +342,52 @@ export class BandSox {
 
   // ─── Auth ───
 
+  private requestHeaders(): Record<string, string> {
+    const headers = { ...this.headers };
+    if (this.sessionToken && canSetCookieHeader()) {
+      const cookie = getHeader(headers, "cookie");
+      if (cookie) {
+        setHeader(
+          headers,
+          "Cookie",
+          `${cookie}; ${SESSION_COOKIE_NAME}=${this.sessionToken}`
+        );
+      } else {
+        setHeader(headers, "Cookie", `${SESSION_COOKIE_NAME}=${this.sessionToken}`);
+      }
+    }
+    return headers;
+  }
+
   async authCheck(): Promise<AuthCheckResult> {
     return this.request("GET", "/api/auth/check");
   }
 
   async login(password: string): Promise<{ status: string; token: string }> {
-    return this.request("POST", "/api/auth/login", {
-      json: { password },
-    });
+    const result = await this.request<{ status: string; token: string }>(
+      "POST",
+      "/api/auth/login",
+      { json: { password } }
+    );
+    this.sessionToken = result.token;
+    return result;
   }
 
   async logout(): Promise<{ status: string }> {
-    return this.request("POST", "/api/auth/logout");
+    const result = await this.request<{ status: string }>(
+      "POST",
+      "/api/auth/logout"
+    );
+    this.sessionToken = undefined;
+    return result;
   }
 
   async listApiKeys(): Promise<AuthKeysResult[]> {
-    return this.request("GET", "/api/auth/keys");
+    const keys = await this.request<RawAuthKeysResult[]>("GET", "/api/auth/keys");
+    return keys.map(({ id, key_id, ...key }) => ({
+      ...key,
+      key_id: key_id ?? id!,
+    }));
   }
 
   async createApiKey(name: string): Promise<CreateApiKeyResult> {
@@ -335,15 +403,15 @@ export class BandSox {
   // ─── Terminal ───
 
   connectTerminal(vmId: string, cols = 80, rows = 24): TerminalSession {
-    const Ws = this._WebSocket ?? globalThis.WebSocket;
+    const Ws = this.wsCtor ?? globalThis.WebSocket;
     if (!Ws) {
       throw new Error(
         "WebSocket is not available. Provide a WebSocket constructor in BandSoxConfig.WebSocket."
       );
     }
     const wsUrl = this.baseUrl.replace(/^http/, "ws");
-    const raw = this.headers["Authorization"] ?? "";
-    const token = raw.replace(/^Bearer\s+/i, "");
+    const raw = getHeader(this.headers, "authorization") ?? "";
+    const token = raw.replace(/^Bearer\s+/i, "") || this.sessionToken;
     const url = new URL(`${wsUrl}/api/vms/${vmId}/terminal`);
     url.searchParams.set("cols", String(cols));
     url.searchParams.set("rows", String(rows));

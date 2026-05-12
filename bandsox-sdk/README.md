@@ -234,14 +234,15 @@ if (!ready) throw new Error("VM did not become ready in time");
 // Check whether current credentials/session are authenticated
 const status = await bs.authCheck();
 
-// Programmatic login/logout for session-based flows
+// Programmatic login/logout for session-based flows.
+// The SDK stores the returned session token and sends it on later requests.
 await bs.login("admin-password");
-await bs.logout();
+const created = await bs.createApiKey("ci-runner");
 
 // API key management (requires existing auth)
-const created = await bs.createApiKey("ci-runner");
 const keys = await bs.listApiKeys();
 await bs.revokeApiKey(created.key_id);
+await bs.logout();
 ```
 
 ### Error handling
@@ -272,7 +273,7 @@ try {
 | `restoreVm(snapshotId, options?)` | Restore a VM from a snapshot. |
 | `getVm(vmId)` | Get a `MicroVM` handle with cached info. |
 | `getVmInfo(vmId)` | Get raw VM details as `VmInfo`. |
-| `listProjects(options?)` | Alias of `listVms(options?)` (used by UI/project views). |
+| `listProjects(options?)` | Calls the `/api/projects` UI/project endpoint. It currently returns VMs, but this is only a URL-level alias and may drift from `listVms(options?)`. |
 | `listVms(options?)` | List VMs. Supports `limit` and `metadata_equals` filters. |
 | `deleteVm(vmId)` | Delete a VM and its resources. |
 | `renameVm(vmId, newName)` | Rename a VM. |
@@ -286,7 +287,7 @@ try {
 | `updateSnapshotMetadata(snapshotId, metadata)` | Update snapshot metadata. |
 | `renameSnapshot(snapshotId, newName)` | Rename a snapshot. |
 | `authCheck()` | Check auth state for current request context. |
-| `login(password)` | Log in and receive session token/cookie response. |
+| `login(password)` | Log in and store the returned session for later SDK requests. |
 | `logout()` | Log out the current session. |
 | `listApiKeys()` | List API keys. |
 | `createApiKey(name)` | Create an API key. |

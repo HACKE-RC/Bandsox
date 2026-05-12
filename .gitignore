@@ -28,5 +28,6 @@ cni/bin/
 htmlcov/
 dist/
 build/
+node_modules/
 *.egg-info/
 verify_output*.txt
