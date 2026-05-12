@@ -2037,6 +2037,13 @@ class MicroVM:
             show_line_numbers: Prefix each line with "N\\t"
             show_header: If offset>0, show "... skipped N lines" header
             show_footer: If limit>0 and more lines remain, show "... N lines left" footer
+
+        **Performance note:** When *both* offset or limit are non-zero *and*
+        show_header or show_footer is True, the full file is downloaded before
+        slicing locally. The header/footer display needs the total line count,
+        which the agent does not yet report independently. For large files,
+        pass ``show_header=False, show_footer=False`` to let the agent slice
+        server-side and avoid pulling the entire file over vsock/serial.
         """
         agent_error = None
         if self.agent_ready:
