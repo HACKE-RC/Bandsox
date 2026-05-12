@@ -342,7 +342,8 @@ export class BandSox {
       );
     }
     const wsUrl = this.baseUrl.replace(/^http/, "ws");
-    const token = this.headers["Authorization"];
+    const raw = this.headers["Authorization"] ?? "";
+    const token = raw.replace(/^Bearer\s+/i, "");
     const url = new URL(`${wsUrl}/api/vms/${vmId}/terminal`);
     url.searchParams.set("cols", String(cols));
     url.searchParams.set("rows", String(rows));

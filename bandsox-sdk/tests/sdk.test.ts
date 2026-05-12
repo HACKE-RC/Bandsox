@@ -19,6 +19,7 @@ function setupFetch() {
 }
 
 class MockWebSocket {
+  static lastInstance: MockWebSocket | null = null;
   url: string;
   onmessage: ((event: MessageEvent) => void) | null = null;
   onclose: (() => void) | null = null;
@@ -28,6 +29,7 @@ class MockWebSocket {
 
   constructor(url: string) {
     this.url = url;
+    MockWebSocket.lastInstance = this;
   }
 
   addEventListener(type: string, handler: (event: any) => void) {
@@ -1063,17 +1065,28 @@ describe("BandSox connectTerminal", () => {
     globalThis.WebSocket = originalWs;
   });
 
-  it("includes auth token in ws URL query string", () => {
+  it("strips Bearer prefix from auth token in ws URL", () => {
     bs = new BandSox({
       baseUrl: "http://localhost:8000",
       headers: { Authorization: "Bearer mytoken" },
       WebSocket: MockWebSocket as unknown as typeof WebSocket,
     });
 
-    // We can't easily inspect the URL passed to the constructor,
-    // but we can verify the session was created successfully.
-    const session = bs.connectTerminal("vm-abc");
-    expect(session).toBeInstanceOf(TerminalSession);
+    bs.connectTerminal("vm-abc");
+    const url = MockWebSocket.lastInstance!.url;
+    expect(url).toContain("token=mytoken");
+    expect(url).not.toContain("Bearer");
+  });
+
+  it("passes raw token through when no Bearer prefix", () => {
+    bs = new BandSox({
+      baseUrl: "http://localhost:8000",
+      headers: { Authorization: "raw-key-no-prefix" },
+      WebSocket: MockWebSocket as unknown as typeof WebSocket,
+    });
+
+    bs.connectTerminal("vm-abc");
+    expect(MockWebSocket.lastInstance!.url).toContain("token=raw-key-no-prefix");
   });
 
   it("builds proper ws URL from http baseUrl", () => {
