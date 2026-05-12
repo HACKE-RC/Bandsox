@@ -764,6 +764,20 @@ class MicroVM:
         self._write_to_agent(req_str + "\n")
 
         if not completion_event.wait(timeout):
+            # Send a kill for this cmd_id so the in-VM child process is
+            # actually stopped — otherwise it keeps producing output and
+            # monopolises the serial console, wedging every subsequent
+            # command on the same VM. Best-effort: a stale callback
+            # entry is harmless (it'll be cleaned up when the kill's
+            # exit event eventually arrives, or never if the agent is
+            # already wedged — in which case the lane is unrecoverable
+            # without a VM restart, which is fine because the wedge is
+            # what we're preventing in the first place).
+            try:
+                kill_req = json.dumps({"id": cmd_id, "type": "kill"}) + "\n"
+                self._write_to_agent(kill_req)
+            except Exception:
+                pass
             raise TimeoutError("Command timed out")
 
         # Auto-reconnect-and-retry on transient console drops. Up to 3
@@ -809,6 +823,11 @@ class MicroVM:
             }
             self._write_to_agent(req_str + "\n")
             if not completion_event.wait(timeout):
+                try:
+                    kill_req = json.dumps({"id": cmd_id, "type": "kill"}) + "\n"
+                    self._write_to_agent(kill_req)
+                except Exception:
+                    pass
                 raise TimeoutError(
                     f"Command timed out (after {retry_attempts} reconnect retries)"
                 )
@@ -862,14 +881,96 @@ class MicroVM:
             self.console_conn.sendall(payload)
 
     def exec_command(self, command: str, on_stdout=None, on_stderr=None, timeout=30):
-        """Executes a command in the VM via the agent (blocking)."""
-        return self.send_request(
-            "exec",
-            {"command": command, "background": False, "env": self.env_vars},
-            on_stdout=on_stdout,
-            on_stderr=on_stderr,
-            timeout=timeout,
+        """Executes a command in the VM via the agent (blocking).
+
+        When the vsock listener is available, this routes stdout/stderr
+        bytes over vsock instead of the serial UART. The agent buffers
+        each stream in-VM and uploads them as two separate vsock
+        transfers tagged ``<cmd_id>:stdout`` / ``<cmd_id>:stderr`` once
+        the command exits, then sends a tiny ``exit`` event back over
+        the serial console. The serial console is therefore freed from
+        carrying bulk output, which is the bottleneck that made
+        concurrent grep/read workloads time out under contention.
+        """
+        listener = getattr(self, "vsock_listener", None)
+        use_vsock = (
+            listener is not None
+            and getattr(self, "vsock_enabled", False)
+            and getattr(listener, "running", False)
         )
+        if not use_vsock:
+            return self.send_request(
+                "exec",
+                {"command": command, "background": False, "env": self.env_vars},
+                on_stdout=on_stdout,
+                on_stderr=on_stderr,
+                timeout=timeout,
+            )
+
+        cmd_id = str(uuid.uuid4())
+        exec_output_cap = 4 * 1024 * 1024
+        stdout_slot = listener.register_pending_buffer(
+            cmd_id + ":stdout", max_bytes=exec_output_cap
+        )
+        stderr_slot = listener.register_pending_buffer(
+            cmd_id + ":stderr", max_bytes=exec_output_cap
+        )
+        port = self.vsock_port or 9000
+        import os as _os
+        if _os.environ.get("BANDSOX_DEBUG_VSOCK_EXEC"):
+            print(f"[vsock-exec] cmd_id={cmd_id} port={port} "
+                  f"listener_path={listener.listener_path} "
+                  f"pending_buffers={list(listener._pending_buffers.keys())}", flush=True)
+        try:
+            rc = self._send_request_with_id(
+                cmd_id,
+                "exec",
+                {
+                    "command": command,
+                    "background": False,
+                    "env": self.env_vars,
+                    "use_vsock_output": True,
+                    "vsock_port": port,
+                },
+                # No on_stdout/on_stderr here — the agent uploads via
+                # vsock instead of emitting `output` events. If vsock
+                # fails inside the agent it falls back to UART output,
+                # which we still want to forward to callers:
+                on_stdout=on_stdout,
+                on_stderr=on_stderr,
+                timeout=timeout,
+            )
+        except Exception:
+            listener.unregister_pending_buffer(cmd_id + ":stdout")
+            listener.unregister_pending_buffer(cmd_id + ":stderr")
+            raise
+
+        # The agent sends `exit` only AFTER its vsock upload attempts
+        # finish, so by the time we land here the buffers' done events
+        # are either set (vsock succeeded) or never will be (agent
+        # fell back to UART because vsock was unavailable). A tight
+        # bound avoids penalising the common case where vsock is broken
+        # for this VM — without it, every exec pays a 5s wait per stream.
+        for slot in (stdout_slot, stderr_slot):
+            slot["done"].wait(timeout=0.2)
+        if _os.environ.get("BANDSOX_DEBUG_VSOCK_EXEC"):
+            print(f"[vsock-exec] cmd_id={cmd_id} done out_size={len(stdout_slot['buf'])} "
+                  f"err_size={len(stderr_slot['buf'])} out_err={stdout_slot.get('error')} "
+                  f"err_err={stderr_slot.get('error')} out_done={stdout_slot['done'].is_set()} "
+                  f"err_done={stderr_slot['done'].is_set()}", flush=True)
+        try:
+            if on_stdout and stdout_slot["done"].is_set() and not stdout_slot.get("error"):
+                buf = bytes(stdout_slot["buf"])
+                if buf:
+                    on_stdout(buf.decode("utf-8", errors="replace"))
+            if on_stderr and stderr_slot["done"].is_set() and not stderr_slot.get("error"):
+                buf = bytes(stderr_slot["buf"])
+                if buf:
+                    on_stderr(buf.decode("utf-8", errors="replace"))
+        finally:
+            listener.unregister_pending_buffer(cmd_id + ":stdout")
+            listener.unregister_pending_buffer(cmd_id + ":stderr")
+        return rc
 
     def exec_python(
         self,
@@ -1550,6 +1651,19 @@ class MicroVM:
                 f"Vsock enabled: CID={cid}, port={port}, listener={listener_path}"
             )
 
+            # Bring up the fast-read and fast-write RPC servers so
+            # remote ManagedMicroVM callers (athena's webui process)
+            # can route file ops through this listener instead of
+            # falling back to chunked serial.
+            try:
+                self._start_fastread_server()
+            except Exception as e:
+                logger.warning(f"Failed to start fast-read RPC server: {e}")
+            try:
+                self._start_fastwrite_server()
+            except Exception as e:
+                logger.warning(f"Failed to start fast-write RPC server: {e}")
+
         except Exception as e:
             logger.error(f"Failed to setup vsock: {e}")
             self._cleanup_vsock_bridge()
@@ -1930,6 +2044,7 @@ class MicroVM:
             import hashlib
 
             raw_bytes = None
+            raw_bytes_full_file = False
 
             # Fast-read RPC: when the local process doesn't own the vsock
             # listener (e.g. athena's webui talking to a detached runner),
@@ -1955,6 +2070,7 @@ class MicroVM:
                         for attempt in range(2):
                             try:
                                 raw_bytes = self._fastread_remote(fr_path, path)
+                                raw_bytes_full_file = True
                                 # Empty buffer with no error usually means
                                 # the listener slot fired before the agent
                                 # actually uploaded — a race. Treat as a
@@ -2075,6 +2191,7 @@ class MicroVM:
                     if vsock_error_holder["exited_nonzero"] and not slot["buf"]:
                         raise Exception("Agent exited non-zero before upload")
                     raw_bytes = bytes(slot["buf"])
+                    raw_bytes_full_file = True
                 except Exception as exc:
                     # Use INFO so we can see in the bench/server log when the
                     # fast path is being skipped or failing — without this, a
@@ -2082,6 +2199,7 @@ class MicroVM:
                     # never tried".
                     logger.info(f"Vsock read fast-path failed for {path}: {exc}")
                     raw_bytes = None
+                    raw_bytes_full_file = False
                 finally:
                     self.vsock_listener.unregister_pending_buffer(cmd_id)
 
@@ -2136,14 +2254,23 @@ class MicroVM:
                         _r["total_size"] = total_size
                         _r["checksum"] = checksum
 
+                    needs_host_formatting = (
+                        (offset > 0 or limit > 0) and (show_header or show_footer)
+                    )
+                    request_offset = 0 if needs_host_formatting else offset
+                    request_limit = 0 if needs_host_formatting else limit
+                    request_show_line_numbers = (
+                        False if needs_host_formatting else show_line_numbers
+                    )
+
                     try:
                         self.send_request(
                             "read_file",
                             {
                                 "path": path,
-                                "offset": offset,
-                                "limit": limit,
-                                "show_line_numbers": show_line_numbers,
+                                "offset": request_offset,
+                                "limit": request_limit,
+                                "show_line_numbers": request_show_line_numbers,
                             },
                             on_file_content=on_file_content,
                             on_file_chunk=on_file_chunk,
@@ -2151,6 +2278,7 @@ class MicroVM:
                         )
                         if result["mode"] == "single" and result["content"] is not None:
                             raw_bytes = base64.b64decode(result["content"])
+                            raw_bytes_full_file = needs_host_formatting
                         elif result["mode"] == "chunked":
                             if result["checksum"]:
                                 md5 = hashlib.md5(result["chunks"]).hexdigest()
@@ -2159,6 +2287,7 @@ class MicroVM:
                                         f"Checksum mismatch: expected {result['checksum']}, got {md5}"
                                     )
                             raw_bytes = bytes(result["chunks"])
+                            raw_bytes_full_file = needs_host_formatting
                         # Phantom-empty detection: agent acked the read but
                         # the content callback either fired with "" or never
                         # fired at all. Retry — the agent's view of the file
@@ -2171,6 +2300,7 @@ class MicroVM:
                                 )
                                 last_attempt_was_empty = True
                                 raw_bytes = None
+                                raw_bytes_full_file = False
                                 time.sleep(0.05 * (serial_attempt + 1))
                                 continue
                             # Out of retries — surface as failure so the
@@ -2189,6 +2319,10 @@ class MicroVM:
                         break
 
             if raw_bytes is not None:
+                if raw_bytes_full_file:
+                    return self._format_file_content(
+                        raw_bytes, offset, limit, show_line_numbers, show_header, show_footer
+                    )
                 if offset > 0 or limit > 0 or show_line_numbers:
                     return raw_bytes.decode("utf-8", errors="replace")
                 return self._format_file_content(
