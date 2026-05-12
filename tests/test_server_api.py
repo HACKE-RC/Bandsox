@@ -1,3 +1,4 @@
+import base64
 import json
 import sys
 from pathlib import Path
@@ -472,6 +473,39 @@ def test_append_file_endpoint_base64(client, fake_bs):
     assert fake_bs.vm.byte_writes[-1] == ("/tmp/blob.bin", payload, True)
 
 
+def test_append_file_endpoint_base64_rejects_oversized_payload(client, fake_bs, monkeypatch):
+    import base64 as _b64
+
+    monkeypatch.setattr(server, "_MAX_FILE_WRITE_BYTES", 3)
+    monkeypatch.setattr(server, "_MAX_BASE64_FILE_CONTENT_CHARS", 4)
+
+    resp = client.post(
+        f"/api/vms/{fake_bs.vm.vm_id}/append-file",
+        json={
+            "path": "/tmp/blob.bin",
+            "content": _b64.b64encode(b"toolong").decode("ascii"),
+            "encoding": "base64",
+        },
+    )
+
+    assert resp.status_code == 413
+    assert fake_bs.vm.byte_writes == []
+
+
+def test_append_file_endpoint_base64_rejects_invalid_payload(client, fake_bs):
+    resp = client.post(
+        f"/api/vms/{fake_bs.vm.vm_id}/append-file",
+        json={
+            "path": "/tmp/blob.bin",
+            "content": "not base64!",
+            "encoding": "base64",
+        },
+    )
+
+    assert resp.status_code == 400
+    assert fake_bs.vm.byte_writes == []
+
+
 def test_append_file_endpoint_vm_not_found(client):
     resp = client.post(
         "/api/vms/unknown/append-file",
@@ -487,3 +521,18 @@ def test_terminal_websocket(client, fake_bs):
         ws.send_text(json.dumps({"type": "input", "data": "Zm9v"}))
     assert fake_bs.vm.inputs == [("session-1", "Zm9v", "base64")]
     assert fake_bs.vm.killed_sessions == ["session-1"]
+
+
+def test_terminal_websocket_accepts_subprotocol_auth(client, fake_bs, tmp_path, monkeypatch):
+    auth_dir = tmp_path / "auth"
+    auth_dir.mkdir()
+    _, api_key, _ = server.init_auth_config(auth_dir)
+    monkeypatch.setattr(server, "_auth_storage", auth_dir)
+    encoded = base64.urlsafe_b64encode(api_key.encode()).decode().rstrip("=")
+
+    with client.websocket_connect(
+        f"/api/vms/{fake_bs.vm.vm_id}/terminal?cols=80&rows=24",
+        subprotocols=["bandsox.terminal", f"bandsox.auth.{encoded}"],
+    ) as ws:
+        assert ws.accepted_subprotocol == "bandsox.terminal"
+        assert ws.receive_text() == "output"

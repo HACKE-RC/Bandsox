@@ -2,6 +2,7 @@ export interface BandSoxConfig {
   baseUrl: string;
   headers?: Record<string, string>;
   timeout?: number;
+  WebSocket?: typeof WebSocket;
 }
 
 export interface CreateVmOptions {
@@ -160,6 +161,7 @@ export interface SnapshotInfo {
   created_at: number | null;
   path: string;
   status?: string;
+  backend_rootfs_path?: string | null;
 }
 
 export interface AuthCheckResult {

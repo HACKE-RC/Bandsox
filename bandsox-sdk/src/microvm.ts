@@ -1,4 +1,4 @@
-import {
+import type {
   ExecResult,
   ExecPythonOptions,
   ExecPythonResult,
@@ -12,6 +12,9 @@ import {
   SnapshotOptions,
 } from "./types";
 import { BandSox } from "./client";
+import { TerminalSession } from "./terminal";
+
+type FileEncoding = NonNullable<WriteFileOptions["encoding"]>;
 
 export class MicroVM {
   readonly vmId: string;
@@ -58,13 +61,19 @@ export class MicroVM {
   }
 
   async waitForAgent(timeout: number = 30): Promise<boolean> {
-    const start = Date.now();
-    while (Date.now() - start < timeout * 1000) {
+    const deadline = Date.now() + timeout * 1000;
+    while (Date.now() < deadline) {
       const info = await this.getInfo();
-      if (info.agent_ready || info.status === "running") {
+      if (Date.now() >= deadline) {
+        return false;
+      }
+      if (info.agent_ready) {
         return true;
       }
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      const delay = Math.min(500, Math.max(0, deadline - Date.now()));
+      if (delay > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
     }
     return false;
   }
@@ -156,7 +165,7 @@ export class MicroVM {
   async appendFile(
     path: string,
     content: string,
-    encoding?: "utf-8" | "base64"
+    encoding?: FileEncoding
   ): Promise<void> {
     await this.bandsox._request(
       "POST",
@@ -166,7 +175,7 @@ export class MicroVM {
   }
 
   async appendText(path: string, content: string): Promise<void> {
-    await this.writeFile({ path, content, append: true });
+    await this.appendFile(path, content, "utf-8");
   }
 
   async getFileInfo(path: string): Promise<FileInfo> {
@@ -221,6 +230,12 @@ export class MicroVM {
       }
       await this.uploadFile(remotePath, content);
     }
+  }
+
+  // ─── Terminal ───
+
+  connectTerminal(cols?: number, rows?: number): TerminalSession {
+    return this.bandsox.connectTerminal(this.vmId, cols, rows);
   }
 
   // ─── Networking ───

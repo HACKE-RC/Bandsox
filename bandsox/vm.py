@@ -25,6 +25,7 @@ _DIRECT_TEXT_WRITE_MAX_BYTES = 2 * 1024  # ~2 KiB
 # write() succeed, the guest never assembled a full JSON line, and the
 # request timed out at 30s.
 _SERIAL_WRITE_CHUNK_SIZE = 512 * 1024
+_DEBUGFS_FULL_FILE_FALLBACK_LOG_THRESHOLD = 8 * 1024 * 1024
 
 
 class FastIOError(Exception):
@@ -603,6 +604,9 @@ class MicroVM:
                 cmd_id = payload.get("cmd_id")
                 content = payload.get("content")
                 if cmd_id in self.event_callbacks:
+                    total_lines = payload.get("total_lines")
+                    if total_lines is not None:
+                        self.event_callbacks[cmd_id]["_agent_total_lines"] = total_lines
                     cb = self.event_callbacks[cmd_id].get("on_file_content")
                     if cb:
                         cb(content)
@@ -638,6 +642,9 @@ class MicroVM:
                 total_size = payload.get("total_size")
                 checksum = payload.get("checksum")
                 if cmd_id in self.event_callbacks:
+                    total_lines = payload.get("total_lines")
+                    if total_lines is not None:
+                        self.event_callbacks[cmd_id]["_agent_total_lines"] = total_lines
                     cb = self.event_callbacks[cmd_id].get("on_file_complete")
                     if cb:
                         cb(total_size, checksum)
@@ -646,6 +653,9 @@ class MicroVM:
                 cmd_id = payload.get("cmd_id")
                 exit_code = payload.get("exit_code")
                 if cmd_id in self.event_callbacks:
+                    payload_cb = self.event_callbacks[cmd_id].get("on_exit_payload")
+                    if payload_cb:
+                        payload_cb(payload)
                     cb = self.event_callbacks[cmd_id].get("on_exit")
                     if cb:
                         cb(exit_code)
@@ -682,6 +692,7 @@ class MicroVM:
         on_dir_list=None,
         on_file_info=None,
         on_status=None,
+        exit_metadata=None,
         timeout=30,
     ):
         """Sends a JSON request to the agent."""
@@ -698,6 +709,7 @@ class MicroVM:
             on_dir_list=on_dir_list,
             on_file_info=on_file_info,
             on_status=on_status,
+            exit_metadata=exit_metadata,
             timeout=timeout,
         )
 
@@ -714,6 +726,7 @@ class MicroVM:
         on_dir_list=None,
         on_file_info=None,
         on_status=None,
+        exit_metadata=None,
         timeout=30,
     ):
         """Send a request with a caller-supplied cmd_id.
@@ -740,6 +753,11 @@ class MicroVM:
         completion_event = threading.Event()
         result = {"code": -1, "error": None}
 
+        def on_exit_payload(payload):
+            if exit_metadata is not None:
+                exit_metadata.clear()
+                exit_metadata.update(payload or {})
+
         def on_exit(code):
             result["code"] = code
             completion_event.set()
@@ -756,6 +774,7 @@ class MicroVM:
             "on_dir_list": on_dir_list,
             "on_file_info": on_file_info,
             "on_status": on_status,
+            "on_exit_payload": on_exit_payload,
             "on_exit": on_exit,
             "on_error": on_error,
         }
@@ -764,6 +783,25 @@ class MicroVM:
         self._write_to_agent(req_str + "\n")
 
         if not completion_event.wait(timeout):
+            # Send a kill for this cmd_id so the in-VM child process is
+            # actually stopped — otherwise it keeps producing output and
+            # monopolises the serial console, wedging every subsequent
+            # command on the same VM. Best-effort: a stale callback
+            # entry is harmless (it'll be cleaned up when the kill's
+            # exit event eventually arrives, or never if the agent is
+            # already wedged — in which case the lane is unrecoverable
+            # without a VM restart, which is fine because the wedge is
+            # what we're preventing in the first place).
+            try:
+                kill_req = json.dumps({"id": cmd_id, "type": "kill"}) + "\n"
+                self._write_to_agent(kill_req)
+            except Exception as e:
+                logger.debug(
+                    "Failed to send kill for timed-out command %s: %s",
+                    cmd_id,
+                    e,
+                    exc_info=True,
+                )
             raise TimeoutError("Command timed out")
 
         # Auto-reconnect-and-retry on transient console drops. Up to 3
@@ -804,11 +842,24 @@ class MicroVM:
                 "on_dir_list": on_dir_list,
                 "on_file_info": on_file_info,
                 "on_status": on_status,
+                "on_exit_payload": on_exit_payload,
                 "on_exit": on_exit,
                 "on_error": on_error,
             }
             self._write_to_agent(req_str + "\n")
             if not completion_event.wait(timeout):
+                try:
+                    kill_req = json.dumps({"id": cmd_id, "type": "kill"}) + "\n"
+                    self._write_to_agent(kill_req)
+                except Exception as e:
+                    logger.debug(
+                        "Failed to send kill for timed-out command %s after %s "
+                        "reconnect retries: %s",
+                        cmd_id,
+                        retry_attempts,
+                        e,
+                        exc_info=True,
+                    )
                 raise TimeoutError(
                     f"Command timed out (after {retry_attempts} reconnect retries)"
                 )
@@ -862,14 +913,138 @@ class MicroVM:
             self.console_conn.sendall(payload)
 
     def exec_command(self, command: str, on_stdout=None, on_stderr=None, timeout=30):
-        """Executes a command in the VM via the agent (blocking)."""
-        return self.send_request(
-            "exec",
-            {"command": command, "background": False, "env": self.env_vars},
-            on_stdout=on_stdout,
-            on_stderr=on_stderr,
-            timeout=timeout,
+        """Executes a command in the VM via the agent (blocking).
+
+        When the vsock listener is available, this routes stdout/stderr
+        bytes over vsock instead of the serial UART. The agent buffers
+        each stream in-VM and uploads them as two separate vsock
+        transfers tagged ``<cmd_id>:stdout`` / ``<cmd_id>:stderr`` once
+        the command exits, then sends a tiny ``exit`` event back over
+        the serial console. The serial console is therefore freed from
+        carrying bulk output, which is the bottleneck that made
+        concurrent grep/read workloads time out under contention.
+        """
+        listener = getattr(self, "vsock_listener", None)
+        use_vsock = (
+            listener is not None
+            and getattr(self, "vsock_enabled", False)
+            and getattr(listener, "running", False)
         )
+        if not use_vsock:
+            return self.send_request(
+                "exec",
+                {"command": command, "background": False, "env": self.env_vars},
+                on_stdout=on_stdout,
+                on_stderr=on_stderr,
+                timeout=timeout,
+            )
+
+        port = getattr(self, "vsock_port", None)
+        if not port:
+            raise RuntimeError(
+                "vsock output requested but vsock_port is not set"
+            )
+
+        cmd_id = str(uuid.uuid4())
+        exec_output_cap = 4 * 1024 * 1024
+        stdout_slot = listener.register_pending_buffer(
+            cmd_id + ":stdout", max_bytes=exec_output_cap
+        )
+        stderr_slot = listener.register_pending_buffer(
+            cmd_id + ":stderr", max_bytes=exec_output_cap
+        )
+        logger.debug(
+            "vsock-exec cmd_id=%s port=%s listener_path=%s",
+            cmd_id,
+            port,
+            getattr(listener, "listener_path", None),
+        )
+        exit_metadata = {}
+        try:
+            rc = self._send_request_with_id(
+                cmd_id,
+                "exec",
+                {
+                    "command": command,
+                    "background": False,
+                    "env": self.env_vars,
+                    "use_vsock_output": True,
+                    "vsock_port": port,
+                },
+                # No on_stdout/on_stderr here — the agent uploads via
+                # vsock instead of emitting `output` events. If vsock
+                # fails inside the agent it falls back to UART output,
+                # which we still want to forward to callers:
+                on_stdout=on_stdout,
+                on_stderr=on_stderr,
+                exit_metadata=exit_metadata,
+                timeout=timeout,
+            )
+        except Exception:
+            listener.unregister_pending_buffer(cmd_id + ":stdout")
+            listener.unregister_pending_buffer(cmd_id + ":stderr")
+            raise
+
+        # Newer agents include per-stream vsock metadata in the exit
+        # payload. If a stream was confirmed uploaded, give the listener
+        # enough time to observe the done marker. Legacy agents and UART
+        # fallback keep the short bound because done may never arrive.
+        vsock_output = exit_metadata.get("vsock_output")
+        if not isinstance(vsock_output, dict):
+            vsock_output = {}
+        try:
+            timeout_seconds = float(timeout)
+        except (TypeError, ValueError):
+            timeout_seconds = 30.0
+        confirmed_upload_wait = min(5.0, max(0.5, timeout_seconds * 0.1))
+        legacy_upload_wait = min(2.0, max(0.2, timeout_seconds * 0.02))
+        for name, slot in (("stdout", stdout_slot), ("stderr", stderr_slot)):
+            uploaded = vsock_output.get(f"{name}_uploaded")
+            if uploaded is True:
+                wait_timeout = confirmed_upload_wait
+            elif uploaded is False:
+                wait_timeout = 0.2
+            else:
+                wait_timeout = legacy_upload_wait
+            if not slot["done"].wait(timeout=wait_timeout):
+                logger.warning(
+                    "vsock-exec %s upload for command %s did not finish within %.1fs; "
+                    "bytes may still be pending, continuing with available UART output",
+                    name,
+                    cmd_id,
+                    wait_timeout,
+                )
+            if slot.get("error"):
+                logger.warning(
+                    "vsock-exec %s upload for command %s failed: %s",
+                    name,
+                    cmd_id,
+                    slot["error"],
+                )
+        logger.debug(
+            "vsock-exec cmd_id=%s done out_size=%s err_size=%s out_err=%s "
+            "err_err=%s out_done=%s err_done=%s",
+            cmd_id,
+            len(stdout_slot["buf"]),
+            len(stderr_slot["buf"]),
+            stdout_slot.get("error"),
+            stderr_slot.get("error"),
+            stdout_slot["done"].is_set(),
+            stderr_slot["done"].is_set(),
+        )
+        try:
+            if on_stdout and stdout_slot["done"].is_set() and not stdout_slot.get("error"):
+                buf = bytes(stdout_slot["buf"])
+                if buf:
+                    on_stdout(buf.decode("utf-8", errors="replace"))
+            if on_stderr and stderr_slot["done"].is_set() and not stderr_slot.get("error"):
+                buf = bytes(stderr_slot["buf"])
+                if buf:
+                    on_stderr(buf.decode("utf-8", errors="replace"))
+        finally:
+            listener.unregister_pending_buffer(cmd_id + ":stdout")
+            listener.unregister_pending_buffer(cmd_id + ":stderr")
+        return rc
 
     def exec_python(
         self,
@@ -1550,6 +1725,19 @@ class MicroVM:
                 f"Vsock enabled: CID={cid}, port={port}, listener={listener_path}"
             )
 
+            # Bring up the fast-read and fast-write RPC servers so
+            # remote ManagedMicroVM callers (athena's webui process)
+            # can route file ops through this listener instead of
+            # falling back to chunked serial.
+            try:
+                self._start_fastread_server()
+            except Exception as e:
+                logger.warning(f"Failed to start fast-read RPC server: {e}")
+            try:
+                self._start_fastwrite_server()
+            except Exception as e:
+                logger.warning(f"Failed to start fast-write RPC server: {e}")
+
         except Exception as e:
             logger.error(f"Failed to setup vsock: {e}")
             self._cleanup_vsock_bridge()
@@ -1923,6 +2111,11 @@ class MicroVM:
             show_line_numbers: Prefix each line with "N\\t"
             show_header: If offset>0, show "... skipped N lines" header
             show_footer: If limit>0 and more lines remain, show "... N lines left" footer
+
+        The agent reports total line count alongside the content, so
+        offset/limit slicing happens server-side even when header/footer is
+        requested — the full file is never transferred over vsock/serial
+        just for decoration.
         """
         agent_error = None
         if self.agent_ready:
@@ -1930,6 +2123,7 @@ class MicroVM:
             import hashlib
 
             raw_bytes = None
+            raw_bytes_full_file = False
 
             # Fast-read RPC: when the local process doesn't own the vsock
             # listener (e.g. athena's webui talking to a detached runner),
@@ -1955,6 +2149,7 @@ class MicroVM:
                         for attempt in range(2):
                             try:
                                 raw_bytes = self._fastread_remote(fr_path, path)
+                                raw_bytes_full_file = True
                                 # Empty buffer with no error usually means
                                 # the listener slot fired before the agent
                                 # actually uploaded — a race. Treat as a
@@ -2020,6 +2215,9 @@ class MicroVM:
                 and self.vsock_enabled
                 and self.vsock_listener is not None
                 and getattr(self, "vsock_port", None)
+                and offset == 0
+                and limit == 0
+                and not show_line_numbers
             )
             if vsock_ready:
                 cmd_id = str(uuid.uuid4())
@@ -2075,6 +2273,7 @@ class MicroVM:
                     if vsock_error_holder["exited_nonzero"] and not slot["buf"]:
                         raise Exception("Agent exited non-zero before upload")
                     raw_bytes = bytes(slot["buf"])
+                    raw_bytes_full_file = True
                 except Exception as exc:
                     # Use INFO so we can see in the bench/server log when the
                     # fast path is being skipped or failing — without this, a
@@ -2082,6 +2281,7 @@ class MicroVM:
                     # never tried".
                     logger.info(f"Vsock read fast-path failed for {path}: {exc}")
                     raw_bytes = None
+                    raw_bytes_full_file = False
                 finally:
                     self.vsock_listener.unregister_pending_buffer(cmd_id)
 
@@ -2124,10 +2324,16 @@ class MicroVM:
                         "chunks": bytearray(),
                         "checksum": None,
                         "total_size": None,
+                        "agent_total_lines": None,
                     }
+                    cmd_id = str(uuid.uuid4())
                     def on_file_content(c, _r=result):
                         _r["mode"] = "single"
                         _r["content"] = c
+                        _ec = self.event_callbacks.get(cmd_id, {})
+                        _tls = _ec.get("_agent_total_lines")
+                        if _tls is not None:
+                            _r["agent_total_lines"] = _tls
                     def on_file_chunk(data, offset_, size, _r=result):
                         if _r["mode"] is None:
                             _r["mode"] = "chunked"
@@ -2135,9 +2341,14 @@ class MicroVM:
                     def on_file_complete(total_size, checksum, _r=result):
                         _r["total_size"] = total_size
                         _r["checksum"] = checksum
+                        _ec = self.event_callbacks.get(cmd_id, {})
+                        _tls = _ec.get("_agent_total_lines")
+                        if _tls is not None:
+                            _r["agent_total_lines"] = _tls
 
                     try:
-                        self.send_request(
+                        self._send_request_with_id(
+                            cmd_id,
                             "read_file",
                             {
                                 "path": path,
@@ -2189,11 +2400,13 @@ class MicroVM:
                         break
 
             if raw_bytes is not None:
-                if offset > 0 or limit > 0 or show_line_numbers:
-                    return raw_bytes.decode("utf-8", errors="replace")
-                return self._format_file_content(
-                    raw_bytes, offset, limit, show_line_numbers, show_header, show_footer
-                )
+                agent_tl = result.get("agent_total_lines")
+                if show_header or show_footer or show_line_numbers:
+                    return self._format_file_content(
+                        raw_bytes, offset, limit, show_line_numbers,
+                        show_header, show_footer, total_lines=agent_tl,
+                    )
+                return raw_bytes.decode("utf-8", errors="replace")
 
         if self._has_debugfs_rootfs():
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -2207,6 +2420,16 @@ class MicroVM:
                     raise dfs_err
                 with open(temp_path, "rb") as f:
                     raw_bytes = f.read()
+                if (
+                    len(raw_bytes) >= _DEBUGFS_FULL_FILE_FALLBACK_LOG_THRESHOLD
+                    and (offset > 0 or limit > 0 or show_line_numbers)
+                ):
+                    logger.warning(
+                        "debugfs fallback read %s bytes from %s for host-side "
+                        "file formatting",
+                        len(raw_bytes),
+                        path,
+                    )
                 return self._format_file_content(
                     raw_bytes, offset, limit, show_line_numbers, show_header, show_footer
                 )
@@ -2230,35 +2453,48 @@ class MicroVM:
         show_line_numbers: bool = False,
         show_header: bool = True,
         show_footer: bool = True,
+        total_lines: int = None,
     ) -> str:
-        """Apply offset, limit, line numbers, header, and footer to raw file content."""
+        """Apply offset, limit, line numbers, header, and footer to raw file content.
+
+        When *total_lines* is provided, the content is assumed to be pre-sliced
+        by the agent (offset/limit already applied) and total_lines is used for
+        the header/footer decoration instead of computing it locally.  This
+        avoids pulling the entire file over vsock/serial just for the line
+        count.
+        """
         text = raw_bytes.decode("utf-8", errors="replace")
         lines = text.split("\n")
 
-        total_lines = len(lines)
-        start = min(offset, total_lines)
-        end = total_lines
+        if total_lines is not None:
+            # Agent already sliced; lines is just the requested window.
+            selected = lines
+            _total = total_lines
+            _start = offset
+        else:
+            # Legacy path: full file content, slice locally.
+            _total = len(lines)
+            _start = min(offset, _total)
+            _end = _total if limit == 0 else min(_start + limit, _total)
+            selected = lines[_start:_end]
 
-        if limit > 0:
-            end = min(start + limit, total_lines)
-
-        selected = lines[start:end]
+        _end = _start + len(selected)
         result_lines = []
 
         # Header: skipped lines indicator
-        if show_header and start > 0:
-            result_lines.append(f"... skipped {start} lines")
+        if show_header and _start > 0:
+            result_lines.append(f"... skipped {_start} lines")
 
         # Line numbers
         if show_line_numbers:
-            for i, line in enumerate(selected, start=start + 1):
+            for i, line in enumerate(selected, start=_start + 1):
                 result_lines.append(f"{i}\t{line}")
         else:
             result_lines.extend(selected)
 
         # Footer: remaining lines indicator
-        if show_footer and end < total_lines:
-            remaining = total_lines - end
+        if show_footer and _end < _total:
+            remaining = _total - _end
             result_lines.append(f"... {remaining} lines left")
 
         return "\n".join(result_lines)

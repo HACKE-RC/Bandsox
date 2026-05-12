@@ -1,6 +1,12 @@
 export { BandSox } from "./client";
 export { MicroVM } from "./microvm";
 export { BandSoxError } from "./error";
+export { TerminalSession } from "./terminal";
+export type {
+  TerminalOutputCallback,
+  TerminalCloseCallback,
+  TerminalErrorCallback,
+} from "./terminal";
 export type {
   BandSoxConfig,
   CreateVmOptions,

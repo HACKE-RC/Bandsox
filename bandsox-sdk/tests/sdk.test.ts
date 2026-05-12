@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { BandSox, MicroVM, BandSoxError } from "../src";
+import { BandSox, MicroVM, BandSoxError, TerminalSession } from "../src";
 
 // ─── Helpers ───
 
@@ -16,6 +16,81 @@ function setupFetch() {
   const mock = vi.fn();
   vi.stubGlobal("fetch", mock);
   return mock;
+}
+
+function utf8ToBase64(text: string): string {
+  let binary = "";
+  for (const byte of new TextEncoder().encode(text)) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+function base64ToUtf8(encoded: string): string {
+  const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+function base64UrlToUtf8(encoded: string): string {
+  const padded = encoded + "=".repeat((4 - (encoded.length % 4)) % 4);
+  return base64ToUtf8(padded.replace(/-/g, "+").replace(/_/g, "/"));
+}
+
+class MockWebSocket {
+  static lastInstance: MockWebSocket | null = null;
+  url: string;
+  protocols?: string | string[];
+  private listeners: Record<string, Set<(event: any) => void>> = {
+    message: new Set(),
+    close: new Set(),
+    error: new Set(),
+  };
+  sent: unknown[] = [];
+  readyState = 1;
+
+  constructor(url: string, protocols?: string | string[]) {
+    this.url = url;
+    this.protocols = protocols;
+    MockWebSocket.lastInstance = this;
+  }
+
+  addEventListener(type: string, handler: (event: any) => void) {
+    this.listeners[type]?.add(handler);
+  }
+
+  removeEventListener(type: string, handler: (event: any) => void) {
+    this.listeners[type]?.delete(handler);
+  }
+
+  listenerCount(type: string): number {
+    return this.listeners[type]?.size ?? 0;
+  }
+
+  send(data: string) {
+    this.sent.push(JSON.parse(data));
+  }
+
+  close() {
+    this.readyState = 3;
+    this._emitClose();
+  }
+
+  // helpers for driving tests
+  _emitMessage(data: unknown) {
+    for (const handler of this.listeners.message) {
+      handler(new MessageEvent("message", { data }));
+    }
+  }
+  _emitClose() {
+    for (const handler of this.listeners.close) {
+      handler(new Event("close"));
+    }
+  }
+  _emitError(e: Event) {
+    for (const handler of this.listeners.error) {
+      handler(e);
+    }
+  }
 }
 
 // ─── BandSox client ───
@@ -297,8 +372,26 @@ describe("BandSox", () => {
       fetchMock.mockResolvedValueOnce(makeResponse({ status: "ok", token: "tkn" }));
       const result = await bs.login("secret");
       expect(result.token).toBe("tkn");
-      const body = JSON.parse((fetchMock.mock.calls[0] as RequestInit[])[1].body as string);
+      const init = (fetchMock.mock.calls[0] as RequestInit[])[1];
+      const body = JSON.parse(init.body as string);
       expect(body.password).toBe("secret");
+      expect(init.credentials).toBe("include");
+    });
+
+    it("uses login session token for later requests", async () => {
+      fetchMock
+        .mockResolvedValueOnce(makeResponse({ status: "ok", token: "session-tkn" }))
+        .mockResolvedValueOnce(
+          makeResponse({ key_id: "k2", key: "bsx_secret", name: "new-key" })
+        );
+
+      await bs.login("secret");
+      await bs.createApiKey("new-key");
+
+      const init = (fetchMock.mock.calls[1] as RequestInit[])[1];
+      const headers = init.headers as Record<string, string>;
+      expect(headers.Cookie).toBe("bandsox_session=session-tkn");
+      expect(init.credentials).toBe("include");
     });
 
     it("logout sends POST", async () => {
@@ -311,6 +404,12 @@ describe("BandSox", () => {
 
     it("listApiKeys returns keys", async () => {
       fetchMock.mockResolvedValueOnce(makeResponse([{ key_id: "k1", name: "my-key" }]));
+      const result = await bs.listApiKeys();
+      expect(result).toEqual([{ key_id: "k1", name: "my-key" }]);
+    });
+
+    it("normalizes server id field to key_id", async () => {
+      fetchMock.mockResolvedValueOnce(makeResponse([{ id: "k1", name: "my-key" }]));
       const result = await bs.listApiKeys();
       expect(result).toEqual([{ key_id: "k1", name: "my-key" }]);
     });
@@ -368,15 +467,25 @@ describe("BandSox", () => {
   // ── listProjects ──
 
   describe("listProjects", () => {
-    it("delegates to listVms endpoint", async () => {
+    it("calls /api/projects alias", async () => {
       const vms = [{ id: "vm-1", name: "proj" }];
       fetchMock.mockResolvedValueOnce(makeResponse(vms));
 
       const result = await bs.listProjects();
       expect(result).toEqual(vms);
       expect((fetchMock.mock.calls[0] as string[])[0]).toBe(
-        "http://localhost:8000/api/vms"
+        "http://localhost:8000/api/projects"
       );
+    });
+
+    it("passes limit and metadata_equals params", async () => {
+      fetchMock.mockResolvedValueOnce(makeResponse([]));
+
+      await bs.listProjects({ limit: 5, metadata_equals: { env: "dev" } });
+
+      const url = (fetchMock.mock.calls[0] as string[])[0];
+      expect(url).toContain("limit=5");
+      expect(url).toContain("metadata_equals=%7B%22env%22%3A%22dev%22%7D");
     });
   });
 
@@ -680,6 +789,18 @@ describe("MicroVM", () => {
       const body = JSON.parse((fetchMock.mock.calls[0] as RequestInit[])[1].body as string);
       expect(body.encoding).toBe("base64");
     });
+
+    it("appendFile with base64 round-trips non-ASCII bytes", async () => {
+      fetchMock.mockResolvedValueOnce(makeResponse({ status: "appended" }));
+      const payload = "héllo 世界";
+      const encoded = utf8ToBase64(payload);
+
+      await vm.appendFile("/data.txt", encoded, "base64");
+
+      const body = JSON.parse((fetchMock.mock.calls[0] as RequestInit[])[1].body as string);
+      expect(body.encoding).toBe("base64");
+      expect(base64ToUtf8(body.content)).toBe(payload);
+    });
   });
 
   describe("getFileInfo", () => {
@@ -775,31 +896,87 @@ describe("MicroVM", () => {
       expect(result).toBe(true);
     });
 
+    it("does not treat running status as agent-ready", async () => {
+      const info = {
+        id: "vm-test", name: "test", image: "alpine", vcpu: 1, mem_mib: 128,
+        status: "running", network_config: null, vsock_config: null,
+        created_at: 1000, pid: 123, agent_ready: false, env_vars: null, metadata: {},
+      };
+
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(0));
+      try {
+        fetchMock.mockImplementation(() => Promise.resolve(makeResponse(info)));
+        const result = vm.waitForAgent(1);
+
+        await vi.advanceTimersByTimeAsync(1000);
+
+        await expect(result).resolves.toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("returns false if getInfo resolves after the deadline", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(0));
+      try {
+        fetchMock.mockImplementation(
+          () => new Promise((resolve) => {
+            setTimeout(
+              () => resolve(makeResponse({
+                id: "vm-test", name: "test", image: "alpine", vcpu: 1, mem_mib: 128,
+                status: "running", network_config: null, vsock_config: null,
+                created_at: 1000, pid: 123, agent_ready: true, env_vars: null, metadata: {},
+              })),
+              1500
+            );
+          })
+        );
+        const result = vm.waitForAgent(1);
+
+        await vi.advanceTimersByTimeAsync(1500);
+
+        await expect(result).resolves.toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("returns false after timeout", async () => {
-      // Every getInfo() call returns agent_ready: false, need fresh Response each time
       const info = {
         id: "vm-test", name: "test", image: "alpine", vcpu: 1, mem_mib: 128,
         status: "starting", network_config: null, vsock_config: null,
         created_at: 1000, pid: 123, agent_ready: false, env_vars: null, metadata: {},
       };
-      fetchMock.mockImplementation(() => Promise.resolve(makeResponse(info)));
 
-      const result = await vm.waitForAgent(1);
-      expect(result).toBe(false);
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(0));
+      try {
+        fetchMock.mockImplementation(() => Promise.resolve(makeResponse(info)));
+        const result = vm.waitForAgent(1);
+
+        await vi.advanceTimersByTimeAsync(1000);
+
+        await expect(result).resolves.toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
   describe("appendText", () => {
-    it("delegates to writeFile with append=true", async () => {
+    it("delegates to appendFile (same endpoint as appendFile)", async () => {
       fetchMock.mockResolvedValueOnce(makeResponse({ status: "appended" }));
 
       await vm.appendText("/log.txt", "appended line\n");
 
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(url).toBe("http://localhost:8000/api/vms/vm-test/write-file");
+      expect(url).toBe("http://localhost:8000/api/vms/vm-test/append-file");
       const body = JSON.parse(init.body as string);
       expect(body.path).toBe("/log.txt");
       expect(body.content).toBe("appended line\n");
+      expect(body.encoding).toBe("utf-8");
       expect(body.append).toBe(true);
     });
   });
@@ -910,5 +1087,334 @@ describe("edge cases", () => {
     const h = init.headers as Record<string, string>;
     expect(h["X-Custom"]).toBe("value");
     expect(h["Authorization"]).toBe("Bearer key");
+  });
+});
+
+// ─── TerminalSession ───
+
+describe("TerminalSession", () => {
+  let mockWs: MockWebSocket;
+  let session: TerminalSession;
+
+  beforeEach(() => {
+    mockWs = new MockWebSocket("ws://localhost:8000/api/vms/vm-test/terminal?cols=80&rows=24");
+    session = new TerminalSession(mockWs as unknown as WebSocket);
+  });
+
+  it("onOutput decodes base64 messages", () => {
+    const outputs: string[] = [];
+    session.onOutput((data) => outputs.push(data));
+    mockWs._emitMessage(btoa("hello\n"));
+    mockWs._emitMessage(btoa("world"));
+    expect(outputs).toEqual(["hello\n", "world"]);
+  });
+
+  it("onOutput decodes UTF-8 base64 messages", () => {
+    const outputs: string[] = [];
+    session.onOutput((data) => outputs.push(data));
+    mockWs._emitMessage(utf8ToBase64("é 中 ┌─┐\n"));
+    expect(outputs).toEqual(["é 中 ┌─┐\n"]);
+  });
+
+  it("onOutput decodes base64 ArrayBuffer messages", () => {
+    const outputs: string[] = [];
+    session.onOutput((data) => outputs.push(data));
+    mockWs._emitMessage(new TextEncoder().encode(btoa("buffered")).buffer);
+    expect(outputs).toEqual(["buffered"]);
+  });
+
+  it("onOutput decodes base64 Uint8Array messages", () => {
+    const outputs: string[] = [];
+    session.onOutput((data) => outputs.push(data));
+    mockWs._emitMessage(new TextEncoder().encode(utf8ToBase64("typed é")));
+    expect(outputs).toEqual(["typed é"]);
+  });
+
+  it("onOutput decodes base64 Blob messages", async () => {
+    const outputs: string[] = [];
+    session.onOutput((data) => outputs.push(data));
+    mockWs._emitMessage(new Blob([utf8ToBase64("blob 中")]));
+    await vi.waitFor(() => expect(outputs).toEqual(["blob 中"]));
+  });
+
+  it("buffers output until onOutput is registered", () => {
+    const outputs: string[] = [];
+    mockWs._emitMessage(btoa("early"));
+
+    session.onOutput((data) => outputs.push(data));
+
+    expect(outputs).toEqual(["early"]);
+  });
+
+  it("onOutput replaces the previous callback", () => {
+    const first: string[] = [];
+    const second: string[] = [];
+    expect(mockWs.listenerCount("message")).toBe(1);
+    session.onOutput((data) => first.push(data));
+    session.onOutput((data) => second.push(data));
+    expect(mockWs.listenerCount("message")).toBe(1);
+
+    mockWs._emitMessage(btoa("latest"));
+
+    expect(first).toEqual([]);
+    expect(second).toEqual(["latest"]);
+  });
+
+  it("sendInput sends base64-encoded JSON", () => {
+    session.sendInput("ls -la\n");
+    expect(mockWs.sent).toEqual([{ type: "input", data: btoa("ls -la\n") }]);
+  });
+
+  it("sendInput base64-encodes UTF-8 input", () => {
+    session.sendInput("é 中\n");
+    expect(base64ToUtf8((mockWs.sent[0] as { data: string }).data)).toBe("é 中\n");
+  });
+
+  it("resize sends cols/rows JSON", () => {
+    session.resize(120, 40);
+    expect(mockWs.sent).toEqual([{ type: "resize", cols: 120, rows: 40 }]);
+  });
+
+  it("onClose fires when socket closes", () => {
+    let closed = false;
+    session.onClose(() => { closed = true; });
+    expect(session.closed).toBe(false);
+    mockWs._emitClose();
+    expect(closed).toBe(true);
+    expect(session.closed).toBe(true);
+  });
+
+  it("updates closed when socket closes without a callback", () => {
+    expect(session.closed).toBe(false);
+    mockWs._emitClose();
+    expect(session.closed).toBe(true);
+  });
+
+  it("buffers close until onClose is registered", () => {
+    let closed = false;
+    mockWs._emitClose();
+
+    session.onClose(() => { closed = true; });
+
+    expect(closed).toBe(true);
+    expect(session.closed).toBe(true);
+  });
+
+  it("onClose replaces the previous callback", () => {
+    let first = 0;
+    let second = 0;
+    expect(mockWs.listenerCount("close")).toBe(1);
+    session.onClose(() => { first += 1; });
+    session.onClose(() => { second += 1; });
+    expect(mockWs.listenerCount("close")).toBe(1);
+
+    mockWs._emitClose();
+
+    expect(first).toBe(0);
+    expect(second).toBe(1);
+  });
+
+  it("close() calls ws.close and updates closed flag", () => {
+    session.close();
+    expect(mockWs.readyState).toBe(3);
+    expect(session.closed).toBe(true);
+  });
+
+  it("onError fires on socket error", () => {
+    let err: Event | Error | null = null;
+    const fakeEvent = new Event("error");
+    session.onError((e) => { err = e; });
+    mockWs._emitError(fakeEvent);
+    expect(err).toBe(fakeEvent);
+  });
+
+  it("buffers errors until onError is registered", () => {
+    const fakeEvent = new Event("error");
+    let err: Event | Error | null = null;
+    mockWs._emitError(fakeEvent);
+
+    session.onError((e) => { err = e; });
+
+    expect(err).toBe(fakeEvent);
+  });
+
+  it("routes malformed base64 messages through onError", () => {
+    const outputs: string[] = [];
+    const errors: Array<Event | Error> = [];
+    session.onOutput((data) => outputs.push(data));
+    session.onError((err) => errors.push(err));
+
+    mockWs._emitMessage("not base64!");
+
+    expect(outputs).toEqual([]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(Error);
+  });
+
+  it("onError replaces the previous callback", () => {
+    const fakeEvent = new Event("error");
+    let first: Event | Error | null = null;
+    let second: Event | Error | null = null;
+    expect(mockWs.listenerCount("error")).toBe(1);
+    session.onError((e) => { first = e; });
+    session.onError((e) => { second = e; });
+    expect(mockWs.listenerCount("error")).toBe(1);
+
+    mockWs._emitError(fakeEvent);
+
+    expect(first).toBeNull();
+    expect(second).toBe(fakeEvent);
+  });
+});
+
+// ─── BandSox connectTerminal ───
+
+describe("BandSox connectTerminal", () => {
+  let bs: BandSox;
+  let fetchMock: ReturnType<typeof setupFetch>;
+
+  beforeEach(() => {
+    fetchMock = setupFetch();
+  });
+
+  it("builds ws URL and returns TerminalSession", () => {
+    const originalWs = globalThis.WebSocket;
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+
+    bs = new BandSox({
+      baseUrl: "http://localhost:8000",
+      headers: { Authorization: "Bearer mytoken" },
+    });
+
+    const session = bs.connectTerminal("vm-abc", 120, 40);
+    expect(session).toBeInstanceOf(TerminalSession);
+
+    globalThis.WebSocket = originalWs;
+  });
+
+  it("uses configured WebSocket constructor when provided", () => {
+    bs = new BandSox({
+      baseUrl: "http://localhost:8000",
+      headers: {},
+      WebSocket: MockWebSocket as unknown as typeof WebSocket,
+    });
+
+    const session = bs.connectTerminal("vm-xyz");
+    expect(session).toBeInstanceOf(TerminalSession);
+  });
+
+  it("throws when no WebSocket is available", () => {
+    const originalWs = globalThis.WebSocket;
+    (globalThis as any).WebSocket = undefined;
+
+    bs = new BandSox({ baseUrl: "http://localhost:8000", headers: {} });
+    expect(() => bs.connectTerminal("vm-1")).toThrow(/WebSocket is not available/);
+
+    globalThis.WebSocket = originalWs;
+  });
+
+  it("sends terminal auth over WebSocket subprotocols", () => {
+    bs = new BandSox({
+      baseUrl: "http://localhost:8000",
+      headers: { Authorization: "Bearer mytoken" },
+      WebSocket: MockWebSocket as unknown as typeof WebSocket,
+    });
+
+    bs.connectTerminal("vm-abc");
+    const url = new URL(MockWebSocket.lastInstance!.url);
+    const protocols = MockWebSocket.lastInstance!.protocols as string[];
+    const authProtocol = protocols.find((p) => p.startsWith("bandsox.auth."));
+    expect(url.searchParams.has("token")).toBe(false);
+    expect(protocols).toContain("bandsox.terminal");
+    expect(base64UrlToUtf8(authProtocol!.slice("bandsox.auth.".length))).toBe("mytoken");
+  });
+
+  it("reads lowercase authorization header for ws token", () => {
+    bs = new BandSox({
+      baseUrl: "http://localhost:8000",
+      headers: { authorization: "Bearer lower-token" },
+      WebSocket: MockWebSocket as unknown as typeof WebSocket,
+    });
+
+    bs.connectTerminal("vm-abc");
+    const protocols = MockWebSocket.lastInstance!.protocols as string[];
+    const authProtocol = protocols.find((p) => p.startsWith("bandsox.auth."));
+    expect(base64UrlToUtf8(authProtocol!.slice("bandsox.auth.".length))).toBe("lower-token");
+  });
+
+  it("passes raw token through when no Bearer prefix", () => {
+    bs = new BandSox({
+      baseUrl: "http://localhost:8000",
+      headers: { Authorization: "raw-key-no-prefix" },
+      WebSocket: MockWebSocket as unknown as typeof WebSocket,
+    });
+
+    bs.connectTerminal("vm-abc");
+    const protocols = MockWebSocket.lastInstance!.protocols as string[];
+    const authProtocol = protocols.find((p) => p.startsWith("bandsox.auth."));
+    expect(base64UrlToUtf8(authProtocol!.slice("bandsox.auth.".length))).toBe("raw-key-no-prefix");
+  });
+
+  it("omits token query param when Authorization is not configured", () => {
+    bs = new BandSox({
+      baseUrl: "http://localhost:8000",
+      headers: {},
+      WebSocket: MockWebSocket as unknown as typeof WebSocket,
+    });
+
+    bs.connectTerminal("vm-abc");
+    const url = new URL(MockWebSocket.lastInstance!.url);
+    expect(url.searchParams.has("token")).toBe(false);
+    expect(MockWebSocket.lastInstance!.protocols).toBeUndefined();
+  });
+
+  it("base64url-encodes terminal auth tokens for subprotocol auth", () => {
+    bs = new BandSox({
+      baseUrl: "http://localhost:8000",
+      headers: { Authorization: "Bearer key+with/slash=" },
+      WebSocket: MockWebSocket as unknown as typeof WebSocket,
+    });
+
+    bs.connectTerminal("vm-abc");
+    const url = new URL(MockWebSocket.lastInstance!.url);
+    const protocols = MockWebSocket.lastInstance!.protocols as string[];
+    const authProtocol = protocols.find((p) => p.startsWith("bandsox.auth."));
+    expect(url.searchParams.has("token")).toBe(false);
+    expect(authProtocol).not.toContain("/");
+    expect(authProtocol).not.toContain("=");
+    expect(base64UrlToUtf8(authProtocol!.slice("bandsox.auth.".length))).toBe("key+with/slash=");
+  });
+
+  it("builds proper ws URL from http baseUrl", () => {
+    bs = new BandSox({
+      baseUrl: "https://api.example.com",
+      headers: {},
+      WebSocket: MockWebSocket as unknown as typeof WebSocket,
+    });
+
+    // connectTerminal should replace https with wss
+    const session = bs.connectTerminal("vm-ssl");
+    expect(session).toBeInstanceOf(TerminalSession);
+  });
+});
+
+// ─── MicroVM connectTerminal ───
+
+describe("MicroVM connectTerminal", () => {
+  it("delegates to BandSox connectTerminal", () => {
+    const originalWs = globalThis.WebSocket;
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+
+    const fetchMock = setupFetch();
+    const bs = new BandSox({
+      baseUrl: "http://localhost:8000",
+      headers: {},
+    });
+    const vm = new MicroVM("vm-delegate", bs);
+
+    const session = vm.connectTerminal(100, 50);
+    expect(session).toBeInstanceOf(TerminalSession);
+
+    globalThis.WebSocket = originalWs;
   });
 });

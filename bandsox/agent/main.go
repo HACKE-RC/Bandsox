@@ -17,6 +17,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/binary"
@@ -59,6 +60,7 @@ type Request struct {
 	ShowLineNumbers bool `json:"show_line_numbers,omitempty"` // Prefix lines with "N\t"
 	VsockPort       int  `json:"vsock_port,omitempty"`        // Override vsock port from request
 	UseVsock        bool `json:"use_vsock,omitempty"`         // Enable guest->host upload fast path
+	UseVsockOutput  bool `json:"use_vsock_output,omitempty"`  // For exec: buffer stdout/stderr and upload via vsock on completion
 }
 
 type Event struct {
@@ -236,7 +238,18 @@ func vsockSendJSON(conn *os.File, data interface{}) error {
 }
 
 func vsockRecvJSON(conn *os.File) (map[string]interface{}, error) {
-	reader := bufio.NewReader(conn)
+	return vsockRecvJSONFrom(bufio.NewReader(conn))
+}
+
+// vsockRecvJSONFrom reads one JSON line from a reused bufio.Reader.
+// The reused reader is critical: when the host sends multiple JSON
+// messages back-to-back (e.g. READY+COMPLETE for a zero-byte upload)
+// they can land together in the agent's recv buffer. Creating a new
+// bufio.Reader per call discards anything not consumed from the
+// previous one, so the second message is lost — the agent then reads
+// from a closed conn, returns an error, and marks vsock broken,
+// degrading every subsequent command on this VM to the UART path.
+func vsockRecvJSONFrom(reader *bufio.Reader) (map[string]interface{}, error) {
 	line, err := reader.ReadBytes('\n')
 	if err != nil {
 		return nil, err
@@ -252,7 +265,7 @@ func vsockRecvJSON(conn *os.File) (map[string]interface{}, error) {
 // Shell command execution
 // =============================================================================
 
-func handleExec(cmdID, command string, background bool, env map[string]string) {
+func handleExec(cmdID, command string, background bool, env map[string]string, useVsockOutput bool, vsockPort int) {
 	cmd := exec.Command("/bin/sh", "-c", command)
 	cmd.Env = os.Environ()
 	for k, v := range env {
@@ -294,8 +307,33 @@ func handleExec(cmdID, command string, background bool, env map[string]string) {
 			sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": ec})
 		}()
 	} else {
-		stdout, _ := cmd.StdoutPipe()
-		stderr, _ := cmd.StderrPipe()
+		// Two output paths:
+		//   - UART path (default): streamRaw shoves base64-chunked
+		//     output events onto the serial console as they arrive.
+		//     Uses StdoutPipe/StderrPipe so output streams in real
+		//     time (matters for progress indicators).
+		//   - Vsock path (useVsockOutput=true): cmd.Stdout / .Stderr
+		//     wired straight to capped in-memory buffers. After
+		//     cmd.Wait returns we ship each buffer as a single vsock
+		//     upload. Doing it this way (instead of StdoutPipe +
+		//     goroutine drain) avoids the documented race in
+		//     exec.Cmd.Wait closing the pipe before our drain
+		//     goroutine has read the buffered bytes — fast commands
+		//     like `echo` were losing their entire output to that
+		//     race.
+		var wg sync.WaitGroup
+		var stdoutBuf, stderrBuf *bytes.Buffer
+		var stdoutTrunc, stderrTrunc bool
+		var stdout, stderr io.ReadCloser
+		if useVsockOutput {
+			stdoutBuf = &bytes.Buffer{}
+			stderrBuf = &bytes.Buffer{}
+			cmd.Stdout = &cappedWriter{buf: stdoutBuf, cap: streamRawByteCap, truncated: &stdoutTrunc}
+			cmd.Stderr = &cappedWriter{buf: stderrBuf, cap: streamRawByteCap, truncated: &stderrTrunc}
+		} else {
+			stdout, _ = cmd.StdoutPipe()
+			stderr, _ = cmd.StderrPipe()
+		}
 
 		if err := cmd.Start(); err != nil {
 			sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": err.Error()})
@@ -303,10 +341,26 @@ func handleExec(cmdID, command string, background bool, env map[string]string) {
 			return
 		}
 
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() { defer wg.Done(); streamRaw(stdout, "stdout", cmdID) }()
-		go func() { defer wg.Done(); streamRaw(stderr, "stderr", cmdID) }()
+		// Register foreground execs in sessions[] so handleKill can stop
+		// them. Without this, a runaway command (e.g. an unbounded
+		// `rg -rn` whose host-side caller already raised TimeoutError)
+		// keeps producing output and monopolises the serial console
+		// `consoleMu`, blocking every other goroutine's sendEvent and
+		// wedging the VM. The old code only registered background execs.
+		sessionsMu.Lock()
+		sessions[cmdID] = &Session{Process: cmd.Process, CmdID: cmdID}
+		sessionsMu.Unlock()
+		defer func() {
+			sessionsMu.Lock()
+			delete(sessions, cmdID)
+			sessionsMu.Unlock()
+		}()
+
+		if !useVsockOutput {
+			wg.Add(2)
+			go func() { defer wg.Done(); streamRaw(stdout, "stdout", cmdID) }()
+			go func() { defer wg.Done(); streamRaw(stderr, "stderr", cmdID) }()
+		}
 
 		err := cmd.Wait()
 		wg.Wait()
@@ -319,13 +373,125 @@ func handleExec(cmdID, command string, background bool, env map[string]string) {
 				ec = 1
 			}
 		}
-		sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": ec})
+
+		vsockOutputMeta := map[string]interface{}{}
+		if useVsockOutput {
+			port := vsockPort
+			if port == 0 {
+				port = getVsockPort()
+			}
+			// Try the vsock fast path. Each stream uploads
+			// independently — empty streams still upload so the
+			// host knows the slot is done (lets the host's
+			// buf_slot wait return immediately). On any failure
+			// for a non-empty stream, fall back to UART so the
+			// caller still gets its output. Empty-stream failures
+			// don't trigger fallback because there's nothing to
+			// deliver.
+			vsockAttempted := false
+			okOut := true
+			okErr := true
+			if vsockCanUse(port) {
+				vsockAttempted = true
+				okOut = uploadBytesViaVsock(cmdID+":stdout", stdoutBuf.Bytes(), port)
+				okErr = uploadBytesViaVsock(cmdID+":stderr", stderrBuf.Bytes(), port)
+			} else {
+				okOut = false
+				okErr = false
+			}
+			vsockOutputMeta = map[string]interface{}{
+				"requested":       true,
+				"attempted":       vsockAttempted,
+				"stdout_uploaded": okOut,
+				"stderr_uploaded": okErr,
+			}
+			if !okOut && stdoutBuf.Len() > 0 {
+				flushBufferToSerial(stdoutBuf.Bytes(), "stdout", cmdID)
+			}
+			if !okErr && stderrBuf.Len() > 0 {
+				flushBufferToSerial(stderrBuf.Bytes(), "stderr", cmdID)
+			}
+			if stdoutTrunc {
+				sendEvent("output_truncated", map[string]interface{}{
+					"cmd_id": cmdID, "stream": "stdout",
+					"bytes_sent": stdoutBuf.Len(),
+				})
+			}
+			if stderrTrunc {
+				sendEvent("output_truncated", map[string]interface{}{
+					"cmd_id": cmdID, "stream": "stderr",
+					"bytes_sent": stderrBuf.Len(),
+				})
+			}
+		}
+		exitPayload := map[string]interface{}{"cmd_id": cmdID, "exit_code": ec}
+		if useVsockOutput {
+			exitPayload["vsock_output"] = vsockOutputMeta
+		}
+		sendEvent("exit", exitPayload)
+	}
+}
+
+// cappedWriter is an io.Writer that appends to a *bytes.Buffer up to
+// `cap` total bytes, then quietly discards the rest while flagging
+// `truncated`. Wired directly into exec.Cmd.Stdout / .Stderr so writes
+// happen synchronously during the child's runtime — no pipe-drain race
+// against cmd.Wait closing the read end.
+type cappedWriter struct {
+	buf       *bytes.Buffer
+	cap       int
+	truncated *bool
+}
+
+func (w *cappedWriter) Write(p []byte) (int, error) {
+	remaining := w.cap - w.buf.Len()
+	if remaining <= 0 {
+		*w.truncated = true
+		return len(p), nil // pretend success so child doesn't SIGPIPE
+	}
+	if len(p) <= remaining {
+		w.buf.Write(p)
+		return len(p), nil
+	}
+	w.buf.Write(p[:remaining])
+	*w.truncated = true
+	return len(p), nil
+}
+
+// flushBufferToSerial emits a buffered exec stream as the same
+// `output` events streamRaw would have produced — used as a fallback
+// when the vsock upload path fails so the caller still sees output.
+func flushBufferToSerial(data []byte, stream, cmdID string) {
+	if len(data) == 0 {
+		return
+	}
+	const chunk = 4096
+	for i := 0; i < len(data); i += chunk {
+		end := i + chunk
+		if end > len(data) {
+			end = len(data)
+		}
+		encoded := base64.StdEncoding.EncodeToString(data[i:end])
+		sendEvent("output", map[string]interface{}{
+			"cmd_id": cmdID, "stream": stream,
+			"data": encoded, "encoding": "base64",
+		})
 	}
 }
 
 func readStream(r io.Reader, stream, cmdID string) {
 	streamRaw(r, stream, cmdID)
 }
+
+// Per-stream output cap. Beyond this we send a single
+// "output_truncated" event and quietly drain the rest. This bounds how
+// much one runaway command can monopolise the serial UART when sendEvent
+// holds consoleMu while bufio.Writer.Flush() blocks on the line-rate
+// limited firecracker serial. Without this cap, a single unbounded
+// `rg -rn` floods the UART faster than it can drain, every other
+// goroutine's sendEvent (including unrelated `exit` events) queues
+// behind it, and the entire VM stops emitting events to the host.
+const streamRawByteCap = 4 * 1024 * 1024 // 4 MiB per stream per command
 
 // streamRaw forwards raw byte chunks from r as base64-encoded output events.
 // Unlike a line-buffered scanner, this delivers data the moment it's available,
@@ -334,13 +500,38 @@ func readStream(r io.Reader, stream, cmdID string) {
 // JSON event safe from non-UTF8 / control bytes.
 func streamRaw(r io.Reader, stream, cmdID string) {
 	buf := make([]byte, 4096)
+	var sent int64
+	truncated := false
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
-			encoded := base64.StdEncoding.EncodeToString(buf[:n])
-			sendEvent("output", map[string]interface{}{
-				"cmd_id": cmdID, "stream": stream, "data": encoded, "encoding": "base64",
-			})
+			if !truncated {
+				remaining := int64(streamRawByteCap) - sent
+				if remaining <= 0 {
+					sendEvent("output_truncated", map[string]interface{}{
+						"cmd_id": cmdID, "stream": stream, "bytes_sent": sent,
+					})
+					truncated = true
+				} else {
+					take := int64(n)
+					if take > remaining {
+						take = remaining
+					}
+					encoded := base64.StdEncoding.EncodeToString(buf[:take])
+					sendEvent("output", map[string]interface{}{
+						"cmd_id": cmdID, "stream": stream, "data": encoded, "encoding": "base64",
+					})
+					sent += take
+					if take < int64(n) {
+						sendEvent("output_truncated", map[string]interface{}{
+							"cmd_id": cmdID, "stream": stream, "bytes_sent": sent,
+						})
+						truncated = true
+					}
+				}
+			}
+			// Once truncated, keep reading (so the child doesn't block on
+			// SIGPIPE) but drop the bytes on the floor.
 		}
 		if err != nil {
 			return
@@ -391,7 +582,16 @@ func handleKill(cmdID string) {
 	if !ok {
 		return
 	}
-	sess.Process.Signal(syscall.SIGTERM)
+	// SIGTERM first, then SIGKILL after a brief grace, so a runaway
+	// command that ignores SIGTERM (or whose shell parent ignores it)
+	// can't keep flooding the console indefinitely.
+	if sess.Process != nil {
+		sess.Process.Signal(syscall.SIGTERM)
+		go func(p *os.Process) {
+			time.Sleep(500 * time.Millisecond)
+			p.Signal(syscall.SIGKILL)
+		}(sess.Process)
+	}
 }
 
 // =============================================================================
@@ -451,8 +651,9 @@ func handleReadFileSerial(cmdID, path string, offset, limit int, showLineNumbers
 			return
 		}
 		encoded := base64.StdEncoding.EncodeToString(data)
+		totalLines := bytes.Count(data, []byte{'\n'}) + 1
 		sendEvent("file_content", map[string]interface{}{
-			"cmd_id": cmdID, "path": path, "content": encoded,
+			"cmd_id": cmdID, "path": path, "content": encoded, "total_lines": totalLines,
 		})
 		sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 0})
 		return
@@ -469,12 +670,14 @@ func handleReadFileSerial(cmdID, path string, offset, limit int, showLineNumbers
 
 	hash := md5.New()
 	var off int64
+	var lineCount int
 	buf := make([]byte, chunkSize)
 
 	for {
 		n, err := f.Read(buf)
 		if n > 0 {
 			hash.Write(buf[:n])
+			lineCount += bytes.Count(buf[:n], []byte{'\n'})
 			encoded := base64.StdEncoding.EncodeToString(buf[:n])
 			sendEvent("file_chunk", map[string]interface{}{
 				"cmd_id": cmdID, "path": path, "data": encoded, "offset": off, "size": n,
@@ -486,8 +689,10 @@ func handleReadFileSerial(cmdID, path string, offset, limit int, showLineNumbers
 		}
 	}
 
+	// Match Python's len(text.split('\n')) semantics.
+	lineCount++
 	sendEvent("file_complete", map[string]interface{}{
-		"cmd_id": cmdID, "path": path, "total_size": fileSize, "checksum": fmt.Sprintf("%x", hash.Sum(nil)),
+		"cmd_id": cmdID, "path": path, "total_size": fileSize, "checksum": fmt.Sprintf("%x", hash.Sum(nil)), "total_lines": lineCount,
 	})
 	sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 0})
 }
@@ -513,7 +718,7 @@ func handleReadFileWindow(cmdID, path string, offset, limit int, showLineNumbers
 			continue
 		}
 		if limit > 0 && emitted >= limit {
-			break
+			continue // keep counting for total_lines
 		}
 		if showLineNumbers {
 			out = strconv.AppendInt(out, int64(lineNo), 10)
@@ -533,8 +738,9 @@ func handleReadFileWindow(cmdID, path string, offset, limit int, showLineNumbers
 	}
 
 	encoded := base64.StdEncoding.EncodeToString(out)
+	// lineNo is the total line count after scanning to EOF.
 	sendEvent("file_content", map[string]interface{}{
-		"cmd_id": cmdID, "path": path, "content": encoded,
+		"cmd_id": cmdID, "path": path, "content": encoded, "total_lines": lineNo,
 	})
 	sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 0})
 }
@@ -678,20 +884,31 @@ func uploadBytesViaVsock(cmdID string, data []byte, port int) bool {
 	}
 	defer conn.Close()
 
+	// Share one bufio.Reader for all reads on this conn so we don't
+	// lose buffered bytes between vsockRecvJSON calls.
+	reader := bufio.NewReader(conn)
+
 	if err := vsockSendJSON(conn, map[string]interface{}{
 		"type": "upload", "path": "<bytes>", "size": len(data), "checksum": "", "cmd_id": cmdID,
 	}); err != nil {
 		return false
 	}
-	resp, err := vsockRecvJSON(conn)
+	resp, err := vsockRecvJSONFrom(reader)
 	if err != nil || resp["type"] != "ready" {
 		return false
 	}
-	if _, err := conn.Write(data); err != nil {
-		vsockMarkBroken()
-		return false
+	// Skip the write syscall on empty payloads. The host sends
+	// READY+COMPLETE back-to-back for size=0 and closes the connection
+	// immediately after — the agent's subsequent write races with that
+	// close and returns EPIPE on most kernels, which would trip
+	// vsockMarkBroken() and starve the *next* command of vsock.
+	if len(data) > 0 {
+		if _, err := conn.Write(data); err != nil {
+			vsockMarkBroken()
+			return false
+		}
 	}
-	resp, err = vsockRecvJSON(conn)
+	resp, err = vsockRecvJSONFrom(reader)
 	if err != nil || resp["type"] == "error" {
 		vsockMarkBroken()
 		return false
@@ -990,7 +1207,7 @@ func main() {
 
 		switch req.Type {
 		case "exec":
-			go handleExec(req.ID, req.Command, req.Bg, req.Env)
+			go handleExec(req.ID, req.Command, req.Bg, req.Env, req.UseVsockOutput, req.VsockPort)
 
 		case "pty_exec":
 			handlePTYExec(req.ID, req.Command, req.Cols, req.Rows, req.Env)
@@ -1026,7 +1243,7 @@ func main() {
 		default:
 			// Backward compat: treat unknown types with a command field as exec
 			if req.Command != "" {
-				go handleExec(req.ID, req.Command, false, req.Env)
+				go handleExec(req.ID, req.Command, false, req.Env, req.UseVsockOutput, req.VsockPort)
 			}
 		}
 	}
