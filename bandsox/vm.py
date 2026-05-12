@@ -603,6 +603,9 @@ class MicroVM:
                 cmd_id = payload.get("cmd_id")
                 content = payload.get("content")
                 if cmd_id in self.event_callbacks:
+                    total_lines = payload.get("total_lines")
+                    if total_lines is not None:
+                        self.event_callbacks[cmd_id]["_agent_total_lines"] = total_lines
                     cb = self.event_callbacks[cmd_id].get("on_file_content")
                     if cb:
                         cb(content)
@@ -638,6 +641,9 @@ class MicroVM:
                 total_size = payload.get("total_size")
                 checksum = payload.get("checksum")
                 if cmd_id in self.event_callbacks:
+                    total_lines = payload.get("total_lines")
+                    if total_lines is not None:
+                        self.event_callbacks[cmd_id]["_agent_total_lines"] = total_lines
                     cb = self.event_callbacks[cmd_id].get("on_file_complete")
                     if cb:
                         cb(total_size, checksum)
@@ -2038,12 +2044,10 @@ class MicroVM:
             show_header: If offset>0, show "... skipped N lines" header
             show_footer: If limit>0 and more lines remain, show "... N lines left" footer
 
-        **Performance note:** When *both* offset or limit are non-zero *and*
-        show_header or show_footer is True, the full file is downloaded before
-        slicing locally. The header/footer display needs the total line count,
-        which the agent does not yet report independently. For large files,
-        pass ``show_header=False, show_footer=False`` to let the agent slice
-        server-side and avoid pulling the entire file over vsock/serial.
+        The agent reports total line count alongside the content, so
+        offset/limit slicing happens server-side even when header/footer is
+        requested — the full file is never transferred over vsock/serial
+        just for decoration.
         """
         agent_error = None
         if self.agent_ready:
@@ -2249,10 +2253,16 @@ class MicroVM:
                         "chunks": bytearray(),
                         "checksum": None,
                         "total_size": None,
+                        "agent_total_lines": None,
                     }
+                    cmd_id = str(uuid.uuid4())
                     def on_file_content(c, _r=result):
                         _r["mode"] = "single"
                         _r["content"] = c
+                        _ec = self.event_callbacks.get(cmd_id, {})
+                        _tls = _ec.get("_agent_total_lines")
+                        if _tls is not None:
+                            _r["agent_total_lines"] = _tls
                     def on_file_chunk(data, offset_, size, _r=result):
                         if _r["mode"] is None:
                             _r["mode"] = "chunked"
@@ -2260,24 +2270,20 @@ class MicroVM:
                     def on_file_complete(total_size, checksum, _r=result):
                         _r["total_size"] = total_size
                         _r["checksum"] = checksum
-
-                    needs_host_formatting = (
-                        (offset > 0 or limit > 0) and (show_header or show_footer)
-                    )
-                    request_offset = 0 if needs_host_formatting else offset
-                    request_limit = 0 if needs_host_formatting else limit
-                    request_show_line_numbers = (
-                        False if needs_host_formatting else show_line_numbers
-                    )
+                        _ec = self.event_callbacks.get(cmd_id, {})
+                        _tls = _ec.get("_agent_total_lines")
+                        if _tls is not None:
+                            _r["agent_total_lines"] = _tls
 
                     try:
-                        self.send_request(
+                        self._send_request_with_id(
+                            cmd_id,
                             "read_file",
                             {
                                 "path": path,
-                                "offset": request_offset,
-                                "limit": request_limit,
-                                "show_line_numbers": request_show_line_numbers,
+                                "offset": offset,
+                                "limit": limit,
+                                "show_line_numbers": show_line_numbers,
                             },
                             on_file_content=on_file_content,
                             on_file_chunk=on_file_chunk,
@@ -2285,7 +2291,6 @@ class MicroVM:
                         )
                         if result["mode"] == "single" and result["content"] is not None:
                             raw_bytes = base64.b64decode(result["content"])
-                            raw_bytes_full_file = needs_host_formatting
                         elif result["mode"] == "chunked":
                             if result["checksum"]:
                                 md5 = hashlib.md5(result["chunks"]).hexdigest()
@@ -2294,7 +2299,6 @@ class MicroVM:
                                         f"Checksum mismatch: expected {result['checksum']}, got {md5}"
                                     )
                             raw_bytes = bytes(result["chunks"])
-                            raw_bytes_full_file = needs_host_formatting
                         # Phantom-empty detection: agent acked the read but
                         # the content callback either fired with "" or never
                         # fired at all. Retry — the agent's view of the file
@@ -2307,7 +2311,6 @@ class MicroVM:
                                 )
                                 last_attempt_was_empty = True
                                 raw_bytes = None
-                                raw_bytes_full_file = False
                                 time.sleep(0.05 * (serial_attempt + 1))
                                 continue
                             # Out of retries — surface as failure so the
@@ -2326,15 +2329,13 @@ class MicroVM:
                         break
 
             if raw_bytes is not None:
-                if raw_bytes_full_file:
+                agent_tl = result.get("agent_total_lines")
+                if show_header or show_footer or show_line_numbers:
                     return self._format_file_content(
-                        raw_bytes, offset, limit, show_line_numbers, show_header, show_footer
+                        raw_bytes, offset, limit, show_line_numbers,
+                        show_header, show_footer, total_lines=agent_tl,
                     )
-                if offset > 0 or limit > 0 or show_line_numbers:
-                    return raw_bytes.decode("utf-8", errors="replace")
-                return self._format_file_content(
-                    raw_bytes, offset, limit, show_line_numbers, show_header, show_footer
-                )
+                return raw_bytes.decode("utf-8", errors="replace")
 
         if self._has_debugfs_rootfs():
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -2371,35 +2372,48 @@ class MicroVM:
         show_line_numbers: bool = False,
         show_header: bool = True,
         show_footer: bool = True,
+        total_lines: int = None,
     ) -> str:
-        """Apply offset, limit, line numbers, header, and footer to raw file content."""
+        """Apply offset, limit, line numbers, header, and footer to raw file content.
+
+        When *total_lines* is provided, the content is assumed to be pre-sliced
+        by the agent (offset/limit already applied) and total_lines is used for
+        the header/footer decoration instead of computing it locally.  This
+        avoids pulling the entire file over vsock/serial just for the line
+        count.
+        """
         text = raw_bytes.decode("utf-8", errors="replace")
         lines = text.split("\n")
 
-        total_lines = len(lines)
-        start = min(offset, total_lines)
-        end = total_lines
+        if total_lines is not None:
+            # Agent already sliced; lines is just the requested window.
+            selected = lines
+            _total = total_lines
+            _start = offset
+        else:
+            # Legacy path: full file content, slice locally.
+            _total = len(lines)
+            _start = min(offset, _total)
+            _end = _total if limit == 0 else min(_start + limit, _total)
+            selected = lines[_start:_end]
 
-        if limit > 0:
-            end = min(start + limit, total_lines)
-
-        selected = lines[start:end]
+        _end = _start + len(selected)
         result_lines = []
 
         # Header: skipped lines indicator
-        if show_header and start > 0:
-            result_lines.append(f"... skipped {start} lines")
+        if show_header and _start > 0:
+            result_lines.append(f"... skipped {_start} lines")
 
         # Line numbers
         if show_line_numbers:
-            for i, line in enumerate(selected, start=start + 1):
+            for i, line in enumerate(selected, start=_start + 1):
                 result_lines.append(f"{i}\t{line}")
         else:
             result_lines.extend(selected)
 
         # Footer: remaining lines indicator
-        if show_footer and end < total_lines:
-            remaining = total_lines - end
+        if show_footer and _end < _total:
+            remaining = _total - _end
             result_lines.append(f"... {remaining} lines left")
 
         return "\n".join(result_lines)
