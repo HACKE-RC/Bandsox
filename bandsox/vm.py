@@ -331,6 +331,7 @@ class MicroVM:
         self.network_setup = False
         self.console_conn = None  # Connection to console socket if not owner
         self.event_callbacks = {}  # cmd_id -> {stdout: func, stderr: func, exit: func}
+        self._event_callbacks_lock = threading.Lock()
         self.agent_ready = False
         self.env_vars = {}
         self._uv_available = None  # Cache for uv availability check
@@ -526,8 +527,9 @@ class MicroVM:
             # may reconnect and resume the next request, but commands
             # already in flight cannot be recovered cleanly.
             try:
-                pending = list(self.event_callbacks.items())
-                self.event_callbacks.clear()
+                with self._event_callbacks_lock:
+                    pending = list(self.event_callbacks.items())
+                    self.event_callbacks.clear()
                 for cmd_id, cbs in pending:
                     on_error = cbs.get("on_error")
                     on_exit = cbs.get("on_exit")
@@ -549,7 +551,15 @@ class MicroVM:
             )
 
     def _handle_stdout_line(self, line):
-        """Parses a line from stdout (event)."""
+        """Parses a line from stdout (event).
+
+        All event_callbacks accesses are protected by _event_callbacks_lock.
+        For "exit" events we atomically pop the entry under the lock so that
+        concurrent threads (retry path, vsock fast-path registration,
+        _socket_read_loop teardown) can't race on the same cmd_id slot.
+        Read-only callbacks are looked up under the lock and invoked outside
+        it so a slow callback doesn't stall the dispatch thread.
+        """
         import json
 
         try:
@@ -565,8 +575,10 @@ class MicroVM:
                     logger.info("Agent is ready")
                 elif status == "started":
                     pid = payload.get("pid")
-                    if cmd_id in self.event_callbacks:
-                        cb = self.event_callbacks[cmd_id].get("on_started")
+                    with self._event_callbacks_lock:
+                        entry = self.event_callbacks.get(cmd_id)
+                    if entry:
+                        cb = entry.get("on_started")
                         if cb:
                             cb(pid)
 
@@ -574,13 +586,16 @@ class MicroVM:
                 # to notify the caller that the upload already landed on
                 # disk (status == "uploaded") so download_file knows not
                 # to wait for chunked serial events.
-                if cmd_id and cmd_id in self.event_callbacks:
-                    cb = self.event_callbacks[cmd_id].get("on_status")
-                    if cb:
-                        try:
-                            cb(payload)
-                        except Exception:
-                            pass
+                if cmd_id:
+                    with self._event_callbacks_lock:
+                        entry = self.event_callbacks.get(cmd_id)
+                    if entry:
+                        cb = entry.get("on_status")
+                        if cb:
+                            try:
+                                cb(payload)
+                            except Exception:
+                                pass
 
             elif evt_type == "output":
                 cmd_id = payload.get("cmd_id")
@@ -592,8 +607,10 @@ class MicroVM:
                         data = base64.b64decode(data).decode("utf-8", errors="replace")
                     except Exception:
                         pass
-                if cmd_id in self.event_callbacks:
-                    cb = self.event_callbacks[cmd_id].get(f"on_{stream}")
+                with self._event_callbacks_lock:
+                    entry = self.event_callbacks.get(cmd_id)
+                if entry:
+                    cb = entry.get(f"on_{stream}")
                     if cb:
                         try:
                             cb(data)
@@ -603,27 +620,35 @@ class MicroVM:
             elif evt_type == "file_content":
                 cmd_id = payload.get("cmd_id")
                 content = payload.get("content")
-                if cmd_id in self.event_callbacks:
-                    total_lines = payload.get("total_lines")
-                    if total_lines is not None:
-                        self.event_callbacks[cmd_id]["_agent_total_lines"] = total_lines
-                    cb = self.event_callbacks[cmd_id].get("on_file_content")
-                    if cb:
-                        cb(content)
+                with self._event_callbacks_lock:
+                    entry = self.event_callbacks.get(cmd_id)
+                    if entry is not None:
+                        total_lines = payload.get("total_lines")
+                        if total_lines is not None:
+                            entry["_agent_total_lines"] = total_lines
+                        cb = entry.get("on_file_content")
+                    else:
+                        cb = None
+                if cb:
+                    cb(content)
 
             elif evt_type == "dir_list":
                 cmd_id = payload.get("cmd_id")
                 files = payload.get("files")
-                if cmd_id in self.event_callbacks:
-                    cb = self.event_callbacks[cmd_id].get("on_dir_list")
+                with self._event_callbacks_lock:
+                    entry = self.event_callbacks.get(cmd_id)
+                if entry:
+                    cb = entry.get("on_dir_list")
                     if cb:
                         cb(files)
 
             elif evt_type == "file_info":
                 cmd_id = payload.get("cmd_id")
                 info = payload.get("info")
-                if cmd_id in self.event_callbacks:
-                    cb = self.event_callbacks[cmd_id].get("on_file_info")
+                with self._event_callbacks_lock:
+                    entry = self.event_callbacks.get(cmd_id)
+                if entry:
+                    cb = entry.get("on_file_info")
                     if cb:
                         cb(info)
 
@@ -632,8 +657,10 @@ class MicroVM:
                 data = payload.get("data")
                 offset = payload.get("offset")
                 size = payload.get("size")
-                if cmd_id in self.event_callbacks:
-                    cb = self.event_callbacks[cmd_id].get("on_file_chunk")
+                with self._event_callbacks_lock:
+                    entry = self.event_callbacks.get(cmd_id)
+                if entry:
+                    cb = entry.get("on_file_chunk")
                     if cb:
                         cb(data, offset, size)
 
@@ -641,33 +668,41 @@ class MicroVM:
                 cmd_id = payload.get("cmd_id")
                 total_size = payload.get("total_size")
                 checksum = payload.get("checksum")
-                if cmd_id in self.event_callbacks:
-                    total_lines = payload.get("total_lines")
-                    if total_lines is not None:
-                        self.event_callbacks[cmd_id]["_agent_total_lines"] = total_lines
-                    cb = self.event_callbacks[cmd_id].get("on_file_complete")
-                    if cb:
-                        cb(total_size, checksum)
+                with self._event_callbacks_lock:
+                    entry = self.event_callbacks.get(cmd_id)
+                    if entry is not None:
+                        total_lines = payload.get("total_lines")
+                        if total_lines is not None:
+                            entry["_agent_total_lines"] = total_lines
+                        cb = entry.get("on_file_complete")
+                    else:
+                        cb = None
+                if cb:
+                    cb(total_size, checksum)
 
             elif evt_type == "exit":
                 cmd_id = payload.get("cmd_id")
                 exit_code = payload.get("exit_code")
-                if cmd_id in self.event_callbacks:
-                    payload_cb = self.event_callbacks[cmd_id].get("on_exit_payload")
+                # Atomically take ownership so no other thread can touch
+                # this cmd_id's entry after we remove it.
+                with self._event_callbacks_lock:
+                    entry = self.event_callbacks.pop(cmd_id, None)
+                if entry:
+                    payload_cb = entry.get("on_exit_payload")
                     if payload_cb:
                         payload_cb(payload)
-                    cb = self.event_callbacks[cmd_id].get("on_exit")
+                    cb = entry.get("on_exit")
                     if cb:
                         cb(exit_code)
-                    # Cleanup
-                    del self.event_callbacks[cmd_id]
 
             elif evt_type == "error":
                 cmd_id = payload.get("cmd_id")
                 error = payload.get("error")
                 logger.error(f"Agent error for cmd {cmd_id}: {error}")
-                if cmd_id in self.event_callbacks:
-                    cb = self.event_callbacks[cmd_id].get("on_error")
+                with self._event_callbacks_lock:
+                    entry = self.event_callbacks.get(cmd_id)
+                if entry:
+                    cb = entry.get("on_error")
                     if cb:
                         cb(error)
 
@@ -765,19 +800,20 @@ class MicroVM:
         def on_error(msg):
             result["error"] = msg
 
-        self.event_callbacks[cmd_id] = {
-            "on_stdout": on_stdout,
-            "on_stderr": on_stderr,
-            "on_file_content": on_file_content,
-            "on_file_chunk": on_file_chunk,
-            "on_file_complete": on_file_complete,
-            "on_dir_list": on_dir_list,
-            "on_file_info": on_file_info,
-            "on_status": on_status,
-            "on_exit_payload": on_exit_payload,
-            "on_exit": on_exit,
-            "on_error": on_error,
-        }
+        with self._event_callbacks_lock:
+            self.event_callbacks[cmd_id] = {
+                "on_stdout": on_stdout,
+                "on_stderr": on_stderr,
+                "on_file_content": on_file_content,
+                "on_file_chunk": on_file_chunk,
+                "on_file_complete": on_file_complete,
+                "on_dir_list": on_dir_list,
+                "on_file_info": on_file_info,
+                "on_status": on_status,
+                "on_exit_payload": on_exit_payload,
+                "on_exit": on_exit,
+                "on_error": on_error,
+            }
 
         req_str = json.dumps(payload)
         self._write_to_agent(req_str + "\n")
@@ -833,19 +869,20 @@ class MicroVM:
             result["error"] = None
             result["code"] = -1
             completion_event.clear()
-            self.event_callbacks[cmd_id] = {
-                "on_stdout": on_stdout,
-                "on_stderr": on_stderr,
-                "on_file_content": on_file_content,
-                "on_file_chunk": on_file_chunk,
-                "on_file_complete": on_file_complete,
-                "on_dir_list": on_dir_list,
-                "on_file_info": on_file_info,
-                "on_status": on_status,
-                "on_exit_payload": on_exit_payload,
-                "on_exit": on_exit,
-                "on_error": on_error,
-            }
+            with self._event_callbacks_lock:
+                self.event_callbacks[cmd_id] = {
+                    "on_stdout": on_stdout,
+                    "on_stderr": on_stderr,
+                    "on_file_content": on_file_content,
+                    "on_file_chunk": on_file_chunk,
+                    "on_file_complete": on_file_complete,
+                    "on_dir_list": on_dir_list,
+                    "on_file_info": on_file_info,
+                    "on_status": on_status,
+                    "on_exit_payload": on_exit_payload,
+                    "on_exit": on_exit,
+                    "on_error": on_error,
+                }
             self._write_to_agent(req_str + "\n")
             if not completion_event.wait(timeout):
                 try:
@@ -1324,12 +1361,13 @@ class MicroVM:
             pid_result["pid"] = pid
             started_event.set()
 
-        self.event_callbacks[session_id] = {
-            "on_stdout": on_stdout,
-            "on_stderr": on_stderr,
-            "on_exit": on_exit,
-            "on_started": on_started,
-        }
+        with self._event_callbacks_lock:
+            self.event_callbacks[session_id] = {
+                "on_stdout": on_stdout,
+                "on_stderr": on_stderr,
+                "on_exit": on_exit,
+                "on_started": on_started,
+            }
 
         req = json.dumps(
             {
@@ -1359,10 +1397,11 @@ class MicroVM:
 
         session_id = str(uuid.uuid4())
 
-        self.event_callbacks[session_id] = {
-            "on_stdout": on_stdout,  # PTY only has stdout (merged)
-            "on_exit": on_exit,
-        }
+        with self._event_callbacks_lock:
+            self.event_callbacks[session_id] = {
+                "on_stdout": on_stdout,  # PTY only has stdout (merged)
+                "on_exit": on_exit,
+            }
 
         req = json.dumps(
             {
@@ -1379,8 +1418,9 @@ class MicroVM:
 
     def send_session_input(self, session_id: str, data: str, encoding: str = None):
         """Sends input to a session's stdin."""
-        if session_id not in self.event_callbacks:
-            return
+        with self._event_callbacks_lock:
+            if session_id not in self.event_callbacks:
+                return
 
         payload = {"type": "input", "id": session_id, "data": data}
         if encoding:
@@ -1391,8 +1431,9 @@ class MicroVM:
 
     def resize_session(self, session_id: str, cols: int, rows: int):
         """Resizes a PTY session."""
-        if session_id not in self.event_callbacks:
-            return
+        with self._event_callbacks_lock:
+            if session_id not in self.event_callbacks:
+                return
 
         req = json.dumps(
             {"type": "resize", "id": session_id, "cols": cols, "rows": rows}
@@ -1401,8 +1442,9 @@ class MicroVM:
 
     def kill_session(self, session_id: str):
         """Kills a session."""
-        if session_id not in self.event_callbacks:
-            return
+        with self._event_callbacks_lock:
+            if session_id not in self.event_callbacks:
+                return
 
         req = json.dumps({"type": "kill", "id": session_id})
         self._write_to_agent(req + "\n")
@@ -2239,18 +2281,19 @@ class MicroVM:
                         _e["exited_nonzero"] = True
                         _slot["done"].set()
 
-                self.event_callbacks[cmd_id] = {
-                    "on_stdout": None,
-                    "on_stderr": None,
-                    "on_file_content": None,
-                    "on_file_chunk": None,
-                    "on_file_complete": None,
-                    "on_dir_list": None,
-                    "on_file_info": None,
-                    "on_status": None,
-                    "on_exit": _vsock_on_exit,
-                    "on_error": _vsock_on_error,
-                }
+                with self._event_callbacks_lock:
+                    self.event_callbacks[cmd_id] = {
+                        "on_stdout": None,
+                        "on_stderr": None,
+                        "on_file_content": None,
+                        "on_file_chunk": None,
+                        "on_file_complete": None,
+                        "on_dir_list": None,
+                        "on_file_info": None,
+                        "on_status": None,
+                        "on_exit": _vsock_on_exit,
+                        "on_error": _vsock_on_error,
+                    }
 
                 payload_dict = {
                     "id": cmd_id,
@@ -2535,14 +2578,15 @@ class MicroVM:
             try:
                 cmd_id = str(uuid.uuid4())
                 slot = self.vsock_listener.register_pending_buffer(cmd_id)
-                self.event_callbacks[cmd_id] = {
-                    "on_stdout": None, "on_stderr": None,
-                    "on_file_content": None, "on_file_chunk": None,
-                    "on_file_complete": None, "on_dir_list": None,
-                    "on_file_info": None, "on_status": None,
-                    "on_exit": lambda code, _s=slot: code != 0 and _s["done"].set(),
-                    "on_error": lambda msg, _s=slot: _s["done"].set(),
-                }
+                with self._event_callbacks_lock:
+                    self.event_callbacks[cmd_id] = {
+                        "on_stdout": None, "on_stderr": None,
+                        "on_file_content": None, "on_file_chunk": None,
+                        "on_file_complete": None, "on_dir_list": None,
+                        "on_file_info": None, "on_status": None,
+                        "on_exit": lambda code, _s=slot: code != 0 and _s["done"].set(),
+                        "on_error": lambda msg, _s=slot: _s["done"].set(),
+                    }
                 self._write_to_agent(json.dumps({
                     "id": cmd_id, "type": "list_dir",
                     "path": path, "use_vsock": True, "vsock_port": self.vsock_port,
