@@ -173,33 +173,18 @@ func vsockProbe(port int) bool {
 }
 
 func vsockCanUse(port int) bool {
-	// No eager probe: the 1s connect timeout in vsockProbe used to be
-	// paid on every cold first-read, which is exactly the latency we're
-	// trying to remove. Instead, optimistically allow vsock unless we
-	// recently saw a hard failure (then back off). vsockCreateConn
-	// updates state on success/failure, so the actual transfer connect
-	// doubles as the probe.
-	state := atomic.LoadInt32(&vsockAvailable)
-	if state == 1 {
-		return true
-	}
-	if state == -1 {
-		vsockMu.Lock()
-		since := time.Since(vsockLastCheck)
-		fails := vsockFailCount
-		vsockMu.Unlock()
-		backoff := time.Duration(int64(1<<uint(fails)) * int64(time.Second))
-		if backoff < 2*time.Second {
-			backoff = 2 * time.Second
-		}
-		if backoff > 30*time.Second {
-			backoff = 30 * time.Second
-		}
-		if since < backoff {
-			return false
-		}
-	}
-	// Unknown or backoff elapsed — let the real connect be the probe.
+	// Always allow vsock attempts. A single failed connection must not
+	// gate other concurrent operations — under parallel load the global
+	// backoff would push every in-flight read/write onto the serial
+	// console, congest it, block consoleMu, and wedge the VM.
+	//
+	// The per-operation connect timeout (vsockCreateConn) is the natural
+	// throttle: a broken listener costs that operation one timeout, then
+	// it falls back to serial individually. Other operations still get
+	// their vsock fast path.
+	//
+	// We still track health via vsockCreateConn for diagnostics, but
+	// never use it as a gate.
 	return true
 }
 
@@ -878,7 +863,7 @@ func handleListDir(cmdID, path string, vsockPort int, useVsock bool) {
 // Mirrors handleVsockUpload's protocol but takes []byte instead of a path.
 // Returns true on success.
 func uploadBytesViaVsock(cmdID string, data []byte, port int) bool {
-	conn, err := vsockCreateConn(port, 10*time.Second)
+	conn, err := vsockCreateConn(port, 3*time.Second)
 	if err != nil {
 		return false
 	}
@@ -949,7 +934,7 @@ func handleVsockUpload(cmdID, path string, port int) bool {
 	}
 	fileSize := info.Size()
 
-	conn, err := vsockCreateConn(port, 10*time.Second)
+	conn, err := vsockCreateConn(port, 3*time.Second)
 	if err != nil {
 		return false
 	}
@@ -1007,7 +992,7 @@ func handleVsockUpload(cmdID, path string, port int) bool {
 // =============================================================================
 
 func handleVsockDownload(cmdID, path string, port int, appendMode bool) {
-	conn, err := vsockCreateConn(port, 10*time.Second)
+	conn, err := vsockCreateConn(port, 3*time.Second)
 	if err != nil {
 		sendEvent("error", map[string]interface{}{"cmd_id": cmdID, "error": fmt.Sprintf("Vsock connect failed: %v", err)})
 		sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": 1})
