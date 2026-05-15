@@ -15,7 +15,7 @@ def _make_bandsox_without_init():
     return BandSox.__new__(BandSox)
 
 
-def test_unblock_rng_skips_injection_when_probe_passes():
+def test_unblock_rng_always_injects_entropy():
     bs = _make_bandsox_without_init()
     calls = []
 
@@ -27,27 +27,24 @@ def test_unblock_rng_skips_injection_when_probe_passes():
     bs._best_effort_unblock_guest_rng(vm)
 
     assert len(calls) == 1
-    assert "GRND_NONBLOCK" in calls[0][0]
+    assert "RNDADDENTROPY" in calls[0][0]
+    assert "len(seed) * 8" in calls[0][0]
+    assert "base64.b64decode" in calls[0][0]
 
 
-def test_unblock_rng_injects_when_probe_fails():
+def test_unblock_rng_never_raises_on_nonzero_injection():
     bs = _make_bandsox_without_init()
     calls = []
 
     def exec_command(cmd, timeout=0):
         calls.append((cmd, timeout))
-        # Probe fails, injection succeeds.
-        if len(calls) == 1:
-            return 1
-        return 0
+        return 1
 
     vm = SimpleNamespace(vm_id="vm-probe-fail", exec_command=exec_command)
     bs._best_effort_unblock_guest_rng(vm)
 
-    assert len(calls) == 2
-    assert "GRND_NONBLOCK" in calls[0][0]
-    assert "RNDADDENTROPY" in calls[1][0]
-    assert "base64.b64decode" in calls[1][0]
+    assert len(calls) == 1
+    assert "RNDADDENTROPY" in calls[0][0]
 
 
 def test_unblock_rng_never_raises_on_exec_errors():

@@ -109,31 +109,20 @@ class BandSox:
         return {}
 
     def _best_effort_unblock_guest_rng(self, vm: MicroVM):
-        """Inject host entropy into restored guests when CRNG isn't ready.
+        """Inject host entropy into restored guests.
 
         Why this exists:
         - Legacy snapshots may not include a virtio-rng device.
-        - In that state, getrandom() can block indefinitely in the guest,
-          which stalls git/openssl on first use.
+        - In that state, OpenSSL can block indefinitely waiting for enough
+          random-pool entropy, which stalls git/HTTPS on first use.
         - Firecracker forbids adding /entropy before snapshot load if any
           boot-specific resources are already configured in that snapshot.
 
         This is best-effort and intentionally non-fatal.
         """
-        # Fast probe: if non-blocking getrandom already works, skip.
-        probe_cmd = (
-            "python3 -c 'import os; "
-            "os.getrandom(1, os.GRND_NONBLOCK); print(\"rng-ready\")' >/dev/null 2>&1"
-        )
-        try:
-            probe_ec = vm.exec_command(probe_cmd, timeout=3)
-            if probe_ec == 0:
-                return
-        except Exception:
-            # Continue with injection attempt.
-            pass
-
-        # Generate true entropy on host and inject into guest kernel pool.
+        # Generate true entropy on host and inject it into the guest kernel
+        # pool. Do this unconditionally: non-blocking getrandom can succeed
+        # while OpenSSL still blocks on /dev/random in low-entropy restores.
         host_seed = os.urandom(256)
         seed_b64 = base64.b64encode(host_seed).decode("ascii")
         inject_cmd = (
@@ -141,17 +130,16 @@ class BandSox:
             "import base64, fcntl, struct\n"
             "RNDADDENTROPY = 0x40085203\n"
             f"seed = base64.b64decode('{seed_b64}')\n"
-            "payload = struct.pack('ii', 64, len(seed)) + seed\n"
-            "ok = False\n"
+            "payload = struct.pack('ii', len(seed) * 8, len(seed)) + seed\n"
             "for dev in ('/dev/random', '/dev/urandom'):\n"
             "    try:\n"
             "        buf = bytearray(payload)\n"
             "        with open(dev, 'wb', buffering=0) as f:\n"
             "            fcntl.ioctl(f.fileno(), RNDADDENTROPY, buf, True)\n"
-            "        ok = True\n"
+            "        raise SystemExit(0)\n"
             "    except Exception:\n"
             "        pass\n"
-            "raise SystemExit(0 if ok else 1)\n"
+            "raise SystemExit(1)\n"
             "PY"
         )
         try:
@@ -322,7 +310,7 @@ class BandSox:
         base_rootfs = self.images_dir / f"{sanitized_name}.ext4"
 
         if force_rebuild or not base_rootfs.exists():
-            build_rootfs(docker_image, str(base_rootfs))
+            build_rootfs(docker_image, str(base_rootfs), size_mb=disk_size_mib)
 
         # Copy to instance specific path
         instance_rootfs = self.images_dir / f"{vm_id}.ext4"
