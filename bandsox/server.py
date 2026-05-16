@@ -711,6 +711,113 @@ def download_file(vm_id: str, path: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to download file: {str(e)}")
 
+@app.websocket("/api/vms/{vm_id}/exec-stream")
+async def exec_stream_endpoint(websocket: WebSocket, vm_id: str):
+    """Stream a single exec invocation over WebSocket.
+
+    Client sends one JSON frame: {"command": str, "timeout"?: int}.
+    Server pushes {"type":"stdout"|"stderr","data": str} frames as they
+    arrive, then a final {"type":"exit","exit_code": int}. Forces the
+    non-vsock UART path so git --progress and other progress indicators
+    actually surface incremental output instead of arriving in one
+    end-of-run dump.
+    """
+    if not await authenticate_websocket(websocket, _auth_storage):
+        await websocket.accept()
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    await websocket.accept(subprotocol=websocket_accept_subprotocol(websocket))
+
+    vm = bs.get_vm(vm_id)
+    if not vm:
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "error": "VM not found"}))
+        except Exception:
+            pass
+        await websocket.close(code=4004, reason="VM not found")
+        return
+
+    try:
+        first = await websocket.receive_text()
+        req = json.loads(first)
+    except WebSocketDisconnect:
+        return
+    except Exception as e:
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "error": f"invalid start message: {e}"}))
+        except Exception:
+            pass
+        await websocket.close(code=4000, reason="invalid start")
+        return
+
+    command = req.get("command")
+    timeout = int(req.get("timeout") or 600)
+    if not isinstance(command, str) or not command:
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "error": "command is required"}))
+        except Exception:
+            pass
+        await websocket.close(code=4000, reason="command required")
+        return
+
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def on_stdout(data):
+        try:
+            asyncio.run_coroutine_threadsafe(queue.put({"type": "stdout", "data": str(data)}), loop)
+        except Exception:
+            pass
+
+    def on_stderr(data):
+        try:
+            asyncio.run_coroutine_threadsafe(queue.put({"type": "stderr", "data": str(data)}), loop)
+        except Exception:
+            pass
+
+    sender_done = asyncio.Event()
+
+    async def sender():
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                try:
+                    await websocket.send_text(json.dumps(event))
+                except Exception:
+                    break
+        finally:
+            sender_done.set()
+
+    sender_task = asyncio.create_task(sender())
+
+    try:
+        exit_code = await asyncio.to_thread(
+            lambda: vm.send_request(
+                "exec",
+                {"command": command, "background": False, "env": getattr(vm, "env_vars", {}) or {}},
+                on_stdout=on_stdout,
+                on_stderr=on_stderr,
+                timeout=timeout,
+            )
+        )
+        await queue.put({"type": "exit", "exit_code": int(exit_code) if exit_code is not None else 1})
+    except Exception as e:
+        await queue.put({"type": "error", "error": str(e)})
+    finally:
+        await queue.put(None)
+        try:
+            await asyncio.wait_for(sender_done.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            sender_task.cancel()
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
 @app.websocket("/api/vms/{vm_id}/terminal")
 async def terminal_endpoint(websocket: WebSocket, vm_id: str, cols: int = 80, rows: int = 24):
     if not await authenticate_websocket(websocket, _auth_storage):
