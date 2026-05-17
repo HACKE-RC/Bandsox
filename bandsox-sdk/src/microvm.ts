@@ -238,6 +238,16 @@ export class MicroVM {
     return this.bandsox.connectTerminal(this.vmId, cols, rows);
   }
 
+  execStream(options: {
+    command: string;
+    timeout?: number;
+    onStdout?: (data: string) => void;
+    onStderr?: (data: string) => void;
+    signal?: AbortSignal;
+  }): Promise<{ exit_code: number }> {
+    return this.bandsox.execStream(this.vmId, options);
+  }
+
   // ─── Networking ───
 
   getGuestIp(): string | null {

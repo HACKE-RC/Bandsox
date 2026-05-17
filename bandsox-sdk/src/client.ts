@@ -416,6 +416,85 @@ export class BandSox {
 
   // ─── Terminal ───
 
+  execStream(
+    vmId: string,
+    options: {
+      command: string;
+      timeout?: number;
+      onStdout?: (data: string) => void;
+      onStderr?: (data: string) => void;
+      signal?: AbortSignal;
+    }
+  ): Promise<{ exit_code: number }> {
+    const Ws = this.wsCtor ?? globalThis.WebSocket;
+    if (!Ws) throw new Error("WebSocket is not available.");
+    const wsUrl = this.baseUrl.replace(/^http/, "ws");
+    const raw = getHeader(this.headers, "authorization") ?? "";
+    const token = raw.replace(/^Bearer\s+/i, "") || this.sessionToken;
+    const url = new URL(`${wsUrl}/api/vms/${vmId}/exec-stream`);
+    const protocols = token
+      ? [TERMINAL_SUBPROTOCOL, `${TERMINAL_AUTH_PROTOCOL_PREFIX}${base64UrlEncode(token)}`]
+      : undefined;
+    const ws = protocols ? new Ws(url.toString(), protocols) : new Ws(url.toString());
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let exitCode: number | null = null;
+      let errorMessage: string | null = null;
+
+      const onAbort = () => {
+        if (settled) return;
+        errorMessage = "aborted";
+        try { ws.close(); } catch { /* noop */ }
+      };
+      if (options.signal) {
+        if (options.signal.aborted) { reject(new Error("aborted")); try { ws.close(); } catch { /* noop */ } return; }
+        options.signal.addEventListener("abort", onAbort, { once: true });
+      }
+
+      const finish = (err: Error | null, code: number | null) => {
+        if (settled) return;
+        settled = true;
+        if (options.signal) options.signal.removeEventListener("abort", onAbort);
+        if (err) reject(err);
+        else if (code === null) reject(new Error("exec-stream closed before exit"));
+        else resolve({ exit_code: code });
+      };
+
+      ws.addEventListener("open", () => {
+        try {
+          ws.send(JSON.stringify({ command: options.command, timeout: options.timeout ?? null }));
+        } catch (err) {
+          finish(err instanceof Error ? err : new Error(String(err)), null);
+        }
+      });
+
+      ws.addEventListener("message", (event: MessageEvent) => {
+        if (typeof event.data !== "string") return;
+        let frame: { type?: string; data?: unknown; exit_code?: unknown; error?: unknown };
+        try { frame = JSON.parse(event.data); } catch { return; }
+        if (!frame || typeof frame.type !== "string") return;
+        if (frame.type === "stdout" && typeof frame.data === "string") options.onStdout?.(frame.data);
+        else if (frame.type === "stderr" && typeof frame.data === "string") options.onStderr?.(frame.data);
+        else if (frame.type === "exit") {
+          const code = Number(frame.exit_code);
+          exitCode = Number.isFinite(code) ? code : 1;
+        } else if (frame.type === "error" && typeof frame.error === "string") {
+          errorMessage = frame.error;
+        }
+      });
+
+      ws.addEventListener("close", () => {
+        if (errorMessage) finish(new Error(errorMessage), null);
+        else finish(null, exitCode);
+      });
+
+      ws.addEventListener("error", () => {
+        if (!errorMessage) errorMessage = "exec-stream websocket error";
+      });
+    });
+  }
+
   connectTerminal(vmId: string, cols = 80, rows = 24): TerminalSession {
     const Ws = this.wsCtor ?? globalThis.WebSocket;
     if (!Ws) {
@@ -439,6 +518,7 @@ export class BandSox {
       protocols ? new Ws(url.toString(), protocols) : new Ws(url.toString())
     );
   }
+
 
   // ─── Internal: exposed for MicroVM ───
 
