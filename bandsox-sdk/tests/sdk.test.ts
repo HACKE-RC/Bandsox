@@ -1238,7 +1238,7 @@ describe("TerminalSession", () => {
     expect(err).toBe(fakeEvent);
   });
 
-  it("routes malformed base64 messages through onError", () => {
+  it("accepts raw terminal text frames", () => {
     const outputs: string[] = [];
     const errors: Array<Event | Error> = [];
     session.onOutput((data) => outputs.push(data));
@@ -1246,9 +1246,18 @@ describe("TerminalSession", () => {
 
     mockWs._emitMessage("not base64!");
 
-    expect(outputs).toEqual([]);
-    expect(errors).toHaveLength(1);
-    expect(errors[0]).toBeInstanceOf(Error);
+    expect(outputs).toEqual(["not base64!"]);
+    expect(errors).toEqual([]);
+  });
+
+  it("accepts JSON terminal output frames", () => {
+    const outputs: string[] = [];
+    session.onOutput((data) => outputs.push(data));
+
+    mockWs._emitMessage(JSON.stringify({ type: "output", data: utf8ToBase64("json base64"), encoding: "base64" }));
+    mockWs._emitMessage(JSON.stringify({ type: "output", data: "json raw" }));
+
+    expect(outputs).toEqual(["json base64", "json raw"]);
   });
 
   it("onError replaces the previous callback", () => {

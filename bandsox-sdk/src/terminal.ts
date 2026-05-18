@@ -1,7 +1,9 @@
 /**
  * Terminal session over WebSocket for interactive PTY access to a VM.
  *
- * Protocol: server sends base64-encoded text frames (stdout).
+ * Protocol: server sends terminal output frames. Current servers may send either
+ * raw text or base64-encoded text; JSON frames with {data, encoding} are also
+ * accepted for compatibility.
  * Client sends JSON: {type:"input", data:"<base64>"} or {type:"resize", cols:N, rows:N}.
  */
 
@@ -22,6 +24,17 @@ function base64ToUtf8(data: string): string {
   return new TextDecoder().decode(bytes);
 }
 
+function tryBase64ToUtf8(data: string): string | null {
+  if (!data || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
+    return null;
+  }
+  try {
+    return base64ToUtf8(data);
+  } catch {
+    return null;
+  }
+}
+
 function utf8ToBase64(text: string): string {
   const bytes = new TextEncoder().encode(text);
   let binary = "";
@@ -31,21 +44,43 @@ function utf8ToBase64(text: string): string {
   return btoa(binary);
 }
 
-function decodeBase64Message(data: unknown): string | Promise<string> {
+function decodeTerminalTextFrame(text: string): string {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (parsed && typeof parsed === "object" && "data" in parsed) {
+      const frame = parsed as { data?: unknown; encoding?: unknown; message?: unknown };
+      if (typeof frame.data === "string") {
+        if (frame.encoding === "base64") {
+          return tryBase64ToUtf8(frame.data) ?? frame.data;
+        }
+        return frame.data;
+      }
+      if (typeof frame.message === "string") {
+        return frame.message;
+      }
+    }
+  } catch {
+    // Plain terminal text is not JSON.
+  }
+
+  return tryBase64ToUtf8(text) ?? text;
+}
+
+function decodeTerminalMessage(data: unknown): string | Promise<string> {
   if (typeof data === "string") {
-    return base64ToUtf8(data);
+    return decodeTerminalTextFrame(data);
   }
 
   if (data instanceof ArrayBuffer) {
-    return base64ToUtf8(bytesToBase64Text(data));
+    return decodeTerminalTextFrame(bytesToBase64Text(data));
   }
 
   if (ArrayBuffer.isView(data)) {
-    return base64ToUtf8(bytesToBase64Text(data));
+    return decodeTerminalTextFrame(bytesToBase64Text(data));
   }
 
   if (typeof Blob !== "undefined" && data instanceof Blob) {
-    return data.text().then(base64ToUtf8);
+    return data.text().then(decodeTerminalTextFrame);
   }
 
   throw new TypeError(
@@ -79,7 +114,7 @@ export class TerminalSession {
     this.ws.addEventListener("message", (event) => {
       let decoded: string | Promise<string>;
       try {
-        decoded = decodeBase64Message(event.data);
+        decoded = decodeTerminalMessage(event.data);
       } catch (err) {
         this.emitError(normalizeTerminalError(err));
         return;
