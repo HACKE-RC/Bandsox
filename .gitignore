@@ -23,6 +23,7 @@ rootfs/
 vmlinux
 vmlinux*
 cni/bin/
+bandsox/agent/agent
 .DS_Store
 .coverage
 htmlcov/
