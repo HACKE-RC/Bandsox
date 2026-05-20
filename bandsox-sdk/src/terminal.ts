@@ -25,7 +25,13 @@ function base64ToUtf8(data: string): string {
 }
 
 function tryBase64ToUtf8(data: string): string | null {
-  if (!data || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
+  // Short alphanumeric strings are often literal terminal text, not base64.
+  if (
+    !data ||
+    data.length < 8 ||
+    data.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(data)
+  ) {
     return null;
   }
   try {

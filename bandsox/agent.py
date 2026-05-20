@@ -54,8 +54,6 @@ _vsock_available_lock = threading.Lock()
 _vsock_available = None  # type: ignore[assignment]
 _vsock_last_probe_ts = 0.0
 _vsock_fail_streak = 0
-_VSOCK_REPROBE_BASE = 2.0  # seconds for first reprobe after a failure
-_VSOCK_REPROBE_MAX = 30.0  # cap for repeated failures
 
 
 def _vsock_module_available() -> bool:
@@ -104,27 +102,11 @@ def _vsock_probe(port: int) -> bool:
 def _vsock_can_use(port: int) -> bool:
     """Return True if we should attempt vsock for this call.
 
-    No active probe — that wastes a 1s connect on cold reads even when
-    vsock works. We optimistically say yes unless the module is missing
-    or a recent attempt failed (then back off exponentially). The real
-    connect inside vsock_create_connection acts as the probe and updates
-    state on failure.
+    Always allow per-operation attempts when AF_VSOCK exists. A global
+    backoff gate caused parallel host operations to fall through to serial
+    after one failure; each connect's timeout is the natural throttle.
     """
-    if not _vsock_module_available():
-        return False
-
-    with _vsock_available_lock:
-        state = _vsock_available
-        since = time.time() - _vsock_last_probe_ts
-        fails = _vsock_fail_streak
-
-    if state is False:
-        backoff = min(_VSOCK_REPROBE_BASE * (2 ** max(0, fails - 1)), _VSOCK_REPROBE_MAX)
-        if since < backoff:
-            return False
-
-    # state is True or None (never tried) or backoff elapsed → try it.
-    return True
+    return _vsock_module_available()
 
 
 def _vsock_mark_broken():
@@ -135,7 +117,7 @@ def _vsock_mark_broken():
         _vsock_last_probe_ts = time.time()
 
 
-def vsock_create_connection(port: int, timeout: float = 10.0):
+def vsock_create_connection(port: int, timeout: float = 3.0):
     """Create a new vsock connection to the host for a single transfer.
 
     Returns a connected socket or None if vsock is unavailable/broken.

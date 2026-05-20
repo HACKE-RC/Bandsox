@@ -361,6 +361,14 @@ class MicroVM:
         self.vsock_bridge_running = False
         self._agent_write_lock = threading.Lock()
 
+    def _agent_total_lines_for(self, cmd_id: str):
+        """Return agent-reported line count for cmd_id, if any."""
+        with self._event_callbacks_lock:
+            entry = self.event_callbacks.get(cmd_id)
+            if entry is None:
+                return None
+            return entry.get("_agent_total_lines")
+
     def start_process(self):
         """Starts the Firecracker process."""
         if os.path.exists(self.socket_path):
@@ -818,6 +826,10 @@ class MicroVM:
         req_str = json.dumps(payload)
         self._write_to_agent(req_str + "\n")
 
+        def _drop_callback():
+            with self._event_callbacks_lock:
+                self.event_callbacks.pop(cmd_id, None)
+
         if not completion_event.wait(timeout):
             # Send a kill for this cmd_id so the in-VM child process is
             # actually stopped — otherwise it keeps producing output and
@@ -838,6 +850,7 @@ class MicroVM:
                     e,
                     exc_info=True,
                 )
+            _drop_callback()
             raise TimeoutError("Command timed out")
 
         # Auto-reconnect-and-retry on transient console drops. Up to 3
@@ -897,6 +910,7 @@ class MicroVM:
                         e,
                         exc_info=True,
                     )
+                _drop_callback()
                 raise TimeoutError(
                     f"Command timed out (after {retry_attempts} reconnect retries)"
                 )
@@ -2370,22 +2384,20 @@ class MicroVM:
                         "agent_total_lines": None,
                     }
                     cmd_id = str(uuid.uuid4())
-                    def on_file_content(c, _r=result):
+                    def on_file_content(c, _r=result, _cid=cmd_id):
                         _r["mode"] = "single"
                         _r["content"] = c
-                        _ec = self.event_callbacks.get(cmd_id, {})
-                        _tls = _ec.get("_agent_total_lines")
+                        _tls = self._agent_total_lines_for(_cid)
                         if _tls is not None:
                             _r["agent_total_lines"] = _tls
                     def on_file_chunk(data, offset_, size, _r=result):
                         if _r["mode"] is None:
                             _r["mode"] = "chunked"
                         _r["chunks"].extend(base64.b64decode(data))
-                    def on_file_complete(total_size, checksum, _r=result):
+                    def on_file_complete(total_size, checksum, _r=result, _cid=cmd_id):
                         _r["total_size"] = total_size
                         _r["checksum"] = checksum
-                        _ec = self.event_callbacks.get(cmd_id, {})
-                        _tls = _ec.get("_agent_total_lines")
+                        _tls = self._agent_total_lines_for(_cid)
                         if _tls is not None:
                             _r["agent_total_lines"] = _tls
 

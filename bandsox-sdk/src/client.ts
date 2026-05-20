@@ -420,6 +420,7 @@ export class BandSox {
     vmId: string,
     options: {
       command: string;
+      /** Command timeout in seconds (server default 600, max 3600). */
       timeout?: number;
       onStdout?: (data: string) => void;
       onStderr?: (data: string) => void;
@@ -436,11 +437,21 @@ export class BandSox {
       ? [TERMINAL_SUBPROTOCOL, `${TERMINAL_AUTH_PROTOCOL_PREFIX}${base64UrlEncode(token)}`]
       : undefined;
     const ws = protocols ? new Ws(url.toString(), protocols) : new Ws(url.toString());
+    const streamTimeoutMs =
+      options.timeout != null ? options.timeout * 1000 : this.timeout;
 
     return new Promise((resolve, reject) => {
       let settled = false;
       let exitCode: number | null = null;
       let errorMessage: string | null = null;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+      const clearTimer = () => {
+        if (timeoutId !== undefined) {
+          clearTimeout(timeoutId);
+          timeoutId = undefined;
+        }
+      };
 
       const onAbort = () => {
         if (settled) return;
@@ -455,11 +466,20 @@ export class BandSox {
       const finish = (err: Error | null, code: number | null) => {
         if (settled) return;
         settled = true;
+        clearTimer();
         if (options.signal) options.signal.removeEventListener("abort", onAbort);
         if (err) reject(err);
         else if (code === null) reject(new Error("exec-stream closed before exit"));
         else resolve({ exit_code: code });
       };
+
+      if (streamTimeoutMs > 0) {
+        timeoutId = setTimeout(() => {
+          if (settled) return;
+          errorMessage = "exec-stream timed out";
+          try { ws.close(); } catch { /* noop */ }
+        }, streamTimeoutMs);
+      }
 
       ws.addEventListener("open", () => {
         try {

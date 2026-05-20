@@ -106,52 +106,17 @@ class TestConsoleLock:
             )
 
 
-class TestVsockBrokenCircuitBreaker:
-    """Once vsock has failed we must not keep retrying for every file read."""
+class TestVsockPerOperationAttempts:
+    """Each operation attempts vsock independently; no global backoff gate."""
 
-    def test_mark_broken_short_circuits_can_use(self, agent):
-        # Reset state via explicit access; module-level globals are the
-        # only sanctioned API.
-        with agent._vsock_available_lock:
-            agent._vsock_available = None
-            agent._vsock_last_probe_ts = 0.0
-
+    def test_can_use_when_module_available(self, agent, monkeypatch):
+        monkeypatch.setattr(agent, "_vsock_module_available", lambda: True)
         agent._vsock_mark_broken()
-        # _vsock_can_use should respect the cached failure and NOT probe.
-        assert agent._vsock_can_use(9000) is False
-
-    def test_reprobe_interval_is_respected(self, agent, monkeypatch):
-        """After the reprobe interval we must give vsock another chance.
-
-        New design: _vsock_can_use no longer actively probes — it simply
-        unblocks the caller (returns True) so the next vsock_create_connection
-        can act as the probe. This avoids paying a 1s connect timeout twice
-        on cold reads.
-        """
-        monkeypatch.setattr(agent, "_vsock_module_available", lambda: True)
-        with agent._vsock_available_lock:
-            agent._vsock_available = False
-            agent._vsock_last_probe_ts = time.time() - 120.0  # >60s ago
-            agent._vsock_fail_streak = 1
         assert agent._vsock_can_use(9000) is True
 
-    def test_fresh_broken_state_skips_use(self, agent, monkeypatch):
-        """Within the reprobe interval we must NOT attempt vsock."""
-        monkeypatch.setattr(agent, "_vsock_module_available", lambda: True)
-        with agent._vsock_available_lock:
-            agent._vsock_available = False
-            agent._vsock_last_probe_ts = time.time()
-            agent._vsock_fail_streak = 1
+    def test_can_use_false_without_kernel_support(self, agent, monkeypatch):
+        monkeypatch.setattr(agent, "_vsock_module_available", lambda: False)
         assert agent._vsock_can_use(9000) is False
-
-    def test_unknown_state_allows_attempt(self, agent, monkeypatch):
-        """First-ever call must allow vsock — connect acts as the probe."""
-        monkeypatch.setattr(agent, "_vsock_module_available", lambda: True)
-        with agent._vsock_available_lock:
-            agent._vsock_available = None
-            agent._vsock_last_probe_ts = 0.0
-            agent._vsock_fail_streak = 0
-        assert agent._vsock_can_use(9000) is True
 
 
 class TestVsockModuleFreeFallback:

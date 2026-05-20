@@ -41,6 +41,7 @@ class MockWebSocket {
   url: string;
   protocols?: string | string[];
   private listeners: Record<string, Set<(event: any) => void>> = {
+    open: new Set(),
     message: new Set(),
     close: new Set(),
     error: new Set(),
@@ -56,6 +57,9 @@ class MockWebSocket {
 
   addEventListener(type: string, handler: (event: any) => void) {
     this.listeners[type]?.add(handler);
+    if (type === "open") {
+      handler(new Event("open"));
+    }
   }
 
   removeEventListener(type: string, handler: (event: any) => void) {
@@ -1250,6 +1254,13 @@ describe("TerminalSession", () => {
     expect(errors).toEqual([]);
   });
 
+  it("does not treat short base64-like strings as encoded output", () => {
+    const outputs: string[] = [];
+    session.onOutput((data) => outputs.push(data));
+    mockWs._emitMessage("abcd");
+    expect(outputs).toEqual(["abcd"]);
+  });
+
   it("accepts JSON terminal output frames", () => {
     const outputs: string[] = [];
     session.onOutput((data) => outputs.push(data));
@@ -1273,6 +1284,52 @@ describe("TerminalSession", () => {
 
     expect(first).toBeNull();
     expect(second).toBe(fakeEvent);
+  });
+});
+
+// ─── BandSox execStream ───
+
+describe("BandSox execStream", () => {
+  it("streams stdout/stderr and resolves on exit", async () => {
+    const bs = new BandSox({
+      baseUrl: "http://localhost:8000",
+      headers: { Authorization: "Bearer stream-token" },
+      WebSocket: MockWebSocket as unknown as typeof WebSocket,
+    });
+
+    const chunks: string[] = [];
+    const errs: string[] = [];
+    const promise = bs.execStream("vm-1", {
+      command: "git status",
+      timeout: 30,
+      onStdout: (d) => chunks.push(d),
+      onStderr: (d) => errs.push(d),
+    });
+    const ws = MockWebSocket.lastInstance!;
+    expect(ws.url).toContain("/api/vms/vm-1/exec-stream");
+    expect(ws.sent).toEqual([{ command: "git status", timeout: 30 }]);
+
+    ws._emitMessage(JSON.stringify({ type: "stdout", data: "out" }));
+    ws._emitMessage(JSON.stringify({ type: "stderr", data: "err" }));
+    ws._emitMessage(JSON.stringify({ type: "exit", exit_code: 7 }));
+    ws.close();
+
+    await expect(promise).resolves.toEqual({ exit_code: 7 });
+    expect(chunks).toEqual(["out"]);
+    expect(errs).toEqual(["err"]);
+  });
+
+  it("rejects on server error frame", async () => {
+    const bs = new BandSox({
+      baseUrl: "http://localhost:8000",
+      WebSocket: MockWebSocket as unknown as typeof WebSocket,
+    });
+    const promise = bs.execStream("vm-1", { command: "false" });
+    MockWebSocket.lastInstance!._emitMessage(
+      JSON.stringify({ type: "error", error: "Command timed out" })
+    );
+    MockWebSocket.lastInstance!.close();
+    await expect(promise).rejects.toThrow("Command timed out");
   });
 });
 

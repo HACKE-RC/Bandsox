@@ -92,6 +92,17 @@ console.log(res.stdout);
 console.log(res.exit_code); // 0
 ```
 
+**Streaming exec** pushes stdout/stderr over a WebSocket as the command runs (useful for `git clone`, build progress, etc.):
+
+```ts
+const { exit_code } = await bs.execStream(vm.id, {
+  command: "git clone --progress https://github.com/org/repo.git",
+  timeout: 600,
+  onStdout: (chunk) => process.stdout.write(chunk),
+  onStderr: (chunk) => process.stderr.write(chunk),
+});
+```
+
 **Python code** runs in an isolated venv with optional package installation:
 
 ```ts

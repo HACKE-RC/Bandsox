@@ -59,6 +59,21 @@ class DummyVM:
             on_stderr("stderr")
         return 0
 
+    def send_request(
+        self,
+        req_type,
+        payload,
+        on_stdout=None,
+        on_stderr=None,
+        timeout=30,
+        **kwargs,
+    ):
+        if on_stdout:
+            on_stdout("stream-out")
+        if on_stderr:
+            on_stderr("stream-err")
+        return 42
+
     def exec_python_capture(self, code, cwd="/tmp", packages=None, timeout=60, cleanup_venv=True):
         return {
             "exit_code": 0,
@@ -512,6 +527,45 @@ def test_append_file_endpoint_vm_not_found(client):
         json={"path": "/tmp/x", "content": "x"},
     )
     assert resp.status_code == 404
+
+
+def test_clamp_exec_stream_timeout():
+    assert server._clamp_exec_stream_timeout(None) == server.EXEC_STREAM_TIMEOUT_DEFAULT
+    assert server._clamp_exec_stream_timeout(30) == 30
+    assert server._clamp_exec_stream_timeout(0) == server.EXEC_STREAM_TIMEOUT_MIN
+    assert server._clamp_exec_stream_timeout(99999) == server.EXEC_STREAM_TIMEOUT_MAX
+    with pytest.raises(ValueError):
+        server._clamp_exec_stream_timeout("nope")
+
+
+def test_exec_stream_websocket(client, fake_bs):
+    with client.websocket_connect(
+        f"/api/vms/{fake_bs.vm.vm_id}/exec-stream"
+    ) as ws:
+        ws.send_text(json.dumps({"command": "git status", "timeout": 30}))
+        frames = [json.loads(ws.receive_text()) for _ in range(3)]
+    types = [f["type"] for f in frames]
+    assert types == ["stdout", "stderr", "exit"]
+    assert frames[0]["data"] == "stream-out"
+    assert frames[1]["data"] == "stream-err"
+    assert frames[2]["exit_code"] == 42
+
+
+def test_exec_stream_invalid_timeout(client, fake_bs):
+    with client.websocket_connect(
+        f"/api/vms/{fake_bs.vm.vm_id}/exec-stream"
+    ) as ws:
+        ws.send_text(json.dumps({"command": "echo hi", "timeout": "bad"}))
+        frame = json.loads(ws.receive_text())
+    assert frame["type"] == "error"
+    assert "timeout" in frame["error"]
+
+
+def test_exec_stream_vm_not_found(client, fake_bs):
+    with client.websocket_connect("/api/vms/unknown/exec-stream") as ws:
+        frame = json.loads(ws.receive_text())
+    assert frame["type"] == "error"
+    assert "not found" in frame["error"].lower()
 
 
 def test_terminal_websocket(client, fake_bs):

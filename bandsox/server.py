@@ -24,6 +24,26 @@ from typing import List
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bandsox-server")
 
+EXEC_STREAM_TIMEOUT_DEFAULT = 600
+EXEC_STREAM_TIMEOUT_MIN = 1
+EXEC_STREAM_TIMEOUT_MAX = 3600
+
+
+def _clamp_exec_stream_timeout(raw) -> int:
+    """Parse and bound exec-stream command timeout (seconds)."""
+    if raw is None:
+        return EXEC_STREAM_TIMEOUT_DEFAULT
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("timeout must be an integer number of seconds")
+    if value < EXEC_STREAM_TIMEOUT_MIN:
+        return EXEC_STREAM_TIMEOUT_MIN
+    if value > EXEC_STREAM_TIMEOUT_MAX:
+        return EXEC_STREAM_TIMEOUT_MAX
+    return value
+
+
 app = FastAPI()
 storage_path = os.environ.get("BANDSOX_STORAGE", os.getcwd() + "/storage")
 logger.info(f"Initializing BandSox with storage path: {storage_path}")
@@ -752,7 +772,15 @@ async def exec_stream_endpoint(websocket: WebSocket, vm_id: str):
         return
 
     command = req.get("command")
-    timeout = int(req.get("timeout") or 600)
+    try:
+        timeout = _clamp_exec_stream_timeout(req.get("timeout"))
+    except ValueError as e:
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "error": str(e)}))
+        except Exception:
+            pass
+        await websocket.close(code=4000, reason="invalid timeout")
+        return
     if not isinstance(command, str) or not command:
         try:
             await websocket.send_text(json.dumps({"type": "error", "error": "command is required"}))
@@ -766,15 +794,19 @@ async def exec_stream_endpoint(websocket: WebSocket, vm_id: str):
 
     def on_stdout(data):
         try:
-            asyncio.run_coroutine_threadsafe(queue.put({"type": "stdout", "data": str(data)}), loop)
-        except Exception:
-            pass
+            asyncio.run_coroutine_threadsafe(
+                queue.put({"type": "stdout", "data": str(data)}), loop
+            ).result(timeout=1)
+        except Exception as e:
+            logger.debug("exec-stream stdout queue failed: %s", e)
 
     def on_stderr(data):
         try:
-            asyncio.run_coroutine_threadsafe(queue.put({"type": "stderr", "data": str(data)}), loop)
-        except Exception:
-            pass
+            asyncio.run_coroutine_threadsafe(
+                queue.put({"type": "stderr", "data": str(data)}), loop
+            ).result(timeout=1)
+        except Exception as e:
+            logger.debug("exec-stream stderr queue failed: %s", e)
 
     sender_done = asyncio.Event()
 

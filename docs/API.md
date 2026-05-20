@@ -134,7 +134,10 @@ session_id = vm.start_pty_session("/bin/sh", cols=80, rows=24)
 vm.send_session_input(session_id, "echo Interactive\n")
 ```
 
-**4. Python execution (`exec_python`)**
+**4. Streaming exec (`exec-stream` WebSocket)**
+Streams stdout/stderr incrementally over the serial agent path (not the vsock bulk-upload path used by `POST /exec`). Use for progress output (`git clone`, `npm install`, etc.). The TypeScript SDK exposes this as `execStream()`.
+
+**5. Python execution (`exec_python`)**
 Run Python code with isolated dependencies (uses `uv` for package installation).
 
 ```python
@@ -148,7 +151,7 @@ vm.exec_python(
 )
 ```
 
-**5. Python execution with capture (`exec_python_capture`)**
+**6. Python execution with capture (`exec_python_capture`)**
 Captures output and returns a result dict. Does not raise on errors.
 
 ```python
@@ -312,8 +315,12 @@ When auth is enabled (`auth.json` exists), all `/api/` endpoints except auth log
 - `DELETE /api/vms/{vm_id}` -- delete a VM.
 - `POST /api/vms/{vm_id}/snapshot` -- snapshot a running VM.
   - Body: `{ "name": "snap-name" }`
-- `POST /api/vms/{vm_id}/exec` -- run a blocking command.
+- `POST /api/vms/{vm_id}/exec` -- run a blocking command (may buffer output via vsock when available).
   - Body: `{ "command": "echo hello", "timeout": 30 }`
+- `WS /api/vms/{vm_id}/exec-stream` -- stream one command's stdout/stderr, then exit.
+  - Client sends: `{"command": "git clone ...", "timeout": 600}` (timeout 1–3600 seconds, default 600).
+  - Server pushes: `{"type":"stdout"|"stderr","data":"..."}` frames, then `{"type":"exit","exit_code": int}`.
+  - Auth: same as terminal (session cookie, `token=` query param, or `bandsox.auth.<base64url>` WebSocket subprotocol).
 - `POST /api/vms/{vm_id}/exec-python` -- run Python and return captured output.
 - `GET /api/vms/{vm_id}/files?path=/` -- list files inside the VM.
 - `GET /api/vms/{vm_id}/read-file?path=/etc/hosts` -- read a UTF-8 file.
@@ -324,6 +331,7 @@ When auth is enabled (`auth.json` exists), all `/api/` endpoints except auth log
 - `GET /api/vms/{vm_id}/download?path=/etc/hosts` -- download a file.
 - `POST /api/vms/{vm_id}/http` -- proxy an HTTP request to a service inside the VM.
 - `WS /api/vms/{vm_id}/terminal?cols=80&rows=24&token=<session_or_api_key>` -- interactive terminal (WebSocket).
+- `WS /api/vms/{vm_id}/exec-stream` -- streaming exec (see above).
 
 ### Snapshots
 
