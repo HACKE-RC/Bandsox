@@ -6,13 +6,12 @@ Python library and CLI for managing Firecracker microVMs. Create, snapshot, and 
 ## Features
 
 - Millisecond boot times via Firecracker
-- Create VMs from Docker images (guest agent is a static Go binary; Python is not required in the image)
+- Create VMs from Docker images
 - Pause, resume, and snapshot VMs for instant restore
 - Web dashboard with login, API key management, and terminal sessions
 - CLI for all operations, including auth management
 - Python API for scripting and integration
 - TypeScript SDK for Node.js
-- Vsock file transfers (100-10,000x faster than serial), with automatic serial fallback
 - Optional authentication: API keys for programmatic access, session cookies for the dashboard. Off by default.
 
 ## Usage
@@ -153,49 +152,6 @@ sudo python3 -m bandsox.cli terminal <vm_id>
 # Start the server
 sudo python3 -m bandsox.cli serve --host 0.0.0.0 --port 8000
 ```
-
-## Vsock file transfers
-
-BandSox uses vsock (Virtual Socket) for file transfers between host and guest.
-
-### Performance
-
-| File size | Speed    | Time   |
-|-----------|----------|--------|
-| 1 MB      | ~50 MB/s | < 0.1s |
-| 10 MB     | ~80 MB/s | < 0.2s |
-| 100 MB    | ~100 MB/s| < 1s   |
-| 1 GB      | ~100 MB/s| < 10s  |
-
-That's 100-10,000x faster than serial-based transfers.
-
-### How it works
-
-- Each VM gets a unique CID (Context ID) and port for vsock
-- File operations use vsock when available, fall back to serial otherwise
-- No VM pause required during transfers
-- Vsock bridge is disconnected before snapshots; restores use per-VM isolation to avoid socket collisions
-
-### Restore isolation
-
-Restores mount per-VM vsock paths in a private mount namespace, so multiple restores from the same snapshot don't hit `EADDRINUSE`. The isolation root defaults to `/tmp/bsx` (override with `BANDSOX_VSOCK_ISOLATION_DIR`).
-
-### Checking vsock status
-
-In a running VM terminal:
-```bash
-# Check if vsock module is loaded
-lsmod | grep vsock
-# Should show: virtio_vsock
-
-# Check kernel config
-zcat /proc/config.gz | grep VSOCK
-# Should see: CONFIG_VIRTIO_VSOCK=y or m
-```
-
-### Upgrading from older versions
-
-VMs created before vsock support need to be recreated. See [`docs/VSOCK_MIGRATION.md`](docs/VSOCK_MIGRATION.md) for details.
 
 ## Prerequisites
 
