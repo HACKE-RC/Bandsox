@@ -511,14 +511,8 @@
         </svg>
     </button>
 
+    <script src="/static/shared.js"></script>
     <script>
-        const _originalFetch = window.fetch;
-        window.fetch = async function(...args) {
-            const response = await _originalFetch(...args);
-            if (response.status === 401) { window.location.href = '/login'; }
-            return response;
-        };
-
         let vmId = null;
         let filePath = null;
 
