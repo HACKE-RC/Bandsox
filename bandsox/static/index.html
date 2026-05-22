@@ -2,1381 +2,1265 @@
 <html lang="en" class="dark">
 
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BandSox</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link
-        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
-        rel="stylesheet">
-    <script>
-        tailwind.config = {
-            darkMode: 'class',
-            theme: {
-                extend: {
-                    fontFamily: {
-                        sans: ['Inter', 'sans-serif'],
-                        mono: ['JetBrains Mono', 'monospace'],
-                    },
-                    colors: {
-                        zinc: {
-                            850: '#202022',
-                            950: '#0c0c0e',
-                        }
-                    }
-                }
-            }
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BandSox</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+            mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+          }
         }
-    </script>
-    <style>
-        body {
-            font-family: 'Inter', sans-serif;
-        }
+      }
+    }
+  </script>
+  <style>
+    :root {
+      --bg: #0c0c0d;
+      --surface: #141416;
+      --surface-2: #1c1c1f;
+      --border: rgba(255,255,255,0.055);
+      --border-2: rgba(255,255,255,0.1);
+      --accent: #f59e0b;
+      --accent-soft: #fbbf24;
+      --accent-dim: rgba(245,158,11,0.12);
+      --accent-border: rgba(245,158,11,0.32);
+      --green: #4ade80;
+      --green-dim: rgba(74,222,128,0.12);
+      --green-border: rgba(74,222,128,0.3);
+      --red-dim: rgba(239,68,68,0.12);
+      --red-border: rgba(239,68,68,0.3);
+      --text: #e4e4e7;
+      --text-dim: #a1a1aa;
+      --text-muted: #71717a;
+      --text-faint: #52525b;
+      --text-ghost: #3f3f46;
+    }
 
-        .glass {
-            background: rgba(255, 255, 255, 0.03);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.05);
-        }
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      background: var(--bg); color: var(--text-dim); min-height: 100vh;
+      font-feature-settings: "ss01", "ss02", "calt", "zero";
+      letter-spacing: -0.01em;
+    }
 
-        .btn-icon {
-            transition: all 0.2s ease;
-        }
+    /* Section header — uppercase mono with a leading separator */
+    .section-header {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.14em; color: var(--text-faint); margin: 0;
+    }
+    .section-header::before {
+      content: ""; width: 12px; height: 1px; background: var(--text-ghost);
+    }
 
-        .btn-icon:hover {
-            transform: translateY(-1px);
-        }
+    /* Filter tabs — squared, tab-like */
+    .filter-btn {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 6px 12px; border-radius: 4px; font-size: 12px; font-weight: 500;
+      color: var(--text-muted); cursor: pointer; transition: all 0.15s;
+      border: 1px solid transparent; background: transparent;
+      white-space: nowrap; letter-spacing: 0;
+      text-transform: uppercase; font-size: 11px; letter-spacing: 0.06em;
+    }
+    .filter-btn:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+    .filter-btn.active {
+      color: var(--accent); background: var(--accent-dim);
+      border-color: var(--accent-border);
+    }
+    .filter-btn .count {
+      font-size: 10.5px; color: var(--text-ghost); margin-left: 2px;
+    }
+    .filter-btn.active .count { color: var(--accent-soft); }
 
-        .btn-icon:active {
-            transform: translateY(0);
-        }
-    </style>
+    /* Action icon buttons */
+    .action-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 28px; height: 28px; border-radius: 4px; border: none; background: transparent;
+      color: var(--text-faint); cursor: pointer; transition: all 0.15s; position: relative;
+    }
+    .action-btn:hover { background: rgba(255,255,255,0.06); color: var(--text-dim); }
+    .action-btn.danger:hover { background: rgba(239,68,68,0.12); color: #f87171; }
+    .action-btn.success:hover { background: rgba(74,222,128,0.12); color: var(--green); }
+    .action-btn.info:hover    { background: var(--accent-dim); color: var(--accent-soft); }
+    .action-btn.warn:hover    { background: var(--accent-dim); color: var(--accent-soft); }
+
+    /* Tooltip */
+    .action-btn .tip {
+      display: none; position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+      background: #27272a; color: var(--text); font-size: 10.5px; white-space: nowrap;
+      padding: 3px 8px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.08);
+      pointer-events: none; z-index: 100;
+      text-transform: uppercase; letter-spacing: 0.06em;
+    }
+    .action-btn:hover .tip { display: block; }
+
+    /* Status badges — squared technical chips */
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 9px; border-radius: 3px; font-size: 10.5px; font-weight: 600;
+      letter-spacing: 0.08em; text-transform: uppercase;
+    }
+    .badge-running { background: var(--green-dim);  color: var(--green);      border: 1px solid var(--green-border); }
+    .badge-paused  { background: var(--accent-dim); color: var(--accent-soft); border: 1px solid var(--accent-border); }
+    .badge-stopped { background: var(--red-dim);    color: #f87171;            border: 1px solid var(--red-border); }
+
+    .pulse-dot {
+      width: 6px; height: 6px; border-radius: 50%; background: var(--green);
+      animation: pulse-ring 1.8s ease-in-out infinite;
+      box-shadow: 0 0 6px rgba(74,222,128,0.6);
+    }
+    @keyframes pulse-ring {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.8); }
+    }
+
+    /* Sandbox tag */
+    .sandbox-tag {
+      display: inline-flex; align-items: center;
+      padding: 2px 8px; border-radius: 3px; font-size: 11px;
+      font-family: 'JetBrains Mono', monospace; font-weight: 500;
+      background: rgba(255,255,255,0.035); color: var(--text-muted);
+      border: 1px solid rgba(255,255,255,0.07);
+    }
+
+    /* Version chip in navbar */
+    .version-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 10.5px; padding: 3px 8px; border-radius: 3px;
+      background: rgba(255,255,255,0.035); border: 1px solid var(--border);
+      color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em;
+      font-weight: 600;
+    }
+    .version-chip::before {
+      content: ""; width: 5px; height: 5px; border-radius: 50%;
+      background: var(--accent); box-shadow: 0 0 6px var(--accent);
+    }
+
+    /* Table */
+    .data-table { width: 100%; border-collapse: collapse; }
+    .data-table thead tr { border-bottom: 1px solid var(--border); background: var(--surface); }
+    .data-table thead th {
+      padding: 11px 16px; font-size: 10px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.12em; color: var(--text-faint); text-align: left;
+    }
+    .data-table thead th:first-child { padding-left: 20px; }
+    .data-table thead th:last-child { padding-right: 20px; text-align: right; }
+    .data-table tbody { background: var(--bg); }
+    .data-table tbody tr { border-bottom: 1px solid var(--border); transition: background 0.1s; }
+    .data-table tbody tr:last-child { border-bottom: none; }
+    .data-table tbody tr:hover { background: rgba(255,255,255,0.02); }
+    .data-table tbody td { padding: 13px 16px; font-size: 12.5px; }
+    .data-table tbody td:first-child { padding-left: 20px; }
+    .data-table tbody td:last-child { padding-right: 20px; }
+
+    /* Checkbox styling */
+    input[type="checkbox"] { accent-color: var(--accent); width: 13px; height: 13px; cursor: pointer; }
+
+    /* Modal backdrop */
+    .modal-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.72);
+      backdrop-filter: blur(4px); z-index: 50;
+      display: none; align-items: center; justify-content: center; padding: 16px;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal-card {
+      background: var(--surface); border: 1px solid var(--border-2);
+      border-radius: 6px; width: 100%; max-width: 440px;
+      box-shadow: 0 25px 80px rgba(0,0,0,0.5); padding: 28px;
+    }
+
+    /* Input */
+    .field-input {
+      width: 100%; background: var(--bg); border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 4px; padding: 10px 14px; color: var(--text); font-size: 12.5px;
+      font-family: 'JetBrains Mono', monospace; outline: none; transition: border-color 0.15s;
+    }
+    .field-input:focus { border-color: var(--accent-border); }
+    .field-input::placeholder { color: var(--text-ghost); }
+
+    /* Buttons */
+    .btn-primary {
+      background: var(--accent); color: #18120a; padding: 8px 18px; border-radius: 4px;
+      font-size: 12px; font-weight: 600; border: none; cursor: pointer; transition: all 0.15s;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .btn-primary:hover { background: var(--accent-soft); }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-ghost {
+      background: transparent; color: var(--text-muted); padding: 8px 16px; border-radius: 4px;
+      font-size: 12px; border: none; cursor: pointer; transition: color 0.15s;
+      text-transform: uppercase; letter-spacing: 0.06em; font-weight: 500;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .btn-ghost:hover { color: var(--text); }
+    .btn-danger {
+      background: #dc2626; color: #fff; padding: 8px 18px; border-radius: 4px;
+      font-size: 12px; font-weight: 600; border: none; cursor: pointer; transition: all 0.15s;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .btn-danger:hover { background: #ef4444; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+
+    .spin { animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
 </head>
 
-<body class="bg-black text-zinc-200 min-h-screen p-6 md:p-12 selection:bg-white selection:text-black">
-    <div class="max-w-6xl mx-auto space-y-12">
-        <!-- Header -->
-        <header class="flex justify-between items-end border-b border-zinc-800 pb-6">
-            <div>
-                <h1 class="text-4xl font-light tracking-tight text-white mb-2">BandSox</h1>
-                <p class="text-zinc-500 text-sm">MicroVM Orchestration & Management</p>
-            </div>
-            <div class="flex items-center gap-4">
-                <span class="text-xs text-zinc-600 font-mono" id="last-updated"></span>
-                <button onclick="refreshData()"
-                    class="group flex items-center gap-2 px-4 py-2 bg-white text-black text-sm font-medium rounded hover:bg-zinc-200 transition-colors">
-                    <svg class="w-3.5 h-3.5 transition-transform group-hover:rotate-180" fill="none"
-                        stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
-                        </path>
-                    </svg>
-                    Refresh
-                </button>
-                <button onclick="logout()"
-                    class="flex items-center gap-2 px-4 py-2 text-zinc-400 hover:text-white text-sm transition-colors">
-                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1">
-                        </path>
-                    </svg>
-                    Logout
-                </button>
-            </div>
-        </header>
+<body>
 
-        <!-- VMs Section -->
-        <section class="space-y-6">
-            <div class="flex items-center gap-3">
-                <h2 class="text-xl font-medium text-white">Active Sandboxes</h2>
-                <span id="vm-count"
-                    class="px-2 py-0.5 rounded text-xs font-mono bg-zinc-900 text-zinc-400 border border-zinc-800">0</span>
-                <button id="btn-bulk-delete" onclick="deleteSelectedVms()" 
-                    class="hidden ml-auto flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded transition-all shadow-lg shadow-red-900/20 group">
-                    <svg class="w-4 h-4 text-red-100 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                    <span>Delete (<span id="selected-count" class="font-bold">0</span>)</span>
-                </button>
-            </div>
-
-            <div class="w-full rounded-lg border border-zinc-800 bg-zinc-950/50">
-                <table class="w-full text-left border-collapse">
-                    <thead>
-                        <tr class="border-b border-zinc-800 text-xs uppercase tracking-wider text-zinc-500 font-medium">
-                            <th class="pl-6 py-4 w-10">
-                                <input type="checkbox" id="select-all-vms" onclick="toggleSelectAll()" class="rounded border-zinc-700 bg-zinc-900 text-white focus:ring-0 focus:ring-offset-0 accent-white">
-                            </th>
-                            <th class="px-6 py-4 font-mono">ID</th>
-                            <th class="px-6 py-4">Resources</th>
-                            <th class="px-6 py-4">Status</th>
-                            <th class="px-6 py-4 text-right">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="vm-list" class="divide-y divide-zinc-800/50 text-sm">
-                        <!-- VM Rows -->
-                    </tbody>
-                </table>
-                <div id="no-vms" class="hidden p-12 text-center text-zinc-600 font-light">
-                    No active sandboxes found.
-                </div>
-            </div>
-        </section>
-
-        <!-- Snapshots Section -->
-        <section class="space-y-6">
-            <div class="flex items-center gap-3">
-                <h2 class="text-xl font-medium text-white">Snapshots</h2>
-                <span id="snapshot-count"
-                    class="px-2 py-0.5 rounded text-xs font-mono bg-zinc-900 text-zinc-400 border border-zinc-800">0</span>
-                <button id="btn-bulk-delete-snapshots" onclick="deleteSelectedSnapshots()"
-                    class="hidden ml-auto flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded transition-all shadow-lg shadow-red-900/20 group">
-                    <svg class="w-4 h-4 text-red-100 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                    <span>Delete (<span id="selected-snapshots-count" class="font-bold">0</span>)</span>
-                </button>
-            </div>
-            <div class="w-full rounded-lg border border-zinc-800 bg-zinc-950/50">
-                <table class="w-full text-left border-collapse">
-                    <thead>
-                        <tr class="border-b border-zinc-800 text-xs uppercase tracking-wider text-zinc-500 font-medium">
-                            <th class="pl-6 py-4 w-10">
-                                <input type="checkbox" id="select-all-snapshots" onclick="toggleSelectAllSnapshots()" class="rounded border-zinc-700 bg-zinc-900 text-white focus:ring-0 focus:ring-offset-0 accent-white">
-                            </th>
-                            <th class="px-6 py-4">Name</th>
-                            <th class="px-6 py-4">Path</th>
-                            <th class="px-6 py-4 text-right">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="snapshot-list" class="divide-y divide-zinc-800/50 text-sm">
-                        <!-- Snapshot Rows -->
-                    </tbody>
-                </table>
-                <div id="no-snapshots" class="hidden p-12 text-center text-zinc-600 font-light">
-                    No snapshots available.
-                </div>
-            </div>
-        </section>
-    </div>
-
-    <!-- Snapshot Modal -->
-    <div id="snapshot-modal"
-        class="fixed inset-0 bg-black/90 hidden items-center justify-center z-50 backdrop-blur-sm transition-opacity">
-        <div
-            class="bg-zinc-900 p-8 rounded-xl border border-zinc-800 w-full max-w-md shadow-2xl transform transition-all scale-100">
-            <h3 class="text-xl font-medium text-white mb-2">Create Snapshot</h3>
-            <p class="text-zinc-500 text-sm mb-6">Enter a name for this snapshot to save the current state.</p>
-
-            <div class="space-y-4">
-                <div>
-                    <label class="block text-xs uppercase text-zinc-500 font-medium mb-1.5">Name</label>
-                    <input type="text" id="snapshot-name" placeholder="e.g., pre-update-backup"
-                        class="w-full bg-black border border-zinc-800 rounded-lg px-4 py-3 text-white placeholder-zinc-700 focus:ring-1 focus:ring-white focus:border-white outline-none transition-all font-mono text-sm">
-                </div>
-
-                <div>
-                    <label class="block text-xs uppercase text-zinc-500 font-medium mb-1.5">Metadata (optional JSON)</label>
-                    <textarea id="snapshot-metadata" rows="3" placeholder='e.g., {"description": "Before applying updates", "tags": ["backup", "stable"]}'
-                        class="w-full bg-black border border-zinc-800 rounded-lg px-4 py-3 text-white placeholder-zinc-700 focus:ring-1 focus:ring-white focus:border-white outline-none transition-all font-mono text-xs resize-none"></textarea>
-                </div>
-
-                <div class="flex justify-end gap-3 pt-2">
-                    <button onclick="closeModal()"
-                        class="px-4 py-2 text-zinc-400 hover:text-white text-sm transition-colors">Cancel</button>
-                    <button id="snapshot-save-btn" type="button" onclick="confirmSnapshot()"
-                        class="bg-white hover:bg-zinc-200 text-black px-6 py-2 rounded-lg text-sm font-medium transition-colors">Save Snapshot</button>
-                </div>
-            </div>
+  <!-- ── Navbar ─────────────────────────────────────────────────── -->
+  <nav style="background:var(--surface);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:40;"
+       class="px-6 h-14 flex items-center justify-between">
+    <!-- Logo: stacked-cells mark + wordmark -->
+    <div class="flex items-center gap-3">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-label="BandSox">
+        <!-- four sandbox cells, one active (amber) -->
+        <rect x="2.5"  y="2.5"  width="8.5" height="8.5" rx="1.2" stroke="#71717a" stroke-width="1.3"/>
+        <rect x="13"   y="2.5"  width="8.5" height="8.5" rx="1.2" stroke="#71717a" stroke-width="1.3"/>
+        <rect x="2.5"  y="13"   width="8.5" height="8.5" rx="1.2" stroke="#71717a" stroke-width="1.3"/>
+        <rect x="13"   y="13"   width="8.5" height="8.5" rx="1.2" fill="#f59e0b"/>
+        <rect x="15.5" y="15.5" width="3.5" height="3.5" rx="0.5" fill="#18120a"/>
+      </svg>
+      <div style="display:flex;flex-direction:column;line-height:1.1;">
+        <div style="font-size:13px;font-weight:700;color:var(--text);letter-spacing:0.04em;text-transform:uppercase;">
+          BAND<span style="color:var(--accent);">/</span>SOX
         </div>
-    </div>
-
-    <!-- Restore Snapshot Modal -->
-    <div id="restore-modal"
-        class="fixed inset-0 bg-black/90 hidden items-center justify-center z-50 backdrop-blur-sm transition-opacity">
-        <div
-            class="bg-zinc-900 p-8 rounded-xl border border-zinc-800 w-full max-w-md shadow-2xl transform transition-all scale-100">
-            <h3 class="text-xl font-medium text-white mb-2">Restore Snapshot</h3>
-            <p class="text-zinc-500 text-sm mb-6">Create a new VM from this snapshot. Resources will match to snapshot state.</p> 
-
-            <div class="space-y-4">
-                <div>
-                    <label class="block text-xs uppercase text-zinc-500 font-medium mb-1.5">New VM Name</label>
-                    <input type="text" id="restore-vm-name" placeholder="e.g., restored-service-1"
-                        class="w-full bg-black border border-zinc-800 rounded-lg px-4 py-3 text-white placeholder-zinc-700 focus:ring-1 focus:ring-white focus:border-white outline-none transition-all font-mono text-sm">
-                </div> 
-
-                <div class="flex justify-end gap-3 pt-2">
-                    <button onclick="closeRestoreModal()"
-                        class="px-4 py-2 text-zinc-400 hover:text-white text-sm transition-colors">Cancel</button>
-                    <button id="restore-save-btn" type="button" onclick="confirmRestore()"
-                        class="bg-white hover:bg-zinc-200 text-black px-6 py-2 rounded-lg text-sm font-medium transition-colors">Restore & Start</button>
-                </div>
-            </div>
+        <div style="font-size:9.5px;color:var(--text-faint);letter-spacing:0.18em;text-transform:uppercase;margin-top:2px;">
+          microvm · orchestrator
         </div>
+      </div>
+      <span class="version-chip" style="margin-left:14px;">v3.2</span>
     </div>
 
+    <!-- Right nav -->
+    <div class="flex items-center gap-1">
+      <span style="font-size:10.5px;color:var(--text-ghost);margin-right:10px;letter-spacing:0.06em;" id="last-updated"></span>
 
+      <a href="#snapshots-section"
+         style="font-size:11px;color:var(--text-muted);padding:6px 11px;border-radius:4px;text-decoration:none;transition:all 0.15s;text-transform:uppercase;letter-spacing:0.08em;font-weight:500;"
+         onmouseover="this.style.color='var(--text)';this.style.background='rgba(255,255,255,0.04)'"
+         onmouseout="this.style.color='var(--text-muted)';this.style.background='transparent'">
+        Snapshots
+      </a>
 
-    <!-- Rename VM Modal -->
-    <div id="rename-vm-modal"
-        class="fixed inset-0 bg-black/90 hidden items-center justify-center z-50 backdrop-blur-sm transition-opacity">
-        <div
-            class="bg-zinc-900 p-8 rounded-xl border border-zinc-800 w-full max-w-md shadow-2xl transform transition-all scale-100">
-            <h3 class="text-xl font-medium text-white mb-2">Rename VM</h3>
-            <p class="text-zinc-500 text-sm mb-6">Change the display name of this VM.</p> 
+      <button onclick="refreshData()"
+              style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);padding:6px 11px;border-radius:4px;background:transparent;border:none;cursor:pointer;transition:all 0.15s;text-transform:uppercase;letter-spacing:0.08em;font-weight:500;font-family:'JetBrains Mono',monospace;"
+              onmouseover="this.style.color='var(--text)';this.style.background='rgba(255,255,255,0.04)'"
+              onmouseout="this.style.color='var(--text-muted)';this.style.background='transparent'">
+        <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+        </svg>
+        Refresh
+      </button>
 
-            <div class="space-y-4">
-                <div>
-                    <label class="block text-xs uppercase text-zinc-500 font-medium mb-1.5">VM ID</label>
-                    <p id="rename-vm-id" class="text-zinc-400 font-mono text-sm mb-2"></p>
-                </div> 
-                <div>
-                    <label class="block text-xs uppercase text-zinc-500 font-medium mb-1.5">New Name</label>
-                    <input type="text" id="rename-vm-name" placeholder="e.g., production-server-1"
-                        class="w-full bg-black border border-zinc-800 rounded-lg px-4 py-3 text-white placeholder-zinc-700 focus:ring-1 focus:ring-white focus:border-white outline-none transition-all font-mono text-sm">
-                </div> 
+      <button onclick="logout()"
+              style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim);padding:6px 13px;border-radius:4px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);cursor:pointer;transition:all 0.15s;margin-left:6px;text-transform:uppercase;letter-spacing:0.08em;font-weight:500;font-family:'JetBrains Mono',monospace;"
+              onmouseover="this.style.color='var(--text)';this.style.background='rgba(255,255,255,0.07)'"
+              onmouseout="this.style.color='var(--text-dim)';this.style.background='rgba(255,255,255,0.03)'">
+        <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+        </svg>
+        Logout
+      </button>
+    </div>
+  </nav>
 
-                <div class="flex justify-end gap-3 pt-2">
-                    <button onclick="closeRenameVmModal()"
-                        class="px-4 py-2 text-zinc-400 hover:text-white text-sm transition-colors">Cancel</button>
-                    <button id="rename-vm-save-btn" type="button" onclick="confirmRenameVm()"
-                        class="bg-white hover:bg-zinc-200 text-black px-6 py-2 rounded-lg text-sm font-medium transition-colors">Rename</button>
-                </div>
-            </div>
+  <!-- ── Main Content ───────────────────────────────────────────── -->
+  <main style="max-width:1280px;margin:0 auto;padding:24px 24px 48px;">
+
+    <!-- ── VMs Section ──────────────────────────────────────────── -->
+    <section style="margin-bottom:48px;">
+
+      <!-- Section header -->
+      <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:16px;">
+        <h2 class="section-header">Sandboxes</h2>
+        <span id="header-count" style="font-size:10.5px;color:var(--text-ghost);letter-spacing:0.08em;">/ 0 instances</span>
+      </div>
+
+      <!-- Filter tabs -->
+      <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-bottom:12px;">
+        <button class="filter-btn active" id="filter-all" onclick="setFilter('all')">
+          All <span class="count" id="count-all">0</span>
+        </button>
+        <button class="filter-btn" id="filter-running" onclick="setFilter('running')">
+          <span style="width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;box-shadow:0 0 5px rgba(74,222,128,0.5);"></span>
+          Running <span class="count" id="count-running">0</span>
+        </button>
+        <button class="filter-btn" id="filter-paused" onclick="setFilter('paused')">
+          <svg width="10" height="10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M10 9v6m4-6v6"/>
+          </svg>
+          Paused <span class="count" id="count-paused">0</span>
+        </button>
+        <button class="filter-btn" id="filter-stopped" onclick="setFilter('stopped')">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="5" y="5" width="14" height="14" rx="1"/>
+          </svg>
+          Stopped <span class="count" id="count-stopped">0</span>
+        </button>
+
+        <!-- Bulk delete -->
+        <div style="margin-left:auto;">
+          <button id="btn-bulk-delete" onclick="deleteSelectedVms()"
+                  style="display:none;align-items:center;gap:6px;padding:6px 13px;background:#dc2626;color:#fff;border:none;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer;transition:background 0.15s;text-transform:uppercase;letter-spacing:0.08em;font-family:'JetBrains Mono',monospace;"
+                  onmouseover="this.style.background='#ef4444'"
+                  onmouseout="this.style.background='#dc2626'">
+            <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+            </svg>
+            Delete · <span id="selected-count">0</span>
+          </button>
         </div>
+      </div>
+
+      <!-- Search -->
+      <div style="position:relative;margin-bottom:12px;">
+        <svg style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--text-ghost);pointer-events:none;"
+             width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0"/>
+        </svg>
+        <input type="text" id="vm-search" placeholder="search sandboxes by name, id, image..." oninput="applyFilters()"
+               class="field-input" style="padding-left:38px;border-radius:4px;">
+      </div>
+
+      <!-- Table -->
+      <div style="border:1px solid var(--border);border-radius:5px;overflow:hidden;">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th style="width:44px;padding-left:20px;">
+                <input type="checkbox" id="select-all-vms" onclick="toggleSelectAll()">
+              </th>
+              <th>Name</th>
+              <th>Sandbox</th>
+              <th>Status</th>
+              <th>Resources</th>
+              <th style="text-align:right;padding-right:20px;">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="vm-list"></tbody>
+        </table>
+        <div id="no-vms" style="display:none;padding:56px 0;text-align:center;color:var(--text-ghost);font-size:11px;background:var(--bg);letter-spacing:0.12em;text-transform:uppercase;">
+          // no sandboxes match
+        </div>
+      </div>
+
+      <!-- Pagination -->
+      <div id="vm-pagination" style="display:none;align-items:center;justify-content:flex-end;gap:6px;margin-top:12px;font-size:12px;color:#71717a;">
+        <span style="margin-right:6px;">
+          Rows per page
+          <select id="rows-per-page" onchange="currentPage=1;applyFilters()"
+                  style="margin-left:6px;background:var(--surface);border:1px solid var(--border-2);border-radius:6px;padding:3px 8px;color:#a1a1aa;font-size:12px;outline:none;cursor:pointer;">
+            <option value="10">10</option>
+            <option value="25">25</option>
+            <option value="50">50</option>
+          </select>
+        </span>
+        <span id="pagination-info" style="color:#52525b;margin-right:4px;">1 / 1</span>
+        <button onclick="goToPage('first')"    class="pg-btn">First</button>
+        <button onclick="goToPage('prev')"     class="pg-btn">Previous</button>
+        <button onclick="goToPage('next')"     class="pg-btn pg-next">Next</button>
+        <button onclick="goToPage('last')"     class="pg-btn">Last</button>
+      </div>
+    </section>
+
+    <!-- ── Snapshots Section ──────────────────────────────────── -->
+    <section id="snapshots-section">
+      <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:16px;">
+        <h2 class="section-header">Snapshots</h2>
+        <span id="snapshot-count" style="font-size:10.5px;color:var(--text-ghost);letter-spacing:0.08em;">/ <span id="snapshot-count-value">0</span> archived</span>
+        <button id="btn-bulk-delete-snapshots" onclick="deleteSelectedSnapshots()"
+                style="display:none;align-items:center;gap:6px;margin-left:auto;padding:6px 13px;background:#dc2626;color:#fff;border:none;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer;transition:background 0.15s;text-transform:uppercase;letter-spacing:0.08em;font-family:'JetBrains Mono',monospace;"
+                onmouseover="this.style.background='#ef4444'"
+                onmouseout="this.style.background='#dc2626'">
+          <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+          </svg>
+          Delete · <span id="selected-snapshots-count">0</span>
+        </button>
+      </div>
+
+      <div style="border:1px solid var(--border);border-radius:5px;overflow:hidden;">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th style="width:44px;padding-left:20px;">
+                <input type="checkbox" id="select-all-snapshots" onclick="toggleSelectAllSnapshots()">
+              </th>
+              <th>Name</th>
+              <th>Path</th>
+              <th style="text-align:right;padding-right:20px;">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="snapshot-list"></tbody>
+        </table>
+        <div id="no-snapshots" style="display:none;padding:56px 0;text-align:center;color:var(--text-ghost);font-size:11px;background:var(--bg);letter-spacing:0.12em;text-transform:uppercase;">
+          // no snapshots archived
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ── Pagination button style ───────────────────────────────── -->
+  <style>
+    .pg-btn {
+      padding: 4px 10px; border-radius: 3px; font-size: 11px; cursor: pointer;
+      background: var(--surface); border: 1px solid var(--border-2); color: var(--text-muted);
+      transition: all 0.15s; text-transform: uppercase; letter-spacing: 0.06em;
+      font-family: 'JetBrains Mono', monospace; font-weight: 500;
+    }
+    .pg-btn:hover { background: var(--surface-2); color: var(--text); }
+    .pg-next { background: var(--accent); color: #18120a; border-color: transparent; font-weight: 600; }
+    .pg-next:hover { background: var(--accent-soft); }
+  </style>
+
+  <!-- ══════════════════════════════════════════════════════════════
+       MODALS
+  ══════════════════════════════════════════════════════════════════ -->
+
+  <!-- Snapshot Modal -->
+  <div id="snapshot-modal" class="modal-backdrop">
+    <div class="modal-card">
+      <h3 style="font-size:16px;font-weight:600;color:#e4e4e7;margin:0 0 6px;">Create Snapshot</h3>
+      <p style="font-size:13px;color:#71717a;margin:0 0 22px;">Enter a name for this snapshot to save the current state.</p>
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <div>
+          <label style="display:block;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:#52525b;margin-bottom:6px;">Name</label>
+          <input type="text" id="snapshot-name" placeholder="e.g., pre-update-backup" class="field-input">
+        </div>
+        <div>
+          <label style="display:block;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:#52525b;margin-bottom:6px;">Metadata (optional JSON)</label>
+          <textarea id="snapshot-metadata" rows="3" placeholder='{"description": "Before updates"}'
+                    class="field-input" style="resize:none;font-size:12px;"></textarea>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;padding-top:4px;">
+          <button class="btn-ghost" onclick="closeModal()">Cancel</button>
+          <button class="btn-primary" id="snapshot-save-btn" onclick="confirmSnapshot()">Save Snapshot</button>
+        </div>
+      </div>
     </div>
+  </div>
 
-    <!-- Edit Snapshot Metadata Modal -->
-    <div id="edit-snapshot-metadata-modal"
-        class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-        <div class="glass rounded-xl w-full max-w-2xl max-h-[80vh] flex flex-col shadow-2xl">
-            <div class="p-6 border-b border-zinc-800">
-                <div class="flex items-center gap-3">
-                    <div class="w-10 h-10 rounded-full bg-zinc-900 flex items-center justify-center border border-zinc-800">
-                        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
-                        </svg>
-                    </div>
-                    <div>
-                        <h2 class="text-xl font-medium text-white">Edit Snapshot</h2>
-                        <p class="text-xs text-zinc-500 mt-0.5">Change the name or edit metadata</p>
-                    </div>
-                </div>
-                <div class="mt-4 px-3 py-2 bg-zinc-900/50 rounded-lg border border-zinc-800">
-                    <p class="text-xs uppercase text-zinc-600 font-medium mb-1">Snapshot ID</p>
-                    <p id="edit-snapshot-id" class="text-zinc-400 font-mono text-sm"></p>
-                </div>
-            </div>
+  <!-- Restore Modal -->
+  <div id="restore-modal" class="modal-backdrop">
+    <div class="modal-card">
+      <h3 style="font-size:16px;font-weight:600;color:#e4e4e7;margin:0 0 6px;">Restore Snapshot</h3>
+      <p style="font-size:13px;color:#71717a;margin:0 0 22px;">Create a new VM from this snapshot.</p>
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <div>
+          <label style="display:block;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:#52525b;margin-bottom:6px;">New VM Name</label>
+          <input type="text" id="restore-vm-name" placeholder="e.g., restored-service-1" class="field-input">
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;padding-top:4px;">
+          <button class="btn-ghost" onclick="closeRestoreModal()">Cancel</button>
+          <button class="btn-primary" id="restore-save-btn" onclick="confirmRestore()">Restore &amp; Start</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
-            <div class="p-6 flex-1 overflow-y-auto">
-                <!-- Name field -->
-                <div class="mb-6">
-                    <label class="block text-xs uppercase text-zinc-500 font-medium mb-2">Snapshot Name</label>
-                    <input type="text" id="edit-snapshot-name" placeholder="e.g., backup-before-update"
-                        class="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-4 py-3 text-white placeholder-zinc-600 focus:outline-none focus:border-white focus:ring-1 focus:ring-white transition-all font-mono text-sm">
-                </div>
+  <!-- Rename VM Modal -->
+  <div id="rename-vm-modal" class="modal-backdrop">
+    <div class="modal-card">
+      <h3 style="font-size:16px;font-weight:600;color:#e4e4e7;margin:0 0 6px;">Rename VM</h3>
+      <p style="font-size:13px;color:#71717a;margin:0 0 22px;">Change the display name of this VM.</p>
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <div>
+          <label style="display:block;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:#52525b;margin-bottom:4px;">VM ID</label>
+          <p id="rename-vm-id" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#71717a;margin:0 0 10px;"></p>
+        </div>
+        <div>
+          <label style="display:block;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:#52525b;margin-bottom:6px;">New Name</label>
+          <input type="text" id="rename-vm-name" placeholder="e.g., production-server-1" class="field-input">
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;padding-top:4px;">
+          <button class="btn-ghost" onclick="closeRenameVmModal()">Cancel</button>
+          <button class="btn-primary" id="rename-vm-save-btn" onclick="confirmRenameVm()">Rename</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
-                <!-- Metadata section -->
-                <div class="border-t border-zinc-800 pt-6">
-                    <label class="block text-xs uppercase text-zinc-500 font-medium mb-4">Metadata</label>
-                    
-                    <!-- Add new entry form -->
-                    <div class="flex gap-3 mb-4">
-                        <input type="text" id="new-snapshot-metadata-key" placeholder="Key"
-                            class="flex-1 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-zinc-300 text-sm focus:outline-none focus:border-white focus:ring-1 focus:ring-white transition-colors">
-                        <input type="text" id="new-snapshot-metadata-value" placeholder="Value"
-                            class="flex-1 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-zinc-300 text-sm focus:outline-none focus:border-white focus:ring-1 focus:ring-white transition-colors">
-                        <button onclick="addSnapshotMetadataEntry()"
-                            class="px-4 py-2 bg-white hover:bg-zinc-200 text-black text-sm font-medium rounded-lg transition-all flex items-center gap-2">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
-                            </svg>
-                            Add
-                        </button>
-                    </div>
+  <!-- Edit Snapshot Metadata Modal -->
+  <div id="edit-snapshot-metadata-modal" class="modal-backdrop">
+    <div class="modal-card" style="max-width:520px;max-height:80vh;display:flex;flex-direction:column;padding:0;overflow:hidden;">
+      <div style="padding:24px 28px 20px;border-bottom:1px solid var(--border);">
+        <h3 style="font-size:16px;font-weight:600;color:#e4e4e7;margin:0 0 4px;">Edit Snapshot</h3>
+        <p style="font-size:12px;color:#71717a;margin:0 0 14px;">Change the name or metadata</p>
+        <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;padding:8px 12px;">
+          <p style="font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:#3f3f46;margin:0 0 2px;">Snapshot ID</p>
+          <p id="edit-snapshot-id" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#71717a;margin:0;"></p>
+        </div>
+      </div>
 
-                    <!-- Existing metadata entries -->
-                    <div id="snapshot-metadata-entries" class="space-y-2">
-                        <!-- Entries will be rendered here -->
-                    </div>
-                </div>
+      <div style="padding:24px 28px;overflow-y:auto;flex:1;">
+        <div style="margin-bottom:20px;">
+          <label style="display:block;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:#52525b;margin-bottom:6px;">Snapshot Name</label>
+          <input type="text" id="edit-snapshot-name" placeholder="e.g., backup-before-update" class="field-input">
+        </div>
 
-                <p id="snapshot-metadata-error" class="hidden text-red-400 text-sm mt-4"></p>
-            </div>
+        <div style="border-top:1px solid var(--border);padding-top:20px;">
+          <label style="display:block;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:#52525b;margin-bottom:14px;">Metadata</label>
+          <div style="display:flex;gap:8px;margin-bottom:12px;">
+            <input type="text" id="new-snapshot-metadata-key" placeholder="Key" class="field-input" style="flex:1;">
+            <input type="text" id="new-snapshot-metadata-value" placeholder="Value" class="field-input" style="flex:1;">
+            <button onclick="addSnapshotMetadataEntry()" class="btn-primary" style="padding:8px 14px;white-space:nowrap;">Add</button>
+          </div>
+          <div id="snapshot-metadata-entries" style="display:flex;flex-direction:column;gap:6px;"></div>
+          <p id="snapshot-metadata-error" style="display:none;color:#f87171;font-size:12px;margin-top:8px;"></p>
+        </div>
+      </div>
 
-            <div class="p-6 border-t border-zinc-800 flex justify-end gap-3 bg-zinc-900/30">
-                <button onclick="closeEditSnapshotMetadataModal()"
-                    class="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-sm font-medium rounded-lg transition-all border border-zinc-700">
-                    Cancel
+      <div style="padding:16px 28px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px;background:rgba(0,0,0,0.2);">
+        <button class="btn-ghost" onclick="closeEditSnapshotMetadataModal()">Cancel</button>
+        <button class="btn-primary" id="edit-snapshot-save-btn" onclick="confirmEditSnapshotMetadata()">Save Changes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm Modal -->
+  <div id="confirm-modal" class="modal-backdrop">
+    <div class="modal-card">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+        <div style="width:36px;height:36px;border-radius:50%;background:rgba(239,68,68,0.12);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+          <svg width="16" height="16" fill="none" stroke="#f87171" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+          </svg>
+        </div>
+        <h3 id="confirm-title" style="font-size:15px;font-weight:600;color:#e4e4e7;margin:0;">Confirm Action</h3>
+      </div>
+      <p id="confirm-message" style="font-size:13px;color:#71717a;margin:0 0 22px;padding-left:48px;">Are you sure you want to proceed?</p>
+      <div style="display:flex;justify-content:flex-end;gap:8px;">
+        <button class="btn-ghost" onclick="closeConfirmModal()">Cancel</button>
+        <button class="btn-danger" id="confirm-action-btn" onclick="confirmAction()">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       JAVASCRIPT
+  ══════════════════════════════════════════════════════════════════ -->
+  <script>
+    // ── Auth intercept ────────────────────────────────────────────
+    const _originalFetch = window.fetch;
+    window.fetch = async function (...args) {
+      const response = await _originalFetch(...args);
+      if (response.status === 401) window.location.href = '/login';
+      return response;
+    };
+
+    async function logout() {
+      await _originalFetch('/api/auth/logout', { method: 'POST' });
+      localStorage.removeItem('bandsox_session_token');
+      window.location.href = '/login';
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // ── State ─────────────────────────────────────────────────────
+    let allVms = [];
+    let currentFilter = 'all';
+    let currentPage = 1;
+    let selectedVmIds = new Set();
+    let selectedSnapshotIds = new Set();
+    let currentVmId = null;
+    let currentSnapshotId = null;
+
+    // ── Filter / Search / Pagination ──────────────────────────────
+    function setFilter(filter) {
+      currentFilter = filter;
+      currentPage = 1;
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById('filter-' + filter).classList.add('active');
+      applyFilters();
+    }
+
+    function getFilteredVms() {
+      const q = (document.getElementById('vm-search')?.value || '').toLowerCase();
+      let result = allVms;
+      if (currentFilter !== 'all') result = result.filter(v => v.status === currentFilter);
+      if (q) result = result.filter(v =>
+        (v.name || '').toLowerCase().includes(q) ||
+        (v.id || '').toLowerCase().includes(q) ||
+        (v.image || '').toLowerCase().includes(q)
+      );
+      return result;
+    }
+
+    function getRowsPerPage() {
+      return parseInt(document.getElementById('rows-per-page')?.value || '10');
+    }
+
+    function applyFilters() {
+      updateFilterCounts();
+      const filtered = getFilteredVms();
+      const rpp = getRowsPerPage();
+      const totalPages = Math.max(1, Math.ceil(filtered.length / rpp));
+      currentPage = Math.min(currentPage, totalPages);
+      renderVMsPage(filtered);
+    }
+
+    function goToPage(dir) {
+      const filtered = getFilteredVms();
+      const totalPages = Math.max(1, Math.ceil(filtered.length / getRowsPerPage()));
+      if (dir === 'first') currentPage = 1;
+      else if (dir === 'prev') currentPage = Math.max(1, currentPage - 1);
+      else if (dir === 'next') currentPage = Math.min(totalPages, currentPage + 1);
+      else if (dir === 'last') currentPage = totalPages;
+      renderVMsPage(filtered);
+    }
+
+    function updateFilterCounts() {
+      document.getElementById('count-all').textContent = allVms.length;
+      document.getElementById('count-running').textContent = allVms.filter(v => v.status === 'running').length;
+      document.getElementById('count-paused').textContent  = allVms.filter(v => v.status === 'paused').length;
+      document.getElementById('count-stopped').textContent = allVms.filter(v => v.status === 'stopped').length;
+      const hc = document.getElementById('header-count');
+      if (hc) hc.textContent = `/ ${allVms.length} instance${allVms.length === 1 ? '' : 's'}`;
+    }
+
+    // ── Render VMs ────────────────────────────────────────────────
+    function renderVMs(vms) {
+      allVms = vms || [];
+
+      // Sync selection
+      const currentIds = new Set(allVms.map(v => String(v.id)));
+      for (const id of selectedVmIds) {
+        if (!currentIds.has(id)) selectedVmIds.delete(id);
+      }
+      updateBulkDeleteUI();
+      applyFilters();
+    }
+
+    function renderVMsPage(filtered) {
+      const tbody = document.getElementById('vm-list');
+      const noVms = document.getElementById('no-vms');
+      const pagination = document.getElementById('vm-pagination');
+      const rpp = getRowsPerPage();
+      const totalPages = Math.max(1, Math.ceil(filtered.length / rpp));
+      const start = (currentPage - 1) * rpp;
+      const page = filtered.slice(start, start + rpp);
+
+      tbody.innerHTML = '';
+      document.getElementById('vm-count-badge') && (document.getElementById('vm-count-badge').textContent = allVms.length);
+
+      if (filtered.length === 0) {
+        noVms.style.display = 'block';
+        pagination.style.display = 'none';
+        const mc = document.getElementById('select-all-vms');
+        if (mc) { mc.checked = false; mc.indeterminate = false; }
+      } else {
+        noVms.style.display = 'none';
+        pagination.style.display = filtered.length > rpp ? 'flex' : 'none';
+        document.getElementById('pagination-info').textContent = currentPage + ' / ' + totalPages;
+
+        page.forEach(vm => {
+          const vmIdStr = String(vm.id);
+          const isSelected = selectedVmIds.has(vmIdStr);
+          const displayName = vm.name || vm.image || vm.id;
+          const shortName = displayName.length > 28 ? displayName.slice(0, 25) + '…' : displayName;
+          const sandboxTag = vm.image
+            ? `<span class="sandbox-tag">${escapeHtml(vm.image)}</span>`
+            : `<span style="color:#3f3f46;font-size:12px;">—</span>`;
+
+          let statusBadge = '';
+          let actionBtns = '';
+
+          if (vm.status === 'running') {
+            statusBadge = `<span class="badge badge-running"><span class="pulse-dot"></span>Running</span>`;
+            actionBtns = `
+              <a href="/terminal?id=${vm.id}" target="_blank" class="action-btn info" title="">
+                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                <span class="tip">Terminal</span>
+              </a>
+              <button id="btn-pause-${vm.id}" onclick="pauseVm('${vm.id}')" class="action-btn warn" title="">
+                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                <span class="tip">Pause</span>
+              </button>
+              <button id="btn-stop-${vm.id}" onclick="stopVm('${vm.id}')" class="action-btn danger" title="">
+                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/></svg>
+                <span class="tip">Stop</span>
+              </button>`;
+          } else if (vm.status === 'paused') {
+            statusBadge = `<span class="badge badge-paused">Paused</span>`;
+            actionBtns = `
+              <button id="btn-resume-${vm.id}" onclick="resumeVm('${vm.id}')" class="action-btn success" title="">
+                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                <span class="tip">Resume</span>
+              </button>
+              <button id="btn-stop-${vm.id}" onclick="stopVm('${vm.id}')" class="action-btn danger" title="">
+                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/></svg>
+                <span class="tip">Stop</span>
+              </button>`;
+          } else {
+            statusBadge = `<span class="badge badge-stopped">Stopped</span>`;
+            actionBtns = `
+              <button id="btn-delete-${vm.id}" onclick="deleteVm('${vm.id}')" class="action-btn danger" title="">
+                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                <span class="tip">Delete</span>
+              </button>`;
+          }
+
+          const row = document.createElement('tr');
+          row.innerHTML = `
+            <td style="width:44px;padding-left:20px;">
+              <input type="checkbox" class="vm-checkbox" value="${vmIdStr}" ${isSelected ? 'checked' : ''} onclick="toggleVmSelection(this)">
+            </td>
+            <td>
+              <a href="/vm_details?id=${vm.id}" style="text-decoration:none;display:flex;flex-direction:column;gap:2px;">
+                <span style="font-size:13px;font-weight:500;color:#e4e4e7;">${escapeHtml(shortName)}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#3f3f46;">${vm.id.substring(0, 8)}</span>
+              </a>
+            </td>
+            <td>${sandboxTag}</td>
+            <td>${statusBadge}</td>
+            <td style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#71717a;">
+              ${vm.vcpu}&nbsp;vCPU&nbsp;/&nbsp;${vm.mem_mib}&nbsp;MiB
+            </td>
+            <td style="text-align:right;padding-right:20px;">
+              <div style="display:inline-flex;align-items:center;gap:2px;">
+                ${actionBtns}
+                <button onclick="openSnapshotModal('${vm.id}')" class="action-btn" title="">
+                  <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                  <span class="tip">Snapshot</span>
                 </button>
-                <button id="edit-snapshot-save-btn" onclick="confirmEditSnapshotMetadata()"
-                    class="px-6 py-2 bg-white hover:bg-zinc-200 text-black text-sm font-medium rounded-lg transition-all">
-                    Save Changes
+                <button onclick="openRenameVmModal('${vm.id}')" class="action-btn info" title="">
+                  <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                  <span class="tip">Rename</span>
                 </button>
+              </div>
+            </td>
+          `;
+          tbody.appendChild(row);
+        });
+        updateMasterCheckbox();
+      }
+    }
+
+    // ── Render Snapshots ──────────────────────────────────────────
+    function renderSnapshots(snaps) {
+      const tbody = document.getElementById('snapshot-list');
+      const noSnaps = document.getElementById('no-snapshots');
+      const count = document.getElementById('snapshot-count-value');
+
+      tbody.innerHTML = '';
+      if (count) count.textContent = snaps.length;
+
+      if (snaps.length === 0) {
+        noSnaps.style.display = 'block';
+        const mc = document.getElementById('select-all-snapshots');
+        if (mc) { mc.checked = false; mc.indeterminate = false; }
+        selectedSnapshotIds.clear();
+        updateBulkDeleteSnapshotsUI();
+        return;
+      }
+
+      noSnaps.style.display = 'none';
+      const currentSnapIds = new Set(snaps.map(s => String(s.id)));
+      for (const id of selectedSnapshotIds) {
+        if (!currentSnapIds.has(id)) selectedSnapshotIds.delete(id);
+      }
+      updateBulkDeleteSnapshotsUI();
+
+      snaps.forEach(snap => {
+        const snapIdStr = String(snap.id);
+        const isSelected = selectedSnapshotIds.has(snapIdStr);
+        const displayName = snap.snapshot_name || snap.id;
+        const shortName = displayName.length > 32 ? displayName.slice(0, 29) + '…' : displayName;
+
+        let metaLine = '';
+        if (snap.metadata && Object.keys(snap.metadata).length > 0) {
+          const s = JSON.stringify(snap.metadata);
+          metaLine = `<div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#52525b;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:240px;" title="${s.replace(/"/g,'&quot;')}">${escapeHtml(s.length > 60 ? s.slice(0, 57) + '…' : s)}</div>`;
+        }
+
+        const row = document.createElement('tr');
+        row.innerHTML = `
+          <td style="width:44px;padding-left:20px;">
+            <input type="checkbox" class="snapshot-checkbox" value="${snapIdStr}" ${isSelected ? 'checked' : ''} onclick="toggleSnapshotSelection(this)">
+          </td>
+          <td>
+            <div style="font-size:13px;font-weight:500;color:#e4e4e7;">${escapeHtml(shortName)}</div>
+            ${metaLine}
+          </td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#52525b;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+            ${escapeHtml(snap.path || '')}
+          </td>
+          <td style="text-align:right;padding-right:20px;">
+            <div style="display:inline-flex;align-items:center;gap:2px;">
+              <button onclick="openRestoreModal('${snap.id}')" class="action-btn success" title="">
+                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                <span class="tip">Restore</span>
+              </button>
+              <button onclick="openEditSnapshotMetadataModal('${snap.id}')" class="action-btn" title="">
+                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                <span class="tip">Edit</span>
+              </button>
+              <button id="btn-delete-snap-${snap.id}" onclick="deleteSnapshot('${snap.id}')" class="action-btn danger" title="">
+                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                <span class="tip">Delete</span>
+              </button>
             </div>
+          </td>
+        `;
+        tbody.appendChild(row);
+      });
+      updateMasterSnapshotCheckbox();
+    }
+
+    // ── Data Fetch ────────────────────────────────────────────────
+    async function refreshData() {
+      const ts = document.getElementById('last-updated');
+      ts.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+      try {
+        const res = await fetch('/api/vms');
+        if (!res.ok) throw new Error(res.status);
+        renderVMs(await res.json());
+      } catch (e) {
+        console.error('Failed to fetch VMs', e);
+        ts.textContent = 'Connection Error';
+        ts.style.color = '#f87171';
+      }
+
+      try {
+        const res = await fetch('/api/snapshots');
+        if (!res.ok) throw new Error(res.status);
+        renderSnapshots(await res.json());
+      } catch (e) {
+        console.error('Failed to fetch snapshots', e);
+      }
+    }
+
+    // ── Bulk VM selection ─────────────────────────────────────────
+    function toggleSelectAll() {
+      const master = document.getElementById('select-all-vms');
+      document.querySelectorAll('.vm-checkbox').forEach(cb => {
+        cb.checked = master.checked;
+        if (master.checked) selectedVmIds.add(cb.value);
+        else selectedVmIds.delete(cb.value);
+      });
+      updateBulkDeleteUI();
+    }
+
+    function toggleVmSelection(checkbox) {
+      if (checkbox.checked) selectedVmIds.add(checkbox.value);
+      else selectedVmIds.delete(checkbox.value);
+      updateMasterCheckbox();
+      updateBulkDeleteUI();
+    }
+
+    function updateMasterCheckbox() {
+      const master = document.getElementById('select-all-vms');
+      const boxes = document.querySelectorAll('.vm-checkbox');
+      if (!master || !boxes.length) return;
+      const allChecked = Array.from(boxes).every(c => c.checked);
+      const someChecked = Array.from(boxes).some(c => c.checked);
+      master.checked = allChecked;
+      master.indeterminate = !allChecked && someChecked;
+    }
+
+    function updateBulkDeleteUI() {
+      const btn = document.getElementById('btn-bulk-delete');
+      if (!btn) return;
+      document.getElementById('selected-count').textContent = selectedVmIds.size;
+      btn.style.display = selectedVmIds.size > 0 ? 'inline-flex' : 'none';
+    }
+
+    async function deleteSelectedVms() {
+      if (!selectedVmIds.size) return;
+      showConfirmModal('Delete Selected VMs',
+        `Delete ${selectedVmIds.size} selected VM${selectedVmIds.size > 1 ? 's' : ''}? This cannot be undone.`,
+        async () => {
+          const ids = Array.from(selectedVmIds);
+          setLoading('btn-bulk-delete', true);
+          await Promise.all(ids.map(id => fetch(`/api/vms/${id}`, { method: 'DELETE' }).catch(console.error)));
+          selectedVmIds.clear();
+          const mc = document.getElementById('select-all-vms');
+          if (mc) { mc.checked = false; mc.indeterminate = false; }
+          updateBulkDeleteUI();
+          setLoading('btn-bulk-delete', false);
+          refreshData();
+        }
+      );
+    }
+
+    // ── Bulk snapshot selection ───────────────────────────────────
+    function toggleSelectAllSnapshots() {
+      const master = document.getElementById('select-all-snapshots');
+      document.querySelectorAll('.snapshot-checkbox').forEach(cb => {
+        cb.checked = master.checked;
+        if (master.checked) selectedSnapshotIds.add(cb.value);
+        else selectedSnapshotIds.delete(cb.value);
+      });
+      updateBulkDeleteSnapshotsUI();
+    }
+
+    function toggleSnapshotSelection(checkbox) {
+      if (checkbox.checked) selectedSnapshotIds.add(checkbox.value);
+      else selectedSnapshotIds.delete(checkbox.value);
+      updateMasterSnapshotCheckbox();
+      updateBulkDeleteSnapshotsUI();
+    }
+
+    function updateMasterSnapshotCheckbox() {
+      const master = document.getElementById('select-all-snapshots');
+      const boxes = document.querySelectorAll('.snapshot-checkbox');
+      if (!master || !boxes.length) return;
+      const allChecked = Array.from(boxes).every(c => c.checked);
+      const someChecked = Array.from(boxes).some(c => c.checked);
+      master.checked = allChecked;
+      master.indeterminate = !allChecked && someChecked;
+    }
+
+    function updateBulkDeleteSnapshotsUI() {
+      const btn = document.getElementById('btn-bulk-delete-snapshots');
+      if (!btn) return;
+      document.getElementById('selected-snapshots-count').textContent = selectedSnapshotIds.size;
+      btn.style.display = selectedSnapshotIds.size > 0 ? 'inline-flex' : 'none';
+    }
+
+    async function deleteSelectedSnapshots() {
+      if (!selectedSnapshotIds.size) return;
+      showConfirmModal('Delete Selected Snapshots',
+        `Delete ${selectedSnapshotIds.size} snapshot${selectedSnapshotIds.size > 1 ? 's' : ''}? This cannot be undone.`,
+        async () => {
+          const ids = Array.from(selectedSnapshotIds);
+          setLoading('btn-bulk-delete-snapshots', true);
+          await Promise.all(ids.map(id => fetch(`/api/snapshots/${id}`, { method: 'DELETE' }).catch(console.error)));
+          selectedSnapshotIds.clear();
+          const mc = document.getElementById('select-all-snapshots');
+          if (mc) { mc.checked = false; mc.indeterminate = false; }
+          updateBulkDeleteSnapshotsUI();
+          setLoading('btn-bulk-delete-snapshots', false);
+          refreshData();
+        }
+      );
+    }
+
+    // ── Loading helper ────────────────────────────────────────────
+    function setLoading(btnId, isLoading) {
+      const btn = document.getElementById(btnId);
+      if (!btn) return;
+      if (isLoading) {
+        if (!btn.dataset.originalHtml) btn.dataset.originalHtml = btn.innerHTML;
+        btn.disabled = true; btn.style.opacity = '0.5';
+        btn.innerHTML = `<svg class="spin" width="14" height="14" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"/></svg>`;
+      } else {
+        btn.disabled = false; btn.style.opacity = '';
+        if (btn.dataset.originalHtml) btn.innerHTML = btn.dataset.originalHtml;
+      }
+    }
+
+    // ── VM actions ────────────────────────────────────────────────
+    async function stopVm(id) {
+      showConfirmModal('Stop VM', 'Stop this VM? You will lose any unsaved state.', async () => {
+        setLoading(`btn-stop-${id}`, true);
+        try { await fetch(`/api/vms/${id}/stop`, { method: 'POST' }); refreshData(); }
+        catch (e) { alert('Failed to stop VM: ' + e); setLoading(`btn-stop-${id}`, false); }
+      });
+    }
+
+    async function pauseVm(id) {
+      setLoading(`btn-pause-${id}`, true);
+      try { await fetch(`/api/vms/${id}/pause`, { method: 'POST' }); refreshData(); }
+      catch (e) { alert('Failed to pause VM: ' + e); setLoading(`btn-pause-${id}`, false); }
+    }
+
+    async function resumeVm(id) {
+      setLoading(`btn-resume-${id}`, true);
+      try { await fetch(`/api/vms/${id}/resume`, { method: 'POST' }); refreshData(); }
+      catch (e) { alert('Failed to resume VM: ' + e); setLoading(`btn-resume-${id}`, false); }
+    }
+
+    async function deleteVm(id) {
+      showConfirmModal('Delete VM', 'Delete this VM? All data will be lost permanently.', async () => {
+        setLoading(`btn-delete-${id}`, true);
+        try { await fetch(`/api/vms/${id}`, { method: 'DELETE' }); refreshData(); }
+        catch (e) { alert('Failed to delete VM: ' + e); setLoading(`btn-delete-${id}`, false); }
+      });
+    }
+
+    async function deleteSnapshot(id) {
+      showConfirmModal('Delete Snapshot', 'Delete this snapshot? This cannot be undone.', async () => {
+        setLoading(`btn-delete-snap-${id}`, true);
+        try { await fetch(`/api/snapshots/${id}`, { method: 'DELETE' }); refreshData(); }
+        catch (e) { alert('Failed to delete snapshot: ' + e); setLoading(`btn-delete-snap-${id}`, false); }
+      });
+    }
+
+    // ── Snapshot Modal ────────────────────────────────────────────
+    function openSnapshotModal(id) {
+      currentVmId = id;
+      openModal('snapshot-modal');
+      setTimeout(() => document.getElementById('snapshot-name').focus(), 50);
+    }
+
+    function closeModal() {
+      closeModalById('snapshot-modal');
+      currentVmId = null;
+      document.getElementById('snapshot-name').value = '';
+      document.getElementById('snapshot-metadata').value = '';
+    }
+
+    async function confirmSnapshot() {
+      const name = document.getElementById('snapshot-name').value.trim();
+      const metaStr = document.getElementById('snapshot-metadata').value.trim();
+      if (!name) { alert('Please enter a snapshot name.'); return; }
+      if (!currentVmId) { alert('No VM selected.'); return; }
+      let metadata = null;
+      if (metaStr) {
+        try { metadata = JSON.parse(metaStr); }
+        catch (e) { alert('Invalid JSON: ' + e.message); return; }
+      }
+      setLoading('snapshot-save-btn', true);
+      try {
+        const body = { name };
+        if (metadata !== null) body.metadata = metadata;
+        const res = await fetch(`/api/vms/${currentVmId}/snapshot`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+        if (!res.ok) throw new Error(await res.text().catch(() => res.status));
+        closeModal(); refreshData();
+      } catch (e) { alert('Snapshot failed: ' + e.message); }
+      finally { setLoading('snapshot-save-btn', false); }
+    }
+
+    // ── Restore Modal ─────────────────────────────────────────────
+    function openRestoreModal(id) {
+      currentSnapshotId = id;
+      openModal('restore-modal');
+      document.getElementById('restore-vm-name').value = '';
+      setTimeout(() => document.getElementById('restore-vm-name').focus(), 50);
+    }
+
+    function closeRestoreModal() {
+      closeModalById('restore-modal');
+      currentSnapshotId = null;
+    }
+
+    async function confirmRestore() {
+      if (!currentSnapshotId) return;
+      const name = document.getElementById('restore-vm-name').value.trim();
+      setLoading('restore-save-btn', true);
+      try {
+        const res = await fetch(`/api/snapshots/${currentSnapshotId}/restore`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name || null, enable_networking: true })
+        });
+        if (!res.ok) throw new Error(await res.text().catch(() => res.status));
+        closeRestoreModal(); refreshData();
+      } catch (e) { alert('Restore failed: ' + e.message); }
+      finally { setLoading('restore-save-btn', false); }
+    }
+
+    // ── Rename VM Modal ───────────────────────────────────────────
+    function openRenameVmModal(vmId) {
+      currentVmId = vmId;
+      openModal('rename-vm-modal');
+      document.getElementById('rename-vm-id').textContent = vmId.substring(0, 16);
+      document.getElementById('rename-vm-name').value = '';
+      setTimeout(() => document.getElementById('rename-vm-name').focus(), 50);
+    }
+
+    function closeRenameVmModal() {
+      closeModalById('rename-vm-modal');
+      currentVmId = null;
+    }
+
+    async function confirmRenameVm() {
+      const newName = document.getElementById('rename-vm-name').value.trim();
+      if (!newName) { alert('Please enter a name.'); return; }
+      if (!currentVmId) return;
+      setLoading('rename-vm-save-btn', true);
+      try {
+        const res = await fetch(`/api/vms/${currentVmId}/name`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newName })
+        });
+        if (!res.ok) throw new Error(`Rename failed: ${res.status}`);
+        closeRenameVmModal(); refreshData();
+      } catch (e) { alert(e.message); }
+      finally { setLoading('rename-vm-save-btn', false); }
+    }
+
+    // ── Edit Snapshot Metadata Modal ──────────────────────────────
+    let currentEditSnapshotId = null;
+    let editingSnapshotMetadata = {};
+    let editingSnapshotName = '';
+
+    async function openEditSnapshotMetadataModal(snapshotId) {
+      currentEditSnapshotId = snapshotId;
+      document.getElementById('edit-snapshot-id').textContent = snapshotId;
+      try {
+        const res = await fetch('/api/snapshots');
+        if (!res.ok) throw new Error(res.status);
+        const snaps = await res.json();
+        const snap = snaps.find(s => s.id === snapshotId);
+        if (snap) {
+          editingSnapshotMetadata = { ...(snap.metadata || {}) };
+          editingSnapshotName = snap.id || '';
+        } else {
+          editingSnapshotMetadata = {}; editingSnapshotName = '';
+        }
+      } catch { editingSnapshotMetadata = {}; editingSnapshotName = ''; }
+
+      document.getElementById('edit-snapshot-name').value = editingSnapshotName;
+      renderSnapshotMetadataEntries();
+      document.getElementById('new-snapshot-metadata-key').value = '';
+      document.getElementById('new-snapshot-metadata-value').value = '';
+      document.getElementById('snapshot-metadata-error').style.display = 'none';
+      openModal('edit-snapshot-metadata-modal');
+      setTimeout(() => document.getElementById('edit-snapshot-name').focus(), 50);
+    }
+
+    function closeEditSnapshotMetadataModal() {
+      closeModalById('edit-snapshot-metadata-modal');
+      currentEditSnapshotId = null; editingSnapshotName = '';
+    }
+
+    function renderSnapshotMetadataEntries() {
+      const container = document.getElementById('snapshot-metadata-entries');
+      const entries = Object.entries(editingSnapshotMetadata);
+      if (!entries.length) {
+        container.innerHTML = '<p style="color:#3f3f46;font-size:12px;text-align:center;padding:16px 0;">No metadata. Add entries above.</p>';
+        return;
+      }
+      container.innerHTML = entries.map(([k, v]) => `
+        <div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:7px;padding:8px 12px;">
+          <input type="text" value="${escapeHtml(k)}" onchange="updateSnapshotMetadataKey('${escapeHtml(k)}',this.value)"
+                 style="flex:1;background:transparent;border:none;color:#e4e4e7;font-size:12px;font-weight:500;outline:none;min-width:80px;">
+          <span style="color:#3f3f46;">:</span>
+          <input type="text" value="${escapeHtml(String(v))}" onchange="updateSnapshotMetadataValue('${escapeHtml(k)}',this.value)"
+                 style="flex:1;background:transparent;border:none;color:#a1a1aa;font-family:'JetBrains Mono',monospace;font-size:12px;outline:none;">
+          <button onclick="removeSnapshotMetadataEntry('${escapeHtml(k)}')"
+                  style="background:none;border:none;color:#52525b;cursor:pointer;padding:2px;border-radius:4px;transition:color 0.15s;"
+                  onmouseover="this.style.color='#f87171'" onmouseout="this.style.color='#52525b'">
+            <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+            </svg>
+          </button>
         </div>
-    </div>
+      `).join('');
+    }
 
-    <!-- Confirmation Modal -->
-    <div id="confirm-modal"
-        class="fixed inset-0 bg-black/90 hidden items-center justify-center z-50 backdrop-blur-sm transition-opacity">
-        <div
-            class="bg-zinc-900 p-8 rounded-xl border border-zinc-800 w-full max-w-md shadow-2xl transform transition-all scale-100">
-            <div class="flex items-center gap-3 mb-3">
-                <div class="w-10 h-10 rounded-full bg-red-950/30 flex items-center justify-center">
-                    <svg class="w-5 h-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z">
-                        </path>
-                    </svg>
-                </div>
-                <h3 class="text-xl font-medium text-white" id="confirm-title">Confirm Action</h3>
-            </div>
-            <p class="text-zinc-400 text-sm mb-6 ml-13" id="confirm-message">Are you sure you want to proceed?</p>
+    function addSnapshotMetadataEntry() {
+      const keyEl = document.getElementById('new-snapshot-metadata-key');
+      const valEl = document.getElementById('new-snapshot-metadata-value');
+      const errEl = document.getElementById('snapshot-metadata-error');
+      const key = keyEl.value.trim();
+      if (!key) { errEl.textContent = 'Key is required'; errEl.style.display = 'block'; return; }
+      if (key in editingSnapshotMetadata) { errEl.textContent = 'Key already exists'; errEl.style.display = 'block'; return; }
+      editingSnapshotMetadata[key] = valEl.value.trim();
+      keyEl.value = ''; valEl.value = '';
+      errEl.style.display = 'none';
+      renderSnapshotMetadataEntries();
+      keyEl.focus();
+    }
 
-            <div class="flex justify-end gap-3">
-                <button onclick="closeConfirmModal()"
-                    class="px-4 py-2 text-zinc-400 hover:text-white text-sm transition-colors">Cancel</button>
-                <button id="confirm-action-btn" onclick="confirmAction()"
-                    class="bg-red-600 hover:bg-red-700 text-white px-6 py-2 rounded-lg text-sm font-medium transition-colors">Confirm</button>
-            </div>
-        </div>
-    </div>
+    function updateSnapshotMetadataKey(oldKey, newKey) {
+      if (!newKey.trim() || (newKey !== oldKey && newKey in editingSnapshotMetadata)) { renderSnapshotMetadataEntries(); return; }
+      const val = editingSnapshotMetadata[oldKey];
+      delete editingSnapshotMetadata[oldKey];
+      editingSnapshotMetadata[newKey] = val;
+    }
 
-    <script>
-        const _originalFetch = window.fetch;
-        window.fetch = async function(...args) {
-            const response = await _originalFetch(...args);
-            if (response.status === 401) { window.location.href = '/login'; }
-            return response;
-        };
-        async function logout() {
-            await _originalFetch('/api/auth/logout', { method: 'POST' });
-            localStorage.removeItem('bandsox_session_token');
-            window.location.href = '/login';
+    function updateSnapshotMetadataValue(key, val) { editingSnapshotMetadata[key] = val; }
+
+    function removeSnapshotMetadataEntry(key) {
+      delete editingSnapshotMetadata[key];
+      renderSnapshotMetadataEntries();
+    }
+
+    async function confirmEditSnapshotMetadata() {
+      if (!currentEditSnapshotId) return;
+      const errEl = document.getElementById('snapshot-metadata-error');
+      const saveBtn = document.getElementById('edit-snapshot-save-btn');
+      const newName = document.getElementById('edit-snapshot-name').value.trim();
+      saveBtn.disabled = true;
+      saveBtn.innerHTML = '<svg class="spin" width="14" height="14" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" class="opacity-25"/><path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Saving…';
+      errEl.style.display = 'none';
+      try {
+        if (newName && newName !== editingSnapshotName) {
+          const r = await fetch(`/api/snapshots/${currentEditSnapshotId}/name`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newName })
+          });
+          if (!r.ok) throw new Error(await r.text().catch(() => r.status));
         }
-
-        // Escape HTML to prevent XSS
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
-        let currentVmId = null;
-
-        let currentSnapshotId = null;
-
-        function openRestoreModal(id) {
-            currentSnapshotId = id;
-            const modal = document.getElementById('restore-modal');
-            modal.classList.remove('hidden');
-            modal.classList.add('flex');
-            document.getElementById('restore-vm-name').value = '';
-            setTimeout(() => document.getElementById('restore-vm-name').focus(), 50);
-        }
-
-        function closeRestoreModal() {
-            const modal = document.getElementById('restore-modal');
-            modal.classList.add('hidden');
-            modal.classList.remove('flex');
-            currentSnapshotId = null;
-        }
-
-        async function confirmRestore() {
-            const name = document.getElementById('restore-vm-name').value.trim();
-            
-            if (!currentSnapshotId) return;
-
-            setLoading('restore-save-btn', true);
-
-            try {
-                const res = await fetch(`/api/snapshots/${currentSnapshotId}/restore`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name: name || null, enable_networking: true })
-                });
-                
-                if (!res.ok) {
-                    const detail = await res.text().catch(() => '');
-                    throw new Error(detail || `Restore failed with status ${res.status}`);
-                }
-                
-                closeRestoreModal();
-                refreshData();
-                
-                // Show success feedback
-                // You could add a toast here, but for now refreshing data shows the new VM
-            } catch (e) {
-                const message = e?.message || e || 'Unknown error';
-                alert('Restore failed: ' + message);
-            } finally {
-                setLoading('restore-save-btn', false);
-            }
-        }
-
-        async function refreshData() {
-            const now = new Date();
-            document.getElementById('last-updated').textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
-            try {
-                const res = await fetch('/api/vms');
-                if (!res.ok) throw new Error(`API Error: ${res.status}`);
-                const vms = await res.json();
-                renderVMs(vms);
-            } catch (e) {
-                console.error("Failed to fetch VMs", e);
-                document.getElementById('last-updated').textContent = 'Connection Error';
-                document.getElementById('last-updated').classList.add('text-red-500');
-            }
-
-            try {
-                const res = await fetch('/api/snapshots');
-                if (!res.ok) throw new Error(`API Error: ${res.status}`);
-                const snaps = await res.json();
-                renderSnapshots(snaps);
-            } catch (e) {
-                console.error("Failed to fetch snapshots", e);
-            }
-        }
-
-        // Bulk Action State & Functions
-        let selectedVmIds = new Set();
-        let selectedSnapshotIds = new Set();
-
-        function toggleSelectAll() {
-            const masterCheckbox = document.getElementById('select-all-vms');
-            const checkboxes = document.querySelectorAll('.vm-checkbox');
-            const isChecked = masterCheckbox.checked;
-
-            checkboxes.forEach(cb => {
-                cb.checked = isChecked;
-                if (isChecked) {
-                    selectedVmIds.add(cb.value);
-                } else {
-                    selectedVmIds.delete(cb.value);
-                }
-            });
-            updateBulkDeleteUI();
-        }
-
-        function toggleVmSelection(checkbox) {
-            const id = checkbox.value;
-            if (checkbox.checked) {
-                selectedVmIds.add(id);
-            } else {
-                selectedVmIds.delete(id);
-            }
-            updateMasterCheckbox();
-            updateBulkDeleteUI();
-        }
-
-        function updateMasterCheckbox() {
-            const masterCheckbox = document.getElementById('select-all-vms');
-            const checkboxes = document.querySelectorAll('.vm-checkbox');
-            
-            if (!masterCheckbox) return;
-
-            if (checkboxes.length > 0 && Array.from(checkboxes).every(cb => cb.checked)) {
-                masterCheckbox.checked = true;
-                masterCheckbox.indeterminate = false;
-            } else if (checkboxes.length > 0 && Array.from(checkboxes).some(cb => cb.checked)) {
-                masterCheckbox.checked = false;
-                masterCheckbox.indeterminate = true;
-            } else {
-                masterCheckbox.checked = false;
-                masterCheckbox.indeterminate = false;
-            }
-        }
-
-        function updateBulkDeleteUI() {
-            const btn = document.getElementById('btn-bulk-delete');
-            const countSpan = document.getElementById('selected-count');
-            
-            if (!btn || !countSpan) return;
-
-            countSpan.textContent = selectedVmIds.size;
-            if (selectedVmIds.size > 0) {
-                btn.classList.remove('hidden');
-            } else {
-                btn.classList.add('hidden');
-            }
-        }
-
-        async function deleteSelectedVms() {
-            if (selectedVmIds.size === 0) return;
-
-            showConfirmModal(
-                'Delete Selected VMs',
-                `Are you sure you want to delete ${selectedVmIds.size} selected VMs? This action cannot be undone.`,
-                async () => {
-                    const idsToDelete = Array.from(selectedVmIds);
-                    console.log('Deleting VMs', idsToDelete);
-                    setLoading('btn-bulk-delete', true);
-
-                    const promises = idsToDelete.map(id =>
-                        fetch(`/api/vms/${id}`, { method: 'DELETE' })
-                            .then(res => {
-                                if (!res.ok) console.error(`Failed to delete ${id}`);
-                                return res;
-                            })
-                            .catch(e => console.error(`Error deleting ${id}`, e))
-                    );
-
-                    try {
-                        await Promise.all(promises);
-                        selectedVmIds.clear();
-                        const masterCheckbox = document.getElementById('select-all-vms');
-                        if (masterCheckbox) {
-                            masterCheckbox.checked = false;
-                            masterCheckbox.indeterminate = false;
-                        }
-                        updateBulkDeleteUI();
-                        refreshData();
-                    } catch (e) {
-                         alert('Error during bulk deletion: ' + e);
-                    } finally {
-                         setLoading('btn-bulk-delete', false);
-                    }
-                }
-            );
-        }
-
-        function toggleSelectAllSnapshots() {
-            const masterCheckbox = document.getElementById('select-all-snapshots');
-            const checkboxes = document.querySelectorAll('.snapshot-checkbox');
-            const isChecked = masterCheckbox.checked;
-
-            checkboxes.forEach(cb => {
-                cb.checked = isChecked;
-                if (isChecked) {
-                    selectedSnapshotIds.add(cb.value);
-                } else {
-                    selectedSnapshotIds.delete(cb.value);
-                }
-            });
-            updateBulkDeleteSnapshotsUI();
-        }
-
-        function toggleSnapshotSelection(checkbox) {
-            const id = checkbox.value;
-            if (checkbox.checked) {
-                selectedSnapshotIds.add(id);
-            } else {
-                selectedSnapshotIds.delete(id);
-            }
-            updateMasterSnapshotCheckbox();
-            updateBulkDeleteSnapshotsUI();
-        }
-
-        function updateMasterSnapshotCheckbox() {
-            const masterCheckbox = document.getElementById('select-all-snapshots');
-            const checkboxes = document.querySelectorAll('.snapshot-checkbox');
-
-            if (!masterCheckbox) return;
-
-            if (checkboxes.length > 0 && Array.from(checkboxes).every(cb => cb.checked)) {
-                masterCheckbox.checked = true;
-                masterCheckbox.indeterminate = false;
-            } else if (checkboxes.length > 0 && Array.from(checkboxes).some(cb => cb.checked)) {
-                masterCheckbox.checked = false;
-                masterCheckbox.indeterminate = true;
-            } else {
-                masterCheckbox.checked = false;
-                masterCheckbox.indeterminate = false;
-            }
-        }
-
-        function updateBulkDeleteSnapshotsUI() {
-            const btn = document.getElementById('btn-bulk-delete-snapshots');
-            const countSpan = document.getElementById('selected-snapshots-count');
-
-            if (!btn || !countSpan) return;
-
-            countSpan.textContent = selectedSnapshotIds.size;
-            if (selectedSnapshotIds.size > 0) {
-                btn.classList.remove('hidden');
-            } else {
-                btn.classList.add('hidden');
-            }
-        }
-
-        async function deleteSelectedSnapshots() {
-            if (selectedSnapshotIds.size === 0) return;
-
-            showConfirmModal(
-                'Delete Selected Snapshots',
-                `Are you sure you want to delete ${selectedSnapshotIds.size} selected snapshots? This action cannot be undone.`,
-                async () => {
-                    const idsToDelete = Array.from(selectedSnapshotIds);
-                    console.log('Deleting snapshots', idsToDelete);
-                    setLoading('btn-bulk-delete-snapshots', true);
-
-                    const promises = idsToDelete.map(id =>
-                        fetch(`/api/snapshots/${id}`, { method: 'DELETE' })
-                            .then(res => {
-                                if (!res.ok) console.error(`Failed to delete ${id}`);
-                                return res;
-                            })
-                            .catch(e => console.error(`Error deleting ${id}`, e))
-                    );
-
-                    try {
-                        await Promise.all(promises);
-                        selectedSnapshotIds.clear();
-                        const masterCheckbox = document.getElementById('select-all-snapshots');
-                        if (masterCheckbox) {
-                            masterCheckbox.checked = false;
-                            masterCheckbox.indeterminate = false;
-                        }
-                        updateBulkDeleteSnapshotsUI();
-                        refreshData();
-                    } catch (e) {
-                         alert('Error during bulk deletion: ' + e);
-                    } finally {
-                         setLoading('btn-bulk-delete-snapshots', false);
-                    }
-                }
-            );
-        }
-
-        function renderVMs(vms) {
-            const tbody = document.getElementById('vm-list');
-            const noVms = document.getElementById('no-vms');
-            const count = document.getElementById('vm-count');
-
-            // Sync selectedVmIds only if we have VMs (to avoid clearing on temp errors/empty list if that happens)
-            if (vms && vms.length > 0) {
-                const currentVmIds = new Set(vms.map(v => String(v.id)));
-                for (let id of selectedVmIds) {
-                    if (!currentVmIds.has(id)) {
-                        selectedVmIds.delete(id);
-                    }
-                }
-            } else if (vms && vms.length === 0) {
-                // If the list is explicitly empty, we should clear selection? 
-                // Yes, because the VMs are gone.
-                // But we need to distinguish between "empty list" and "failed fetch" (failed fetch doesn't call renderVMs)
-                selectedVmIds.clear();
-            }
-            updateBulkDeleteUI();
-
-            tbody.innerHTML = '';
-            count.textContent = vms.length;
-
-            if (vms.length === 0) {
-                noVms.classList.remove('hidden');
-                const masterCheckbox = document.getElementById('select-all-vms');
-                if (masterCheckbox) {
-                    masterCheckbox.checked = false;
-                    masterCheckbox.indeterminate = false;
-                }
-            } else {
-                noVms.classList.add('hidden');
-                vms.forEach(vm => {
-                    const vmIdStr = String(vm.id);
-                    const isSelected = selectedVmIds.has(vmIdStr);
-                    const displayName = vm.name || vm.image || '';
-                    const shortName = displayName.length > 20 ? `${displayName.slice(0, 17)}...` : displayName;
-                    const row = document.createElement('tr');
-                    row.className = 'group hover:bg-zinc-900/50 transition-colors';
-
-                    // Determine status display
-                    let statusColor = 'emerald';
-                    let statusText = 'Running';
-                    let statusDot = `<span class="relative flex h-2 w-2">
-                             <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                             <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                           </span>`;
-
-                    let actionButtons = '';
-
-                    if (vm.status === 'paused') {
-                        statusColor = 'amber';
-                        statusText = 'Paused';
-                        statusDot = `<span class="relative flex h-2 w-2">
-                             <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
-                           </span>`;
-                        actionButtons = `<button id="btn-resume-${vm.id}" onclick="resumeVm('${vm.id}')" 
-                             class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-700 hover:border-emerald-500 text-zinc-300 hover:text-emerald-400 transition-all bg-transparent">
-                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                             <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Resume</span>
-                           </button>`;
-                    } else if (vm.status === 'stopped') {
-                        statusColor = 'red';
-                        statusText = 'Stopped';
-                        statusDot = `<span class="relative flex h-2 w-2">
-                             <span class="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
-                           </span>`;
-                        actionButtons = `<button id="btn-delete-${vm.id}" onclick="deleteVm('${vm.id}')" 
-                             class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-red-900/50 text-zinc-400 hover:text-red-400 transition-all bg-transparent hover:bg-red-950/10">
-                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                             <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Delete</span>
-                           </button>`;
-                    } else {
-                        // Running
-                        actionButtons = `<button id="btn-pause-${vm.id}" onclick="pauseVm('${vm.id}')" 
-                             class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-700 hover:border-zinc-500 text-zinc-300 hover:text-white transition-all bg-transparent">
-                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                             <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Pause</span>
-                           </button>`;
-                    }
-
-                    // Stop button (only for running/paused)
-                    if (vm.status !== 'stopped') {
-                        actionButtons += `<button id="btn-stop-${vm.id}" onclick="stopVm('${vm.id}')" 
-                                    class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-red-900/50 text-zinc-400 hover:text-red-400 transition-all bg-transparent hover:bg-red-950/10 ml-2">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"></path></svg>
-                                    <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Stop</span>
-                                </button>`;
-
-                        // Add Terminal Button
-                        actionButtons += `<a href="/terminal?id=${vm.id}" target="_blank"
-                                    class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-700 hover:border-blue-500 text-zinc-300 hover:text-blue-400 transition-all bg-transparent ml-2">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
-                                    <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Terminal</span>
-                                </a>`;
-                    }
-
-                    row.innerHTML = `
-                        <td class="pl-6 py-4 w-10">
-                            <input type="checkbox" class="vm-checkbox rounded border-zinc-700 bg-zinc-900 text-white focus:ring-0 focus:ring-offset-0 accent-white" 
-                                value="${vmIdStr}" 
-                                ${isSelected ? 'checked' : ''} 
-                                onclick="toggleVmSelection(this)">
-                        </td>
-                        <td class="px-6 py-4 font-mono text-zinc-400 group-hover:text-zinc-300">
-                            <a href="/vm_details?id=${vm.id}" class="flex flex-col hover:opacity-80 transition-opacity">
-                                <span class="text-white font-medium mb-0.5 hover:underline">${shortName}</span>
-                                <span class="text-xs text-zinc-600">${vm.id.substring(0, 8)}</span>
-                            </a>
-                        </td>
-                        <td class="px-6 py-4 text-zinc-400">${vm.vcpu} vCPU <span class="text-zinc-600 mx-1">/</span> ${vm.mem_mib} MiB</td>
-                        <td class="px-6 py-4">
-                            <div class="flex items-center gap-2">
-                                ${statusDot}
-                                <span class="text-${statusColor}-500 text-xs font-medium uppercase tracking-wide">${statusText}</span>
-                            </div>
-                        </td>
-                        <td class="px-6 py-4 text-right">
-                            <div class="flex justify-end items-center gap-2">
-                                ${actionButtons}
-                                <button onclick="openSnapshotModal('${vm.id}')" 
-                                    class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-zinc-600 text-zinc-400 hover:text-white transition-all bg-transparent ml-2">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
-                                    <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Snapshot</span>
-                                </button>
-                                <button onclick="openRenameVmModal('${vm.id}')" 
-                                    class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-blue-500 text-zinc-400 hover:text-blue-400 transition-all bg-transparent ml-2">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
-                                    <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Rename</span>
-                                </button>
-                            </div>
-                        </td>
-                    `;
-                    tbody.appendChild(row);
-                });
-                updateMasterCheckbox();
-            }
-        }
-
-        function renderSnapshots(snaps) {
-            const tbody = document.getElementById('snapshot-list');
-            const noSnaps = document.getElementById('no-snapshots');
-            const count = document.getElementById('snapshot-count');
-
-            tbody.innerHTML = '';
-
-            if (snaps.length === 0) {
-                noSnaps.classList.remove('hidden');
-                const masterCheckbox = document.getElementById('select-all-snapshots');
-                if (masterCheckbox) {
-                    masterCheckbox.checked = false;
-                    masterCheckbox.indeterminate = false;
-                }
-                selectedSnapshotIds.clear();
-                updateBulkDeleteSnapshotsUI();
-            } else {
-                noSnaps.classList.add('hidden');
-
-                const currentSnapIds = new Set(snaps.map(s => String(s.id)));
-                for (let id of selectedSnapshotIds) {
-                    if (!currentSnapIds.has(id)) {
-                        selectedSnapshotIds.delete(id);
-                    }
-                }
-                updateBulkDeleteSnapshotsUI();
-
-                snaps.forEach(snap => {
-                    const snapIdStr = String(snap.id);
-                    const isSelected = selectedSnapshotIds.has(snapIdStr);
-                    const row = document.createElement('tr');
-                    row.className = 'group hover:bg-zinc-900/50 transition-colors';
-
-                    const displayName = snap.snapshot_name || snap.id;
-                    const shortName = displayName.length > 30 ? `${displayName.slice(0, 27)}...` : displayName;
-
-                    let metadataDisplay = '';
-                    if (snap.metadata && Object.keys(snap.metadata).length > 0) {
-                        const metadataStr = JSON.stringify(snap.metadata);
-                        const truncated = metadataStr.length > 60 ? metadataStr.substring(0, 57) + '...' : metadataStr;
-                        metadataDisplay = `<div class="text-xs text-zinc-500 font-mono mt-1 truncate" title="${metadataStr.replace(/"/g, '&quot;')}">${truncated}</div>`;
-                    }
-
-                    row.innerHTML = `
-                        <td class="pl-6 py-4 w-10">
-                            <input type="checkbox" class="snapshot-checkbox rounded border-zinc-700 bg-zinc-900 text-white focus:ring-0 focus:ring-offset-0 accent-white"
-                                value="${snapIdStr}"
-                                ${isSelected ? 'checked' : ''}
-                                onclick="toggleSnapshotSelection(this)">
-                        </td>
-                        <td class="px-6 py-4">
-                            <div class="font-medium text-white">${shortName}</div>
-                            ${metadataDisplay}
-                        </td>
-                        <td class="px-6 py-4 text-zinc-500 font-mono text-xs truncate max-w-xs">${snap.path}</td>
-                        <td class="px-6 py-4 text-right">
-                            <div class="flex justify-end items-center gap-2">
-                                <button onclick="openRestoreModal('${snap.id}')"
-                                    class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-emerald-500 text-zinc-400 hover:text-emerald-400 transition-all bg-transparent">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
-                                    <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Restore</span>
-                                </button>
-                                <button onclick="openEditSnapshotMetadataModal('${snap.id}')"
-                                    class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-white text-zinc-400 hover:text-white transition-all bg-transparent">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
-                                    <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Edit</span>
-                                </button>
-                                <button id="btn-delete-snap-${snap.id}" onclick="deleteSnapshot('${snap.id}')"
-                                    class="group/btn relative btn-icon h-8 w-8 flex items-center justify-center rounded border border-zinc-800 hover:border-red-900/50 text-zinc-400 hover:text-red-400 transition-all bg-transparent hover:bg-red-950/10">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                                    <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/btn:block px-2 py-1 bg-zinc-800 text-white text-xs rounded shadow-lg whitespace-nowrap border border-zinc-700 z-50 pointer-events-none">Delete</span>
-                                </button>
-                            </div>
-                        </td>
-                    `;
-                    tbody.appendChild(row);
-                });
-                updateMasterSnapshotCheckbox();
-            }
-
-            count.textContent = snaps.length;
-        }
-
-        function setLoading(btnId, isLoading) {
-            const btn = document.getElementById(btnId);
-            if (!btn) return;
-
-            if (isLoading) {
-                if (!btn.dataset.originalHtml) btn.dataset.originalHtml = btn.innerHTML;
-                btn.disabled = true;
-                btn.classList.add('opacity-50', 'cursor-not-allowed');
-                btn.innerHTML = `<svg class="animate-spin h-3.5 w-3.5 text-current" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>`;
-            } else {
-                btn.disabled = false;
-                btn.classList.remove('opacity-50', 'cursor-not-allowed');
-                if (btn.dataset.originalHtml) {
-                    btn.innerHTML = btn.dataset.originalHtml;
-                }
-            }
-        }
-
-        async function stopVm(id) {
-            showConfirmModal(
-                'Stop VM',
-                'Are you sure you want to stop this VM? You will lose any unsaved state.',
-                async () => {
-                    console.log('Stopping VM', id);
-                    setLoading(`btn-stop-${id}`, true);
-                    try {
-                        await fetch(`/api/vms/${id}/stop`, { method: 'POST' });
-                        refreshData();
-                    } catch (e) {
-                        console.error('Failed to stop VM', e);
-                        alert('Failed to stop VM: ' + e);
-                        setLoading(`btn-stop-${id}`, false);
-                    }
-                }
-            );
-        }
-
-        async function pauseVm(id) {
-            setLoading(`btn-pause-${id}`, true);
-            try {
-                await fetch(`/api/vms/${id}/pause`, { method: 'POST' });
-                refreshData();
-            } catch (e) {
-                alert('Failed to pause VM: ' + e);
-                setLoading(`btn-pause-${id}`, false);
-            }
-        }
-
-
-        async function resumeVm(id) {
-            console.log('Resuming VM', id);
-            setLoading(`btn-resume-${id}`, true);
-            try {
-                await fetch(`/api/vms/${id}/resume`, { method: 'POST' });
-                refreshData();
-            } catch (e) {
-                console.error('Failed to resume VM', e);
-                alert('Failed to resume VM: ' + e);
-                setLoading(`btn-resume-${id}`, false);
-            }
-        }
-
-        async function deleteVm(id) {
-            showConfirmModal(
-                'Delete VM',
-                'Are you sure you want to delete this VM? This action cannot be undone and all data will be lost.',
-                async () => {
-                    console.log('Deleting VM', id);
-                    setLoading(`btn-delete-${id}`, true);
-                    try {
-                        await fetch(`/api/vms/${id}`, { method: 'DELETE' });
-                        refreshData();
-                    } catch (e) {
-                        console.error('Failed to delete VM', e);
-                        alert('Failed to delete VM: ' + e);
-                        setLoading(`btn-delete-${id}`, false);
-                    }
-                }
-            );
-        }
-
-        async function deleteSnapshot(id) {
-            showConfirmModal(
-                'Delete Snapshot',
-                'Are you sure you want to delete this snapshot? This action cannot be undone.',
-                async () => {
-                    console.log('Deleting snapshot', id);
-                    setLoading(`btn-delete-snap-${id}`, true);
-                    try {
-                        await fetch(`/api/snapshots/${id}`, { method: 'DELETE' });
-                        refreshData();
-                    } catch (e) {
-                        console.error('Failed to delete snapshot', e);
-                        alert('Failed to delete snapshot: ' + e);
-                        setLoading(`btn-delete-snap-${id}`, false);
-                    }
-                }
-            );
-        }
-
-        // Edit Snapshot Metadata Functions
-        let currentEditSnapshotId = null;
-        let editingSnapshotMetadata = {};
-        let editingSnapshotName = '';
-
-        async function openEditSnapshotMetadataModal(snapshotId) {
-            currentEditSnapshotId = snapshotId;
-            const keyInput = document.getElementById('new-snapshot-metadata-key');
-            const valueInput = document.getElementById('new-snapshot-metadata-value');
-            const nameInput = document.getElementById('edit-snapshot-name');
-
-            // Show the snapshot ID (read-only)
-            document.getElementById('edit-snapshot-id').textContent = snapshotId;
-
-            // Fetch current snapshot data
-            try {
-                const res = await fetch('/api/snapshots');
-                if (!res.ok) throw new Error(`API Error: ${res.status}`);
-                const snapshots = await res.json();
-
-                const snapshot = snapshots.find(s => s.id === snapshotId);
-                if (snapshot) {
-                    // Copy current metadata to editing object
-                    editingSnapshotMetadata = { ...(snapshot.metadata || {}) };
-                    // Set current name
-                    editingSnapshotName = snapshot.id || '';
-                    nameInput.value = editingSnapshotName;
-                } else {
-                    editingSnapshotMetadata = {};
-                    editingSnapshotName = '';
-                    nameInput.value = '';
-                }
-            } catch (e) {
-                console.error('Failed to fetch snapshot data', e);
-                editingSnapshotMetadata = {};
-                editingSnapshotName = '';
-                nameInput.value = '';
-            }
-
-            // Render entries
-            renderSnapshotMetadataEntries();
-
-            // Clear inputs and error
-            keyInput.value = '';
-            valueInput.value = '';
-            document.getElementById('snapshot-metadata-error').classList.add('hidden');
-
-            // Show modal
-            const modal = document.getElementById('edit-snapshot-metadata-modal');
-            modal.classList.remove('hidden');
-            modal.classList.add('flex');
-            setTimeout(() => nameInput.focus(), 50);
-        }
-
-        function closeEditSnapshotMetadataModal() {
-            const modal = document.getElementById('edit-snapshot-metadata-modal');
-            modal.classList.add('hidden');
-            modal.classList.remove('flex');
-            currentEditSnapshotId = null;
-            editingSnapshotName = '';
-        }
-
-        function renderSnapshotMetadataEntries() {
-            const container = document.getElementById('snapshot-metadata-entries');
-            const entries = Object.entries(editingSnapshotMetadata);
-
-            if (entries.length === 0) {
-                container.innerHTML = '<p class="text-zinc-600 text-sm text-center py-8">No metadata entries. Add some using the form above.</p>';
-                return;
-            }
-
-            container.innerHTML = entries.map(([key, value]) => `
-                <div class="flex items-center gap-3 bg-zinc-900/50 rounded-lg px-4 py-3 border border-zinc-800 hover:border-zinc-700 transition-colors">
-                    <input type="text" value="${escapeHtml(key)}"
-                        class="flex-1 bg-transparent text-zinc-200 text-sm font-medium focus:outline-none min-w-[120px]"
-                        onchange="updateSnapshotMetadataKey('${escapeHtml(key)}', this.value)"
-                        placeholder="Key">
-                    <span class="text-zinc-600 font-light">:</span>
-                    <input type="text" value="${escapeHtml(String(value))}"
-                        class="flex-1 bg-transparent text-zinc-400 text-sm font-mono focus:outline-none"
-                        onchange="updateSnapshotMetadataValue('${escapeHtml(key)}', this.value)"
-                        placeholder="Value">
-                    <button onclick="removeSnapshotMetadataEntry('${escapeHtml(key)}')"
-                        class="p-2 text-zinc-500 hover:text-red-400 hover:bg-red-950/30 rounded-lg transition-all"
-                        title="Remove entry">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                        </svg>
-                    </button>
-                </div>
-            `).join('');
-        }
-
-        function addSnapshotMetadataEntry() {
-            const keyInput = document.getElementById('new-snapshot-metadata-key');
-            const valueInput = document.getElementById('new-snapshot-metadata-value');
-            const errorMsg = document.getElementById('snapshot-metadata-error');
-
-            const key = keyInput.value.trim();
-            const value = valueInput.value.trim();
-
-            if (!key) {
-                errorMsg.textContent = 'Key is required';
-                errorMsg.classList.remove('hidden');
-                return;
-            }
-
-            if (key in editingSnapshotMetadata) {
-                errorMsg.textContent = 'Key already exists. Edit the existing entry or use a different key.';
-                errorMsg.classList.remove('hidden');
-                return;
-            }
-
-            // Add entry
-            editingSnapshotMetadata[key] = value;
-
-            // Clear inputs
-            keyInput.value = '';
-            valueInput.value = '';
-            errorMsg.classList.add('hidden');
-
-            // Re-render
-            renderSnapshotMetadataEntries();
-
-            // Focus back on key input for rapid entry
-            keyInput.focus();
-        }
-
-        function updateSnapshotMetadataKey(oldKey, newKey) {
-            if (!newKey.trim()) {
-                renderSnapshotMetadataEntries(); // Revert
-                return;
-            }
-
-            if (newKey !== oldKey && newKey in editingSnapshotMetadata) {
-                renderSnapshotMetadataEntries(); // Revert - key already exists
-                return;
-            }
-
-            const value = editingSnapshotMetadata[oldKey];
-            delete editingSnapshotMetadata[oldKey];
-            editingSnapshotMetadata[newKey] = value;
-        }
-
-        function updateSnapshotMetadataValue(key, newValue) {
-            editingSnapshotMetadata[key] = newValue;
-        }
-
-        function removeSnapshotMetadataEntry(key) {
-            delete editingSnapshotMetadata[key];
-            renderSnapshotMetadataEntries();
-        }
-
-        async function confirmEditSnapshotMetadata() {
-            if (!currentEditSnapshotId) return;
-
-            const errorMsg = document.getElementById('snapshot-metadata-error');
-            const saveBtn = document.getElementById('edit-snapshot-save-btn');
-
-            const newName = document.getElementById('edit-snapshot-name').value.trim();
-
-            // Disable button and show loading
-            saveBtn.disabled = true;
-            saveBtn.innerHTML = '<svg class="animate-spin h-4 w-4 mr-2 inline" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>Saving...';
-            errorMsg.classList.add('hidden');
-
-            try {
-                // Update name if changed
-                if (newName && newName !== editingSnapshotName) {
-                    const nameRes = await fetch(`/api/snapshots/${currentEditSnapshotId}/name`, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ name: newName })
-                    });
-
-                    if (!nameRes.ok) {
-                        const detail = await nameRes.text().catch(() => '');
-                        throw new Error(detail || `Name update failed with status ${nameRes.status}`);
-                    }
-                }
-
-                // Update metadata
-                const res = await fetch(`/api/snapshots/${currentEditSnapshotId}/metadata`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ metadata: editingSnapshotMetadata })
-                });
-
-                if (!res.ok) {
-                    const detail = await res.text().catch(() => '');
-                    throw new Error(detail || `Metadata update failed with status ${res.status}`);
-                }
-
-                closeEditSnapshotMetadataModal();
-                refreshData();
-            } catch (e) {
-                console.error('Failed to save changes', e);
-                errorMsg.textContent = 'Failed to save: ' + e.message;
-                errorMsg.classList.remove('hidden');
-            } finally {
-                saveBtn.disabled = false;
-                saveBtn.innerHTML = 'Save Changes';
-            }
-        } 
-        
-        // Rename VM Functions
-        let currentRenameVmId = null;
-        
-        function openRenameVmModal(vmId) {
-            currentRenameVmId = vmId;
-            const modal = document.getElementById('rename-vm-modal');
-            modal.classList.remove('hidden');
-            modal.classList.add('flex');
-            document.getElementById('rename-vm-id').textContent = vmId.substring(0, 16);
-            document.getElementById('rename-vm-name').value = '';
-            setTimeout(() => document.getElementById('rename-vm-name').focus(), 50);
-        }
-        
-        function closeRenameVmModal() {
-            const modal = document.getElementById('rename-vm-modal');
-            modal.classList.add('hidden');
-            modal.classList.remove('flex');
-            currentRenameVmId = null;
-        }
-        
-        async function confirmRenameVm() {
-            const newName = document.getElementById('rename-vm-name').value.trim();
-            
-            if (!newName) {
-                alert('Please enter a name.');
-                return;
-            }
-            
-            if (!currentRenameVmId) return;
-            
-            setLoading('rename-vm-save-btn', true);
-            
-            try {
-                const res = await fetch(`/api/vms/${currentRenameVmId}/name`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name: newName })
-                });
-                
-                if (!res.ok) {
-                    throw new Error(`Rename failed with status ${res.status}`);
-                }
-                
-                closeRenameVmModal();
-                refreshData();
-            } catch (e) {
-                alert('Rename failed: ' + e.message);
-            } finally {
-                setLoading('rename-vm-save-btn', false);
-            }
-        }
-
-        // Handle Enter key in rename modals
-        document.addEventListener('DOMContentLoaded', () => {
-            const vmNameInput = document.getElementById('rename-vm-name');
-            vmNameInput?.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter') confirmRenameVm();
-            });
+        const r2 = await fetch(`/api/snapshots/${currentEditSnapshotId}/metadata`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ metadata: editingSnapshotMetadata })
         });
+        if (!r2.ok) throw new Error(await r2.text().catch(() => r2.status));
+        closeEditSnapshotMetadataModal(); refreshData();
+      } catch (e) { errEl.textContent = 'Failed to save: ' + e.message; errEl.style.display = 'block'; }
+      finally { saveBtn.disabled = false; saveBtn.innerHTML = 'Save Changes'; }
+    }
 
-        // Close modals when clicking outside
-        document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('rename-vm-modal').addEventListener('click', (e) => {
-                if (e.target.id === 'rename-vm-modal') closeRenameVmModal();
-            });
-        });
-        
-        // Handle Enter key in add form
-        document.addEventListener('DOMContentLoaded', () => {
-            const keyInput = document.getElementById('new-snapshot-metadata-key');
-            const valueInput = document.getElementById('new-snapshot-metadata-value');
+    // ── Confirm Modal ─────────────────────────────────────────────
+    let confirmCallback = null;
 
-            keyInput?.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter') {
-                    valueInput.focus();
-                }
-            });
+    function showConfirmModal(title, message, onConfirm) {
+      confirmCallback = onConfirm;
+      document.getElementById('confirm-title').textContent = title;
+      document.getElementById('confirm-message').textContent = message;
+      openModal('confirm-modal');
+    }
 
-            valueInput?.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter') {
-                    addSnapshotMetadataEntry();
-                }
-            });
-        });
+    function closeConfirmModal() { closeModalById('confirm-modal'); confirmCallback = null; }
 
-        // Close modal when clicking outside
-        document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('edit-snapshot-metadata-modal').addEventListener('click', (e) => {
-                if (e.target.id === 'edit-snapshot-metadata-modal') {
-                    closeEditSnapshotMetadataModal();
-                }
-            });
-        });
+    async function confirmAction() {
+      if (confirmCallback) {
+        const cb = confirmCallback;
+        closeConfirmModal();
+        try { await cb(); } catch (e) { console.error(e); }
+      }
+    }
 
-        // Confirmation Modal Functions
-        let confirmCallback = null;
+    // ── Modal helpers ─────────────────────────────────────────────
+    function openModal(id) { document.getElementById(id).classList.add('open'); }
+    function closeModalById(id) { document.getElementById(id).classList.remove('open'); }
 
-        function showConfirmModal(title, message, onConfirm) {
-            confirmCallback = onConfirm;
-            document.getElementById('confirm-title').textContent = title;
-            document.getElementById('confirm-message').textContent = message;
-            const modal = document.getElementById('confirm-modal');
-            modal.classList.remove('hidden');
-            modal.classList.add('flex');
-        }
+    // ── Keyboard / click-outside ──────────────────────────────────
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Escape') return;
+      closeModal(); closeConfirmModal(); closeRestoreModal();
+      closeEditSnapshotMetadataModal(); closeRenameVmModal();
+    });
 
-        function closeConfirmModal() {
-            const modal = document.getElementById('confirm-modal');
-            modal.classList.add('hidden');
-            modal.classList.remove('flex');
-            confirmCallback = null;
-        }
+    document.addEventListener('DOMContentLoaded', () => {
+      ['snapshot-modal','restore-modal','rename-vm-modal','edit-snapshot-metadata-modal','confirm-modal'].forEach(id => {
+        document.getElementById(id).addEventListener('click', e => { if (e.target.id === id) closeModalById(id); });
+      });
 
-        async function confirmAction() {
-            if (confirmCallback) {
-                const callback = confirmCallback;
-                closeConfirmModal();
-                try {
-                    await callback();
-                } catch (e) {
-                    console.error("Error in confirm callback:", e);
-                }
-            }
-        }
+      document.getElementById('rename-vm-name')?.addEventListener('keydown', e => { if (e.key === 'Enter') confirmRenameVm(); });
+      document.getElementById('new-snapshot-metadata-key')?.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('new-snapshot-metadata-value').focus(); });
+      document.getElementById('new-snapshot-metadata-value')?.addEventListener('keydown', e => { if (e.key === 'Enter') addSnapshotMetadataEntry(); });
+    });
 
-        function openSnapshotModal(id) {
-            currentVmId = id;
-            const modal = document.getElementById('snapshot-modal');
-            modal.classList.remove('hidden');
-            modal.classList.add('flex');
-            setTimeout(() => document.getElementById('snapshot-name').focus(), 50);
-        }
-
-        function closeModal() {
-            const modal = document.getElementById('snapshot-modal');
-            modal.classList.add('hidden');
-            modal.classList.remove('flex');
-            currentVmId = null;
-            document.getElementById('snapshot-name').value = '';
-            document.getElementById('snapshot-metadata').value = '';
-        }
-
-        async function confirmSnapshot() {
-            const name = document.getElementById('snapshot-name').value.trim();
-            const metadataStr = document.getElementById('snapshot-metadata').value.trim();
-
-            if (!name) {
-                alert('Please enter a snapshot name.');
-                return;
-            }
-            if (!currentVmId) {
-                alert('No VM selected for snapshot.');
-                return;
-            }
-
-            // Validate metadata JSON if provided
-            let metadata = null;
-            if (metadataStr) {
-                try {
-                    metadata = JSON.parse(metadataStr);
-                } catch (e) {
-                    alert('Invalid JSON in metadata field: ' + e.message);
-                    return;
-                }
-            }
-
-            setLoading('snapshot-save-btn', true);
-
-            try {
-                const requestBody = { name };
-                if (metadata !== null) {
-                    requestBody.metadata = metadata;
-                }
-
-                const res = await fetch(`/api/vms/${currentVmId}/snapshot`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(requestBody)
-                });
-                if (!res.ok) {
-                    const detail = await res.text().catch(() => '');
-                    throw new Error(detail || `Snapshot failed with status ${res.status}`);
-                }
-                closeModal();
-                refreshData();
-            } catch (e) {
-                const message = e?.message || e || 'Unknown error';
-                alert('Snapshot failed: ' + message);
-            } finally {
-                setLoading('snapshot-save-btn', false);
-            }
-        }
-
-        // Close modal on escape
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                closeModal();
-                closeConfirmModal();
-                closeRestoreModal();
-                closeEditSnapshotMetadataModal();
-                closeRenameVmModal();
-            }
-        });
-
-        // Initial load
-        refreshData();
-        // Auto refresh every 5s
-        setInterval(refreshData, 5000);
-    </script>
+    // ── Init ──────────────────────────────────────────────────────
+    refreshData();
+    setInterval(refreshData, 5000);
+  </script>
 </body>
-
 </html>
