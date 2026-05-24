@@ -7,7 +7,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/HACKE-RC/Bandsox.git",
-    "directory": "bandsox-sdk"
+    "directory": "sdk"
   },
   "homepage": "https://github.com/HACKE-RC/Bandsox#readme",
   "bugs": {
