@@ -82,61 +82,11 @@ Start the server:
 sudo python3 -m bandsox.cli serve --host 0.0.0.0 --port 8000
 ```
 
-Visit `http://localhost:8000` to access the dashboard. Authentication is off by default -- see the [Authentication](#authentication) section to enable it.
+Visit `http://localhost:8000` to access the dashboard. Authentication is off by default -- see [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) to enable it.
 
 ### Authentication
 
-Auth is off by default. All endpoints are open until you explicitly enable it.
-
-To turn it on:
-
-```bash
-sudo bandsox auth init --storage /var/lib/sandbox
-```
-
-This creates `auth.json` in the storage directory and prints an admin password and API key. Save both -- the API key is only shown once. The CLI will offer to save the key to `~/.bandsox/credentials` for you.
-
-Once enabled, BandSox uses two auth methods:
-
-**API keys** for programmatic access (CLI, SDK, direct HTTP calls). Pass them as `Authorization: Bearer <key>` headers.
-
-**Session cookies** for the browser dashboard. Log in with the admin password at `/login`. Sessions are signed tokens that survive server restarts.
-
-To disable auth again, delete `auth.json` from the storage directory.
-
-#### CLI auth commands
-
-```bash
-# Enable auth (generates password + API key)
-sudo bandsox auth init --storage /var/lib/sandbox
-
-# Set or reset the admin password
-sudo bandsox auth set-password --storage /var/lib/sandbox
-
-# Create a new API key
-bandsox auth create-key my-key
-
-# List and revoke keys
-bandsox auth list-keys
-bandsox auth revoke-key bsx_k_<id>
-```
-
-#### SDK auth
-
-TypeScript:
-
-```ts
-const bs = new BandSox({
-  baseUrl: "http://localhost:8000",
-  headers: { Authorization: "Bearer bsx_your_key_here" },
-});
-```
-
-Python:
-
-```python
-bs = BandSox("http://localhost:8000", headers={"Authorization": "Bearer bsx_your_key_here"})
-```
+Auth is off by default. Turn it on with `sudo bandsox auth init --storage /var/lib/sandbox`. See [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) for the full setup, CLI commands, SDK examples, and endpoint reference.
 
 ### CLI
 
@@ -218,15 +168,6 @@ BandSox has four main modules:
 - `bandsox.server` -- FastAPI backend for the web dashboard and REST API, with built-in authentication.
 - `bandsox.auth` -- optional authentication. When `auth.json` exists, enforces API key and session auth. Stores hashed keys and a signing secret. Sessions are HMAC-signed tokens (no server-side state). Rate-limits login attempts.
 
-### Communication
-
-Vsock (primary):
-- VMs talk to the host via `AF_VSOCK` sockets
-- Firecracker forwards vsock connections to Unix domain sockets
-
-Serial (fallback):
-- Used when vsock is unavailable (e.g., custom kernels without `virtio-vsock`)
-
 ### Storage layout
 
 Default: `/var/lib/bandsox` (override with `BANDSOX_STORAGE` env var)
@@ -295,28 +236,6 @@ rm -rf "$TMP"
 Use it with `bandsox init --rootfs-url ./bandsox-base.ext4`.
 
 You can also skip the base rootfs entirely -- BandSox builds per-image rootfs on demand from Docker images when you call `bandsox create <image>`.
-
-## Storage and artifacts
-
-- Large artifacts (ext4 rootfs images, snapshots, `vmlinux`, CNI binaries) are not tracked in git. `bandsox init` downloads them into `storage/` and `cni/bin/`.
-- Default storage path is `/var/lib/sandbox`; override with `BANDSOX_STORAGE` or `--storage`.
-- You can pre-seed a base rootfs via `--rootfs-url file://...`, or let BandSox build per-image rootfs from Docker images on demand.
-
-## Verification and testing
-
-`tests/` holds the hermetic pytest suite plus a few sudo-only smoke scripts
-that boot real microVMs:
-
-- `tests/smoke_bandsox.py` -- general boot/lifecycle smoke
-- `tests/smoke_go_agent.py` -- full guest-agent protocol sweep
-- `tests/smoke_internet.py` -- network connectivity inside the VM
-- `tests/benchmark_go_agent.py` -- guest-agent latency benchmark
-
-Run the unit tests with `uv run pytest`. Smoke scripts need sudo:
-
-```bash
-sudo env PATH=$PATH uv run python tests/smoke_bandsox.py
-```
 
 ## License
 

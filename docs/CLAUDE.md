@@ -64,14 +64,10 @@ sudo python3 tests/smoke_internet.py
 
 ### Authentication
 
-Auth is off by default. Enable it with `bandsox auth init`, which creates `auth.json` in the storage directory. When `auth.json` exists, all endpoints require auth. When it doesn't, everything is open.
-
-Two auth mechanisms, checked by a single FastAPI dependency:
-
-1. **API keys**: `Authorization: Bearer <key>` header. For CLI, SDK, and direct API calls. Keys stored as SHA-256 hashes in `{storage_dir}/auth.json`.
-2. **Session cookies**: `bandsox_session` cookie. For the browser dashboard. Created via `/api/auth/login` with the admin password. Sessions are HMAC-signed tokens (expiry timestamp + SHA-256 signature), so they survive server restarts. The signing secret is in `auth.json`.
-
-WebSocket terminal uses a `token=` query parameter since browser WebSocket API can't send custom headers.
+See [AUTHENTICATION.md](AUTHENTICATION.md) for the full model. TL;DR: off by
+default, enable with `bandsox auth init`, two mechanisms (Bearer API keys
+and HMAC-signed session cookies) checked by a single FastAPI dependency,
+WebSocket terminal uses a `token=` query parameter.
 
 CLI credentials are stored at `~/.bandsox/credentials`.
 
