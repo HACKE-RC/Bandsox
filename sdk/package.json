@@ -1,6 +1,6 @@
 {
   "name": "bandsox",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "TypeScript client for managing Firecracker microVMs through the BandSox REST API",
   "author": "rc <crretsim@gmail.com>",
   "license": "Apache-2.0",
