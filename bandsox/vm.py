@@ -2342,6 +2342,7 @@ class MicroVM:
                 finally:
                     self.vsock_listener.unregister_pending_buffer(cmd_id)
 
+            agent_total_lines = None
             if raw_bytes is None:
                 result = {
                     "mode": None,
@@ -2453,9 +2454,10 @@ class MicroVM:
                             f"Agent read failed for {path}; trying debugfs fallback: {exc}"
                         )
                         break
+                agent_total_lines = result.get("agent_total_lines")
 
             if raw_bytes is not None:
-                agent_tl = result.get("agent_total_lines")
+                agent_tl = agent_total_lines
                 if show_header or show_footer or show_line_numbers:
                     return self._format_file_content(
                         raw_bytes, offset, limit, show_line_numbers,

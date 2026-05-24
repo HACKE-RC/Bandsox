@@ -1285,16 +1285,13 @@ class BandSox:
         # This limits functionality (no stdin/stdout access).
         vm = ManagedMicroVM(vm_id, str(socket_path), self)
 
-        # Populate rootfs_path from metadata if available
         meta = self._get_metadata(vm_id)
-        if meta and "rootfs_path" in meta:
-            vm.rootfs_path = meta["rootfs_path"]
-
-        if meta and "network_config" in meta:
-            vm.network_config = meta["network_config"]
-
-        if meta and "env_vars" in meta:
-            vm.env_vars = meta["env_vars"]
+        if meta:
+            for key in ("rootfs_path", "network_config", "env_vars"):
+                if key in meta:
+                    setattr(vm, key, meta[key])
+            if meta.get("agent_ready"):
+                vm.agent_ready = True
 
         return vm
 
