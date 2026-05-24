@@ -99,12 +99,25 @@
           Stopped <span class="count" id="count-stopped">0</span>
         </button>
 
-        <div style="margin-left:auto;">
-          <button id="btn-bulk-delete-vms" class="bulk-delete-btn" onclick="deleteSelectedVms()">
-            <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-            </svg>
-            Delete · <span id="selected-vm-count">0</span>
+        <div id="bulk-actions-vms" style="display:none;margin-left:auto;align-items:center;gap:2px;">
+          <span style="font-size:10.5px;color:var(--text-ghost);letter-spacing:0.08em;text-transform:uppercase;margin-right:8px;">
+            <span id="selected-vm-count">0</span> selected
+          </span>
+          <button id="bulk-pause-btn" onclick="pauseSelectedVms()" class="action-btn warn">
+            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            <span class="tip">Pause</span>
+          </button>
+          <button id="bulk-resume-btn" onclick="resumeSelectedVms()" class="action-btn success">
+            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            <span class="tip">Resume</span>
+          </button>
+          <button id="bulk-stop-btn" onclick="stopSelectedVms()" class="action-btn danger">
+            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/></svg>
+            <span class="tip">Stop</span>
+          </button>
+          <button id="bulk-delete-btn" onclick="deleteSelectedVms()" class="action-btn danger">
+            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+            <span class="tip">Delete</span>
           </button>
         </div>
       </div>
@@ -310,7 +323,8 @@
         </div>
         <h3 id="confirm-title" style="font-size:15px;font-weight:600;color:var(--text);margin:0;">Confirm Action</h3>
       </div>
-      <p id="confirm-message" style="font-size:13px;color:var(--text-muted);margin:0 0 22px;padding-left:48px;">Are you sure you want to proceed?</p>
+      <p id="confirm-message" style="font-size:13px;color:var(--text-muted);margin:0 0 8px;padding-left:48px;">Are you sure you want to proceed?</p>
+      <div id="confirm-details" style="display:none;margin:0 0 16px 48px;font-size:12.5px;color:var(--text-muted);line-height:1.45;"></div>
       <div style="display:flex;justify-content:flex-end;gap:8px;">
         <button class="btn-ghost" onclick="closeConfirmModal()">Cancel</button>
         <button class="btn-danger" id="confirm-action-btn" onclick="confirmAction()">Confirm</button>
@@ -328,9 +342,13 @@
     const vmSelection = createSelectionManager({
       masterCheckboxId: 'select-all-vms',
       checkboxClass: 'vm-checkbox',
-      bulkBtnId: 'btn-bulk-delete-vms',
+      bulkBtnId: 'bulk-actions-vms',
       countSpanId: 'selected-vm-count',
     });
+
+    // Hook the bulk UI updater so action buttons adapt to mixed VM states (running/paused/stopped)
+    const _origVmUpdateBulk = vmSelection.updateBulkUI;
+    vmSelection.updateBulkUI = () => { _origVmUpdateBulk(); updateBulkVmActions(); };
 
     const snapSelection = createSelectionManager({
       masterCheckboxId: 'select-all-snapshots',
@@ -352,6 +370,36 @@
     let allVms = [];
     let currentFilter = 'all';
     let currentPage = 1;
+
+    // ── Bulk action helpers (handle mixed states in selection) ─────
+    function getSelectedVmObjects() {
+      const ids = vmSelection.selected;
+      return allVms.filter(v => ids.has(String(v.id)));
+    }
+
+    function summarizeBulkStates(vms) {
+      const counts = { running: 0, paused: 0, stopped: 0, other: 0 };
+      for (const v of vms) {
+        if (counts[v.status] != null) counts[v.status]++;
+        else counts.other++;
+      }
+      return counts;
+    }
+
+    function updateBulkVmActions() {
+      const vms = getSelectedVmObjects();
+      const counts = summarizeBulkStates(vms);
+
+      const btnPause = document.getElementById('bulk-pause-btn');
+      const btnResume = document.getElementById('bulk-resume-btn');
+      const btnStop = document.getElementById('bulk-stop-btn');
+      const btnDelete = document.getElementById('bulk-delete-btn');
+
+      if (btnPause) btnPause.style.display = counts.running > 0 ? 'inline-flex' : 'none';
+      if (btnResume) btnResume.style.display = counts.paused > 0 ? 'inline-flex' : 'none';
+      if (btnStop) btnStop.style.display = (counts.running + counts.paused) > 0 ? 'inline-flex' : 'none';
+      if (btnDelete) btnDelete.style.display = vms.length > 0 ? 'inline-flex' : 'none';
+    }
 
     // ── Filter / Search / Pagination ──────────────────────────────
     function setFilter(filter) {
@@ -605,19 +653,73 @@
       }
     }
 
-    // ── Bulk delete ───────────────────────────────────────────────
+    // ── Bulk VM actions (respect per-VM state; handle mixed selections) ─
+    async function pauseSelectedVms() {
+      const targets = getSelectedVmObjects().filter(v => v.status === 'running').map(v => String(v.id));
+      if (!targets.length) return;
+      await Promise.all(targets.map(id =>
+        fetch(`/api/vms/${id}/pause`, { method: 'POST' }).catch(e => console.error('pause ' + id, e))
+      ));
+      vmSelection.clear();
+      refreshData();
+    }
+
+    async function resumeSelectedVms() {
+      const targets = getSelectedVmObjects().filter(v => v.status === 'paused').map(v => String(v.id));
+      if (!targets.length) return;
+      await Promise.all(targets.map(id =>
+        fetch(`/api/vms/${id}/resume`, { method: 'POST' }).catch(e => console.error('resume ' + id, e))
+      ));
+      vmSelection.clear();
+      refreshData();
+    }
+
+    async function stopSelectedVms() {
+      const sel = getSelectedVmObjects();
+      const targets = sel.filter(v => v.status === 'running' || v.status === 'paused');
+      if (!targets.length) return;
+
+      const counts = summarizeBulkStates(targets);
+      const n = targets.length;
+      const s = n === 1 ? '' : 's';
+      const title = 'Stop Selected VMs';
+      const msg = `Stop ${n} selected VM${s}? Unsaved state will be lost for any running VMs.`;
+
+      let details = '';
+      if (counts.running) details += `<div>• <span style="color:#f87171">${counts.running} running</span> — state will be lost</div>`;
+      if (counts.paused) details += `<div>• ${counts.paused} paused</div>`;
+
+      showConfirmModal(title, msg, async () => {
+        await Promise.all(targets.map(v =>
+          fetch(`/api/vms/${v.id}/stop`, { method: 'POST' }).catch(e => console.error('stop ' + v.id, e))
+        ));
+        vmSelection.clear();
+        refreshData();
+      }, details);
+    }
+
     async function deleteSelectedVms() {
-      if (!vmSelection.selected.size) return;
-      showConfirmModal('Delete Selected VMs',
-        `Delete ${vmSelection.selected.size} selected VM${vmSelection.selected.size > 1 ? 's' : ''}? This cannot be undone.`,
-        async () => {
-          setLoading('btn-bulk-delete-vms', true);
-          await Promise.all(Array.from(vmSelection.selected).map(id => fetch(`/api/vms/${id}`, { method: 'DELETE' }).catch(console.error)));
-          vmSelection.clear();
-          setLoading('btn-bulk-delete-vms', false);
-          refreshData();
-        }
-      );
+      const sel = getSelectedVmObjects();
+      if (!sel.length) return;
+
+      const counts = summarizeBulkStates(sel);
+      const n = sel.length;
+      const s = n === 1 ? '' : 's';
+      const title = 'Delete Selected VMs';
+      const msg = `Delete ${n} selected VM${s}? This cannot be undone.`;
+
+      let details = '';
+      if (counts.running) details += `<div>• <span style="color:#f87171">${counts.running} running</span> — state will be lost</div>`;
+      if (counts.paused) details += `<div>• ${counts.paused} paused</div>`;
+      if (counts.stopped) details += `<div>• ${counts.stopped} stopped</div>`;
+
+      showConfirmModal(title, msg, async () => {
+        await Promise.all(sel.map(v =>
+          fetch(`/api/vms/${v.id}`, { method: 'DELETE' }).catch(e => console.error('delete ' + v.id, e))
+        ));
+        vmSelection.clear();
+        refreshData();
+      }, details);
     }
 
     async function deleteSelectedSnapshots() {

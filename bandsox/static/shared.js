@@ -27,14 +27,33 @@ function closeModalById(id) { document.getElementById(id).classList.remove('open
 
 let _confirmCallback = null;
 
-function showConfirmModal(title, message, onConfirm) {
+function showConfirmModal(title, message, onConfirm, detailsHtml = '') {
   _confirmCallback = onConfirm;
   document.getElementById('confirm-title').textContent = title;
   document.getElementById('confirm-message').textContent = message;
+
+  const details = document.getElementById('confirm-details');
+  if (details) {
+    if (detailsHtml && detailsHtml.trim()) {
+      details.innerHTML = detailsHtml;
+      details.style.display = 'block';
+    } else {
+      details.innerHTML = '';
+      details.style.display = 'none';
+    }
+  }
   openModal('confirm-modal');
 }
 
-function closeConfirmModal() { closeModalById('confirm-modal'); _confirmCallback = null; }
+function closeConfirmModal() {
+  closeModalById('confirm-modal');
+  const details = document.getElementById('confirm-details');
+  if (details) {
+    details.innerHTML = '';
+    details.style.display = 'none';
+  }
+  _confirmCallback = null;
+}
 
 async function confirmAction() {
   if (_confirmCallback) {
