@@ -14,7 +14,8 @@
   - `vm.py`: MicroVM management.
   - `agent.py`: Guest agent code.
   - `server.py`: Web server.
-- `verification/`: Verification and test scripts.
+- `tests/`: Pytest suite (`test_*.py`) plus sudo-only smoke and benchmark
+  scripts (`smoke_*.py`, `benchmark_*.py`) that boot real microVMs.
 - `scripts/`: Utility scripts.
 
 ## Running tests
@@ -25,18 +26,18 @@ Unit tests:
 uv run python -m pytest -q
 ```
 
-Verification scripts live in `verification/`. Most need `sudo` (network devices,
-KVM, Firecracker).
+Smoke scripts boot real Firecracker VMs and need `sudo` (network devices,
+KVM, Firecracker). They are not picked up by pytest.
 
 ```bash
-sudo env PATH=$PATH uv run python verification/verify_bandsox.py
-sudo env PATH=$PATH uv run python verification/verify_go_agent.py
+sudo env PATH=$PATH uv run python tests/smoke_bandsox.py
+sudo env PATH=$PATH uv run python tests/smoke_go_agent.py
 ```
 
 Benchmarking:
 
 ```bash
-sudo env PATH=$PATH uv run python verification/benchmark_go_agent.py
+sudo env PATH=$PATH uv run python tests/benchmark_go_agent.py
 ```
 
 On a typical dev machine the benchmark reports ~2.3ms mean `exec_command("true")`

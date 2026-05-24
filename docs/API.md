@@ -189,7 +189,7 @@ partial = vm.get_file_contents(
 ```
 
 Performance note (single VM on typical laptop/desktop): in our benchmark
-(`verification/benchmark_go_agent.py`) we see ~2.3ms mean latency for `exec_command("true")`,
+(`tests/benchmark_go_agent.py`) we see ~2.3ms mean latency for `exec_command("true")`,
 ~190 MiB/s upload for an 8 MiB file, and up to ~1 GiB/s download for an 8 MiB file.
 (Exact numbers vary by host I/O + CPU.)
 

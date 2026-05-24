@@ -304,16 +304,18 @@ You can also skip the base rootfs entirely -- BandSox builds per-image rootfs on
 
 ## Verification and testing
 
-The `verification/` directory has smoke-test scripts:
+`tests/` holds the hermetic pytest suite plus a few sudo-only smoke scripts
+that boot real microVMs:
 
-- `verify_bandsox.py` -- general smoke test
-- `verify_file_ops.py` -- file upload/download
-- `verify_internet.py` -- network connectivity inside the VM
+- `tests/smoke_bandsox.py` -- general boot/lifecycle smoke
+- `tests/smoke_go_agent.py` -- full guest-agent protocol sweep
+- `tests/smoke_internet.py` -- network connectivity inside the VM
+- `tests/benchmark_go_agent.py` -- guest-agent latency benchmark
 
-To run one:
+Run the unit tests with `uv run pytest`. Smoke scripts need sudo:
 
 ```bash
-sudo python3 verification/verify_bandsox.py
+sudo env PATH=$PATH uv run python tests/smoke_bandsox.py
 ```
 
 ## License

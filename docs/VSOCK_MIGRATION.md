@@ -201,7 +201,7 @@ The new implementation follows Firecracker's documented vsock model where:
 ## Performance Expectations
 
 Vsock performance depends heavily on host disk + CPU. As a ballpark from our
-Go-agent benchmark (`verification/benchmark_go_agent.py`) on a typical dev box:
+Go-agent benchmark (`tests/benchmark_go_agent.py`) on a typical dev box:
 
 - `exec_command("true")`: ~2.3ms mean, ~2.6–3.1ms p95
 - File transfers (8 MiB payload):

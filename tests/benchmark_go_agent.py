@@ -1,7 +1,7 @@
 """Benchmark BandSox Go guest-agent operations in a real Firecracker VM.
 
 Requires sudo/KVM and /var/lib/bandsox/vmlinux. Intended to run as:
-    sudo env PATH=$PATH uv run python verification/benchmark_go_agent.py
+    sudo env PATH=$PATH uv run python tests/benchmark_go_agent.py
 """
 
 import hashlib

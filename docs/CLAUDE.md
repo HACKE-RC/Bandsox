@@ -33,10 +33,13 @@ sudo python3 -m bandsox.cli create ubuntu:latest --name my-vm
 # Open terminal to a VM
 sudo python3 -m bandsox.cli terminal <vm_id>
 
-# Verification tests (require sudo)
-sudo python3 verification/verify_bandsox.py
-sudo python3 verification/verify_file_ops.py
-sudo python3 verification/verify_internet.py
+# Unit tests
+uv run pytest
+
+# Smoke scripts (require sudo, boot real microVMs)
+sudo python3 tests/smoke_bandsox.py
+sudo python3 tests/smoke_go_agent.py
+sudo python3 tests/smoke_internet.py
 ```
 
 ## Architecture
