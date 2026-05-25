@@ -545,16 +545,16 @@ vm.<span class="term-func">stop</span>()</div>
             <span class="term-dot green"></span>
             <span class="term-title">zsh — bandsox</span>
           </div>
-          <div class="terminal-body"><span class="term-prompt">$</span> sudo bandsox <span class="term-keyword">create</span> ubuntu:latest --name my-vm
+          <div class="terminal-body"><span class="term-prompt">$</span> bandsox <span class="term-keyword">create</span> ubuntu:latest --name my-vm
 <span class="term-mute">→ pulling ubuntu:latest</span>
 <span class="term-mute">→ building rootfs (412 MB)</span>
 <span class="term-mute">→ booting microVM …</span>
 <span style="color:var(--green);">✓</span> vm <span class="term-string">f3a1c8</span> ready   <span class="term-mute">125ms</span>
 
-<span class="term-prompt">$</span> sudo bandsox <span class="term-keyword">terminal</span> f3a1c8
+<span class="term-prompt">$</span> bandsox <span class="term-keyword">terminal</span> f3a1c8
 <span class="term-mute"># interactive shell into the VM</span>
 
-<span class="term-prompt">$</span> sudo bandsox <span class="term-keyword">serve</span> --host 0.0.0.0 --port 8000
+<span class="term-prompt">$</span> bandsox <span class="term-keyword">serve</span> --host 0.0.0.0 --port 8000
 <span style="color:var(--green);">✓</span> dashboard ready · http://localhost:8000</div>
         </div>
 
@@ -586,8 +586,8 @@ vm.<span class="term-func">stop</span>()</div>
           <div class="arch-desc">Owns the VM lifecycle — config, networking, the guest bridge, and I/O.</div>
         </div>
         <div class="arch-row">
-          <div class="arch-key">bandsox.agent</div>
-          <div class="arch-desc">A tiny Python agent injected into every VM. Runs commands and transfers files in and out.</div>
+          <div class="arch-key">bandsox/agent</div>
+          <div class="arch-desc">Static Go binary baked into every VM image. Runs commands and transfers files over serial and vsock.</div>
         </div>
         <div class="arch-row">
           <div class="arch-key">bandsox.server</div>

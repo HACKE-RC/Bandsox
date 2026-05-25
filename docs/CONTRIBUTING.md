@@ -12,7 +12,8 @@
 - `bandsox/`: Main package source code.
   - `core.py`: Main entry point.
   - `vm.py`: MicroVM management.
-  - `agent.py`: Guest agent code.
+  - `agent/main.go`: Go guest agent (built into VM images as `bandsox-agent`).
+  - `agent.py`: legacy Python agent (tests only; not used in production images).
   - `server.py`: Web server.
 - `tests/`: Pytest suite (`test_*.py`) plus sudo-only smoke and benchmark
   scripts (`smoke_*.py`, `benchmark_*.py`) that boot real microVMs.
@@ -26,18 +27,18 @@ Unit tests:
 uv run python -m pytest -q
 ```
 
-Smoke scripts boot real Firecracker VMs and need `sudo` (network devices,
+Smoke scripts boot real Firecracker VMs and may prompt for `sudo` (network devices,
 KVM, Firecracker). They are not picked up by pytest.
 
 ```bash
-sudo env PATH=$PATH uv run python tests/smoke_bandsox.py
-sudo env PATH=$PATH uv run python tests/smoke_go_agent.py
+uv run python tests/smoke_bandsox.py
+uv run python tests/smoke_go_agent.py
 ```
 
 Benchmarking:
 
 ```bash
-sudo env PATH=$PATH uv run python tests/benchmark_go_agent.py
+uv run python tests/benchmark_go_agent.py
 ```
 
 On a typical dev machine the benchmark reports ~2.3ms mean `exec_command("true")`

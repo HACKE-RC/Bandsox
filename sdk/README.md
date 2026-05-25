@@ -5,7 +5,7 @@ TypeScript client for managing Firecracker microVMs through the BandSox REST API
 ## Requirements
 
 - Node.js 18+ (uses the built-in `fetch` API)
-- A running BandSox server (`sudo python3 -m bandsox.cli serve`)
+- A running BandSox server (`bandsox serve`)
 - An API key (generated on first server start, or via `bandsox auth create-key`)
 
 ## Installation

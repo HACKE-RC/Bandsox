@@ -7,7 +7,7 @@ to disable auth again.
 ## Enabling auth
 
 ```bash
-sudo bandsox auth init --storage /var/lib/sandbox
+bandsox auth init --storage /var/lib/sandbox
 ```
 
 This generates an admin password and an initial API key, and prints both to
@@ -64,10 +64,10 @@ These endpoints require authentication (when auth is enabled):
 
 ```bash
 # Enable auth (generates password + API key)
-sudo bandsox auth init --storage /var/lib/sandbox
+bandsox auth init --storage /var/lib/sandbox
 
 # Set or reset the admin password (direct file access, no server needed)
-sudo bandsox auth set-password --storage /var/lib/sandbox
+bandsox auth set-password --storage /var/lib/sandbox
 
 # Create a key via the server API (requires existing auth)
 bandsox auth create-key my-key

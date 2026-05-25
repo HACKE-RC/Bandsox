@@ -1,11 +1,13 @@
 import os
 import subprocess
+import sys
 import uuid
 import logging
 import shutil
 import json
 import base64
 import threading
+import time
 import requests
 from pathlib import Path
 from .vm import MicroVM, DEFAULT_KERNEL_PATH, kill_process_tree
@@ -16,12 +18,59 @@ from .mcp_registry import (
     write_mcp_config_to_rootfs,
 )
 from .network import setup_tap_device, cleanup_tap_device
-import time
 
 logger = logging.getLogger(__name__)
 
 
 _REDACTED = "<redacted>"
+
+
+def _wait_for_path(path: str, timeout: float = 20, poll_interval: float = 0.1,
+                   process: subprocess.Popen = None, label: str = "path"):
+    """Poll until a filesystem path exists, raising on timeout or process crash."""
+    start = time.time()
+    while True:
+        if os.path.exists(path):
+            return
+        if process and process.poll() is not None:
+            raise Exception(
+                f"Process exited with code {process.returncode} while waiting for {label}"
+            )
+        if time.time() - start > timeout:
+            raise Exception(f"Timeout ({timeout}s) waiting for {label}: {path}")
+        time.sleep(poll_interval)
+
+
+def _spawn_runner(vm_id: str, socket_path: str, log_file, extra_args: list = None):
+    """Spawn a detached bandsox.runner process and wait for the API socket.
+
+    Returns the Popen object.
+    """
+    runner_cmd = [
+        sys.executable, "-m", "bandsox.runner",
+        vm_id, "--socket-path", socket_path,
+    ]
+    if extra_args:
+        runner_cmd.extend(extra_args)
+
+    if os.path.exists(socket_path):
+        try:
+            os.unlink(socket_path)
+        except PermissionError as e:
+            raise Exception(f"Cannot remove stale socket {socket_path}: {e}")
+
+    logger.info(f"Spawning detached runner for VM {vm_id}")
+    with open(log_file, "w") as f:
+        proc = subprocess.Popen(
+            runner_cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+        )
+
+    _wait_for_path(socket_path, timeout=20, process=proc,
+                   label=f"runner API socket ({log_file})")
+    return proc
 
 
 def _redact_secrets(env_vars: dict | None) -> dict | None:
@@ -443,17 +492,14 @@ class BandSox:
         if enable_networking:
             from .network import derive_host_mac
 
-            base_idx = int(vm_id[-2:], 16)
-            for i in range(50):
-                subnet_idx = (base_idx + i) % 253 + 1
-                network_config = {
-                    "host_ip": f"172.16.{subnet_idx}.1",
-                    "guest_ip": f"172.16.{subnet_idx}.2",
-                    "guest_mac": f"AA:FC:00:00:{subnet_idx:02x}:02",
-                    "host_mac": derive_host_mac(f"172.16.{subnet_idx}.1"),
-                    "tap_name": f"tap{vm_id[:8]}",
-                }
-                break
+            subnet_idx = int(vm_id[-2:], 16) % 253 + 1
+            network_config = {
+                "host_ip": f"172.16.{subnet_idx}.1",
+                "guest_ip": f"172.16.{subnet_idx}.2",
+                "guest_mac": f"AA:FC:00:00:{subnet_idx:02x}:02",
+                "host_mac": derive_host_mac(f"172.16.{subnet_idx}.1"),
+                "tap_name": f"tap{vm_id[:8]}",
+            }
 
         # Pre-allocate vsock CID/port
         vsock_config = None
@@ -486,58 +532,14 @@ class BandSox:
             vm.env_vars = env_vars
 
         # Spawn detached runner
-        import sys
-        import subprocess as _sp
-
         log_dir = self.storage_dir / "logs"
         log_dir.mkdir(exist_ok=True)
         log_file = log_dir / f"{vm_id}.log"
 
-        runner_cmd = [
-            sys.executable,
-            "-m",
-            "bandsox.runner",
-            vm_id,
-            "--socket-path",
-            socket_path,
-            "--vm-config",
-            json.dumps(runner_vm_config),
-        ]
-
-        # Proactively clear stale socket
-        if os.path.exists(socket_path):
-            try:
-                os.unlink(socket_path)
-            except PermissionError:
-                pass
-
-        logger.info(f"Spawning detached runner for VM {vm_id}")
-        with open(log_file, "w") as f:
-            runner_process = _sp.Popen(
-                runner_cmd,
-                stdin=_sp.DEVNULL,
-                stdout=f,
-                stderr=_sp.STDOUT,
-            )
-
-        # Wait for API socket to appear
-        import time
-
-        start_wait = time.time()
-        while True:
-            if os.path.exists(socket_path):
-                break
-            if runner_process.poll() is not None:
-                raise Exception(
-                    f"Runner exited with code {runner_process.returncode}. "
-                    f"See log at {log_file}"
-                )
-            if time.time() - start_wait > 20:
-                raise Exception(
-                    f"Timeout waiting for runner to start Firecracker. "
-                    f"See log at {log_file}"
-                )
-            time.sleep(0.1)
+        runner_process = _spawn_runner(
+            vm_id, socket_path, log_file,
+            extra_args=["--vm-config", json.dumps(runner_vm_config)],
+        )
 
         # Set VM attributes for metadata and reconnection
         vm.rootfs_path = str(instance_rootfs)
@@ -570,12 +572,7 @@ class BandSox:
             },
         )
 
-        # Wait for the console socket to appear and connect
-        console_deadline = time.time() + 10
-        while time.time() < console_deadline:
-            if os.path.exists(vm.console_socket_path):
-                break
-            time.sleep(0.1)
+        _wait_for_path(vm.console_socket_path, timeout=10, label="console socket")
         vm.connect_to_console()
         self.active_vms[vm_id] = vm
         return vm
@@ -639,8 +636,6 @@ class BandSox:
         mem_file_path = mem_path
 
         # Load snapshot metadata to get VM configuration
-        import json
-        import time
 
         snapshot_meta = {}
         meta_file = snap_dir / "metadata.json"
@@ -831,27 +826,11 @@ class BandSox:
                 except PermissionError as e:
                     raise Exception(f"Cannot remove stale socket {socket_path}: {e}")
             if detach:
-                import sys
-                import subprocess
-
-                runner_cmd = [
-                    sys.executable,
-                    "-m",
-                    "bandsox.runner",
-                    new_vm_id,
-                    "--socket-path",
-                    socket_path,
-                ]
+                extra_args = []
                 if netns_name:
-                    runner_cmd.extend(["--netns", netns_name])
+                    extra_args.extend(["--netns", netns_name])
                 if vm.vsock_isolation_dir:
-                    runner_cmd.extend(["--vsock-isolation-dir", vm.vsock_isolation_dir])
-                # Restored VMs need the runner to start a VsockHostListener
-                # in the runner process (not the caller), since the listener
-                # must outlive the caller and live with the Firecracker
-                # process. We hand it the host-side path directly so the
-                # runner doesn't have to guess which path was mapped
-                # through the vsock isolation namespace.
+                    extra_args.extend(["--vsock-isolation-dir", vm.vsock_isolation_dir])
                 if vsock_config and vsock_config.get("enabled"):
                     runner_vsock_config = dict(vsock_config)
                     host_path = vm.vsock_socket_path or vsock_config.get(
@@ -859,37 +838,13 @@ class BandSox:
                     )
                     if host_path:
                         runner_vsock_config["host_uds_path"] = host_path
-                    runner_cmd.extend(
+                    extra_args.extend(
                         ["--vsock-config", json.dumps(runner_vsock_config)]
                     )
 
-                logger.info(f"Spawning detached runner for VM {new_vm_id}")
-                with open(log_file, "w") as f:
-                    # We do NOT use start_new_session=True because it breaks sudo (loses tty/tickets).
-                    # Instead, the runner ignores SIGINT/SIGHUP to detach logically.
-                    runner_process = subprocess.Popen(
-                        runner_cmd,
-                        stdin=subprocess.DEVNULL,
-                        stdout=f,
-                        stderr=subprocess.STDOUT,
-                    )
-
-                # Wait for API socket to appear, surfacing runner crashes promptly
-                start_wait = time.time()
-                while True:
-                    if os.path.exists(socket_path):
-                        break
-                    if runner_process and runner_process.poll() is not None:
-                        raise Exception(
-                            f"Detached runner exited with code {runner_process.returncode}. "
-                            f"See log at {log_file}"
-                        )
-                    if time.time() - start_wait > 20:
-                        raise Exception(
-                            f"Timeout waiting for detached runner to start Firecracker. "
-                            f"See log at {log_file}"
-                        )
-                    time.sleep(0.1)
+                runner_process = _spawn_runner(
+                    new_vm_id, socket_path, log_file, extra_args=extra_args
+                )
             else:
                 vm.start_process()
 

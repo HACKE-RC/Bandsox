@@ -16,6 +16,7 @@ import os
 import socket
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -30,6 +31,15 @@ from .protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PtySessionSlot:
+    """Tracks a pending or active PTY vsock session."""
+    on_output: Optional[Callable] = None
+    on_exit: Optional[Callable] = None
+    ready: threading.Event = field(default_factory=threading.Event)
+    conn: Optional[socket.socket] = None
 
 
 class VsockHostListener:
@@ -90,10 +100,7 @@ class VsockHostListener:
         self._pending_downloads: dict[str, bytes] = {}
         self._pending_downloads_lock = threading.Lock()
 
-        # Pending PTY sessions: cmd_id -> {"on_output": func, "on_exit": func,
-        # "ready": Event, "conn": socket|None}
-        # Registered by start_pty_session(); fulfilled when guest connects.
-        self._pending_pty_sessions: dict[str, dict] = {}
+        self._pending_pty_sessions: dict[str, PtySessionSlot] = {}
         self._pending_pty_sessions_lock = threading.Lock()
 
     def start(self):
@@ -260,18 +267,13 @@ class VsockHostListener:
         with self._pending_downloads_lock:
             return self._pending_downloads.get(cmd_id)
 
-    def register_pending_pty_session(self, cmd_id: str, on_output, on_exit) -> dict:
+    def register_pending_pty_session(self, cmd_id: str, on_output, on_exit) -> PtySessionSlot:
         """Register a PTY session that the guest will connect to via vsock.
 
-        Returns a slot dict with a 'ready' Event that is set once the guest
-        connects, and a 'conn' field holding the vsock socket for input writes.
+        Returns a PtySessionSlot whose 'ready' Event is set once the guest
+        connects, and 'conn' holds the vsock socket for input writes.
         """
-        slot = {
-            "on_output": on_output,
-            "on_exit": on_exit,
-            "ready": threading.Event(),
-            "conn": None,
-        }
+        slot = PtySessionSlot(on_output=on_output, on_exit=on_exit)
         with self._pending_pty_sessions_lock:
             self._pending_pty_sessions[cmd_id] = slot
         return slot
@@ -279,13 +281,13 @@ class VsockHostListener:
     def unregister_pending_pty_session(self, cmd_id: str):
         with self._pending_pty_sessions_lock:
             slot = self._pending_pty_sessions.pop(cmd_id, None)
-        if slot and slot.get("conn"):
+        if slot and slot.conn:
             try:
-                slot["conn"].close()
+                slot.conn.close()
             except Exception:
                 pass
 
-    def get_pending_pty_session(self, cmd_id: str) -> Optional[dict]:
+    def get_pending_pty_session(self, cmd_id: str) -> Optional[PtySessionSlot]:
         with self._pending_pty_sessions_lock:
             return self._pending_pty_sessions.get(cmd_id)
 
@@ -438,7 +440,6 @@ class VsockHostListener:
             self._send_error(client, "unknown", "pty_session missing cmd_id")
             return
 
-        # Look up pending registration (with brief poll for race)
         slot = self.get_pending_pty_session(cmd_id)
         if slot is None:
             for _ in range(20):
@@ -450,31 +451,26 @@ class VsockHostListener:
             self._send_error(client, cmd_id, "No pending PTY session for this cmd_id")
             return
 
-        # Disable timeout — PTY sessions are long-lived
         client.settimeout(None)
-        slot["conn"] = client
-        slot["ready"].set()
+        slot.conn = client
+        slot.ready.set()
 
-        on_output = slot["on_output"]
-        on_exit = slot["on_exit"]
-
-        # Read loop: forward PTY output from guest to the on_output callback
         try:
             while True:
-                data = client.recv(65536)
-                if not data:
+                chunk = client.recv(65536)
+                if not chunk:
                     break
-                if on_output:
-                    on_output(data)
+                if slot.on_output:
+                    slot.on_output(chunk)
         except (OSError, ConnectionResetError):
             pass
         finally:
-            slot["conn"] = None
+            slot.conn = None
             with self._pending_pty_sessions_lock:
                 self._pending_pty_sessions.pop(cmd_id, None)
-            if on_exit:
+            if slot.on_exit:
                 try:
-                    on_exit()
+                    slot.on_exit()
                 except Exception:
                     pass
 
