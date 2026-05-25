@@ -20,6 +20,19 @@ from bandsox.firecracker import FirecrackerClient
 import bandsox.core as core
 
 
+def test_get_vm_rehydrates_running_vm_as_agent_ready(tmp_path):
+    bs = BandSox(storage_dir=str(tmp_path))
+    vm_id = "vm-running"
+    socket_path = tmp_path / "sockets" / f"{vm_id}.sock"
+    socket_path.touch()
+    bs._save_metadata(vm_id, {"id": vm_id, "status": "running"})
+
+    vm = bs.get_vm(vm_id)
+
+    assert vm is not None
+    assert vm.agent_ready is True
+
+
 # ============================================================================
 # Unit Tests for CID/Port Allocators
 # ============================================================================
