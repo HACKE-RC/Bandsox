@@ -94,6 +94,8 @@ mcp={"my-custom": {"spec": {"command": "uvx", "args": ["my-mcp"], "env": {"FOO":
 
 Unknown server names raise `ValueError` (typos do not silently no-op). MCP-derived credentials are kept out of persisted VM metadata.
 
+For the full list of registered servers and instructions on adding new ones, see [MCP_REGISTRY.md](MCP_REGISTRY.md).
+
 ## Snapshot + resume (Bandsox superpower)
 
 Claude Code supports its own `--resume` / session continuation. Bandsox makes the entire environment (filesystem + any Claude Code state files) snapshot-restorable in milliseconds.

@@ -106,6 +106,23 @@ vm = manager.create_vm_from_dockerfile(
 )
 ```
 
+With environment variables and MCP servers (Claude Code use case):
+
+```python
+vm = manager.create_vm(
+    "ghcr.io/bandsox/claude-code:latest",
+    env_vars={"ANTHROPIC_API_KEY": "..."},
+    mcp={
+        "browserbase": {"apiKey": "...", "projectId": "..."},
+        "github":      {"token": "ghp_..."},
+        # Custom server not in the built-in registry:
+        "my-custom":   {"spec": {"command": "uvx", "args": ["my-mcp"]}},
+    },
+)
+```
+
+The `mcp=` dict is resolved against the [MCP server registry](MCP_REGISTRY.md), merged into the VM env vars (caller `env_vars` wins on key collisions), and staged as `/workspace/.mcp.json` inside the rootfs before boot. MCP-derived secrets are redacted in the persisted `metadata.json` but the live VM process sees the unredacted values. Unknown server names and malformed `spec` blocks raise `ValueError`. See the [Claude Code cookbook](CLAUDE_CODE.md) for the full end-to-end pattern.
+
 ### Executing commands
 
 Several ways to run commands:
@@ -250,7 +267,10 @@ When auth is enabled (`auth.json` exists), all `/api/` endpoints except auth log
 
 - `GET /api/vms` -- list VMs.
 - `POST /api/vms` -- create a VM from an image.
-  - Body: `{ "image": "alpine:latest", "name": "...", "vcpu": 1, "mem_mib": 128, "enable_networking": true, "force_rebuild": false, "disk_size_mib": 4096 }`
+  - Body: `{ "image": "alpine:latest", "name": "...", "vcpu": 1, "mem_mib": 128, "enable_networking": true, "force_rebuild": false, "disk_size_mib": 4096, "env_vars": {"KEY": "value"}, "mcp": {"github": {"token": "ghp_..."}} }`
+  - `env_vars`: optional, exposed to every `exec_command` / session call inside the VM.
+  - `mcp`: optional, resolved against the [MCP registry](MCP_REGISTRY.md). MCP-derived env vars are merged into `env_vars`; secrets are redacted on disk. Returns 500 with a `ValueError` for unknown server names or malformed `spec` entries.
+- `POST /api/vms/from-dockerfile` -- build an image from an uploaded Dockerfile and create a VM. Multipart form with `dockerfile` file plus optional fields (`tag`, `name`, `vcpu`, `mem_mib`, `disk_size_mib`, `force_rebuild`, `env_vars` JSON, `metadata` JSON, `mcp` JSON).
 - `GET /api/vms/{vm_id}` -- get VM details.
 - `POST /api/vms/{vm_id}/stop|pause|resume` -- lifecycle operations.
 - `DELETE /api/vms/{vm_id}` -- delete a VM.
@@ -297,8 +317,8 @@ All pages redirect to `/login` if not authenticated.
 
 | Method | Description |
 | --- | --- |
-| `create_vm(docker_image, name=None, vcpu=1, mem_mib=128, ...)` | Create a new VM. |
-| `create_vm_from_dockerfile(dockerfile_path, tag, ...)` | Build an image and create a VM. |
+| `create_vm(docker_image, name=None, vcpu=1, mem_mib=128, env_vars=None, mcp=None, ...)` | Create a new VM. `env_vars` is forwarded to every exec inside the VM. `mcp` is resolved against [`bandsox.mcp_registry`](MCP_REGISTRY.md) and staged as `/workspace/.mcp.json`. |
+| `create_vm_from_dockerfile(dockerfile_path, tag, env_vars=None, mcp=None, ...)` | Build an image and create a VM. Same `env_vars` / `mcp` semantics as `create_vm`. |
 | `restore_vm(snapshot_id, enable_networking=True)` | Restore a VM from a snapshot. |
 | `snapshot_vm(vm, snapshot_name=None)` | Snapshot a running VM. |
 | `delete_vm(vm_id)` | Stop and delete a VM and its resources. |
@@ -346,17 +366,26 @@ VMs need a compatible Linux kernel binary (`vmlinux`).
 - By default it looks at `/var/lib/bandsox/vmlinux`.
 - Make sure this file exists, or pass `kernel_path` to `create_vm`.
 
-### 4. Image size
+### 4. Entropy and HTTPS on fresh boot
+
+The Firecracker quickstart kernel that ships with `bandsox init` does not have `RANDOM_TRUST_CPU=y`, so `crng_init` can take tens of seconds to complete on a fresh microVM. During that window all TLS handshakes block. Two coping mechanisms ship in this repo:
+
+- `DEFAULT_BOOT_ARGS` includes `random.trust_cpu=on`, which is a no-op on the bundled kernel but works automatically once you update `vmlinux` to anything compiled with `RANDOM_TRUST_CPU=y`.
+- The `/init` shim auto-starts `haveged` (or `rng-tools`) if the image installs it. The published `templates/claude-code/Dockerfile` does this; custom images that need HTTPS on the first second of boot should `apt-get install -y haveged` (or equivalent).
+
+On snapshot restore, BandSox always mixes a fresh per-restore host seed into both `/dev/urandom` and `/dev/random` using `printf | base64 -d`, so two VMs restored from the same snapshot diverge their CRNG immediately even on images without `python3`. Images that also have `python3` additionally get the `RNDADDENTROPY` ioctl for proper entropy crediting.
+
+### 5. Image size
 
 The rootfs size is fixed at build time (Docker export size + overhead). If you need more space, adjust the image generation logic in `image.py`.
 
-### 5. Snapshot compatibility
+### 6. Snapshot compatibility
 
 Restoring a snapshot requires the same kernel and a compatible network config.
 
 - If you move the storage directory, move metadata and snapshots together.
 - Snapshots are tied to the exact kernel binary used when they were created.
 
-### 6. Authentication
+### 7. Authentication
 
 See [AUTHENTICATION.md](AUTHENTICATION.md).
