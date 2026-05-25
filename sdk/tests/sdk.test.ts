@@ -150,6 +150,30 @@ describe("BandSox", () => {
       const body = JSON.parse((fetchMock.mock.calls[0] as RequestInit[])[1].body as string);
       expect(body).not.toHaveProperty("name");
     });
+
+    it("forwards mcp field to API for Claude Code integration", async () => {
+      fetchMock.mockResolvedValueOnce(makeResponse({ id: "vm-mcp" }));
+
+      await bs.createVm({
+        image: "ghcr.io/bandsox/claude-code:latest",
+        env_vars: { ANTHROPIC_API_KEY: "sk-test" },
+        mcp: {
+          browserbase: { apiKey: "k", projectId: "p" },
+        },
+      });
+
+      const body = JSON.parse((fetchMock.mock.calls[0] as RequestInit[])[1].body as string);
+      expect(body.mcp).toEqual({ browserbase: { apiKey: "k", projectId: "p" } });
+      expect(body.env_vars).toEqual({ ANTHROPIC_API_KEY: "sk-test" });
+    });
+
+    it("omits mcp from body when caller doesn't pass it", async () => {
+      fetchMock.mockResolvedValueOnce(makeResponse({ id: "vm-abc" }));
+      await bs.createVm({ image: "alpine:latest" });
+
+      const body = JSON.parse((fetchMock.mock.calls[0] as RequestInit[])[1].body as string);
+      expect(body).not.toHaveProperty("mcp");
+    });
   });
 
   // ── createVmFromDockerfile ──
@@ -170,6 +194,18 @@ describe("BandSox", () => {
       expect(url).toBe("http://localhost:8000/api/vms/from-dockerfile");
       expect(init.method).toBe("POST");
       expect(init.body).toBeInstanceOf(FormData);
+    });
+
+    it("serializes mcp option as JSON form field", async () => {
+      fetchMock.mockResolvedValueOnce(makeResponse({ id: "vm-df-mcp" }));
+
+      await bs.createVmFromDockerfile("FROM alpine", {
+        mcp: { github: { token: "ghp_x" } },
+      });
+
+      const init = (fetchMock.mock.calls[0] as RequestInit[])[1];
+      const form = init.body as FormData;
+      expect(form.get("mcp")).toBe(JSON.stringify({ github: { token: "ghp_x" } }));
     });
   });
 

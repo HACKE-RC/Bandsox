@@ -139,7 +139,7 @@ def kill_process_tree(pid: int, timeout: float = 1.0):
 
 FIRECRACKER_BIN = "/usr/bin/firecracker"
 DEFAULT_KERNEL_PATH = "/var/lib/bandsox/vmlinux"
-DEFAULT_BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off"
+DEFAULT_BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on"
 
 
 class ConsoleMultiplexer:

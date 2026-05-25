@@ -169,6 +169,7 @@ export class BandSox {
       disk_size_mib: options.disk_size_mib ?? null,
       env_vars: options.env_vars ?? null,
       metadata: options.metadata ?? null,
+      mcp: options.mcp ?? null,
     };
     const res = await this.request<{ id: string }>("POST", "/api/vms", {
       json: payload,
@@ -200,6 +201,9 @@ export class BandSox {
     }
     if (options.metadata) {
       fields["metadata"] = JSON.stringify(options.metadata);
+    }
+    if (options.mcp) {
+      fields["mcp"] = JSON.stringify(options.mcp);
     }
 
     for (const [key, value] of Object.entries(fields)) {

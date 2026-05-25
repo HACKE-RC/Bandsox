@@ -10,10 +10,45 @@ import requests
 from pathlib import Path
 from .vm import MicroVM, DEFAULT_KERNEL_PATH, kill_process_tree
 from .image import build_rootfs
+from .mcp_registry import (
+    SECRET_ENV_NAMES,
+    resolve_mcp_config,
+    write_mcp_config_to_rootfs,
+)
 from .network import setup_tap_device, cleanup_tap_device
 import time
 
 logger = logging.getLogger(__name__)
+
+
+_REDACTED = "<redacted>"
+
+
+def _redact_secrets(env_vars: dict | None) -> dict | None:
+    """Return a copy of env_vars with known-secret values replaced by a marker.
+
+    Secret names are sourced from mcp_registry.SECRET_ENV_NAMES so that any MCP
+    server's credentials are protected uniformly.
+    """
+    if not env_vars:
+        return env_vars
+    return {k: (_REDACTED if k in SECRET_ENV_NAMES else v) for k, v in env_vars.items()}
+
+
+def _redact_mcp_servers(mcp_servers: dict) -> dict:
+    """Wrap mcp_servers in the standard envelope and redact each server's env.
+
+    Callers must guard against the empty/None case themselves (see the
+    `if mcp_servers else None` at the call site in create_vm). This helper
+    only has one job: redact + wrap.
+    """
+    redacted: dict = {}
+    for name, entry in mcp_servers.items():
+        new_entry = dict(entry)
+        if "env" in new_entry:
+            new_entry["env"] = {k: _REDACTED for k in new_entry["env"]}
+        redacted[name] = new_entry
+    return {"mcpServers": redacted}
 
 
 class BandSox:
@@ -112,20 +147,45 @@ class BandSox:
         """Inject host entropy into restored guests.
 
         Why this exists:
-        - Legacy snapshots may not include a virtio-rng device.
-        - In that state, OpenSSL can block indefinitely waiting for enough
-          random-pool entropy, which stalls git/HTTPS on first use.
+        - Two VMs restored from the same snapshot share an identical kernel
+          CRNG state. Without fresh entropy they will produce identical
+          /dev/urandom output, identical TLS keys, etc., until enough new
+          interrupt entropy is collected. We must diverge them at restore.
+        - Legacy snapshots may not include a virtio-rng device, in which
+          case OpenSSL can also block indefinitely on /dev/random.
         - Firecracker forbids adding /entropy before snapshot load if any
           boot-specific resources are already configured in that snapshot.
 
-        This is best-effort and intentionally non-fatal.
+        This is best-effort and intentionally non-fatal. We always issue a
+        portable shell-only mix (works in any image with coreutils) and
+        additionally attempt the python3 RNDADDENTROPY ioctl when python is
+        present (credits entropy bits in addition to mixing). The shell path
+        alone is sufficient for the divergence property because each restored
+        VM gets a distinct host_seed.
         """
-        # Generate true entropy on host and inject it into the guest kernel
-        # pool. Do this unconditionally: non-blocking getrandom can succeed
-        # while OpenSSL still blocks on /dev/random in low-entropy restores.
         host_seed = os.urandom(256)
         seed_b64 = base64.b64encode(host_seed).decode("ascii")
-        inject_cmd = (
+
+        # Portable path: mix the host seed into both kernel pools using only
+        # coreutils. Bytes are mixed in immediately; no entropy bits are
+        # credited (that needs RNDADDENTROPY) but divergence is achieved.
+        shell_cmd = (
+            f"printf '%s' '{seed_b64}' | base64 -d > /dev/urandom 2>/dev/null; "
+            f"printf '%s' '{seed_b64}' | base64 -d > /dev/random 2>/dev/null; "
+            "true"
+        )
+        try:
+            vm.exec_command(shell_cmd, timeout=5)
+        except Exception as e:
+            logger.warning(
+                f"Shell entropy mix failed for VM {vm.vm_id}: {e}"
+            )
+
+        # Preferred path: python3 + RNDADDENTROPY also credits entropy bits,
+        # unblocking blocking getrandom() readers on legacy snapshots. Silent
+        # no-op on images without python3 (e.g. the claude-code template).
+        python_cmd = (
+            "command -v python3 >/dev/null 2>&1 || exit 0\n"
             "python3 - <<'PY'\n"
             "import base64, fcntl, struct\n"
             "RNDADDENTROPY = 0x40085203\n"
@@ -143,15 +203,18 @@ class BandSox:
             "PY"
         )
         try:
-            ec = vm.exec_command(inject_cmd, timeout=5)
+            ec = vm.exec_command(python_cmd, timeout=5)
             if ec == 0:
                 logger.info(f"Injected host entropy into guest VM {vm.vm_id}")
             else:
-                logger.warning(
-                    f"Guest entropy injection returned non-zero for VM {vm.vm_id}: {ec}"
+                logger.debug(
+                    f"python3 RNDADDENTROPY path skipped/failed for VM {vm.vm_id} "
+                    f"(rc={ec}); shell mix already applied"
                 )
         except Exception as e:
-            logger.warning(f"Guest entropy injection failed for VM {vm.vm_id}: {e}")
+            logger.warning(
+                f"python3 entropy ioctl failed for VM {vm.vm_id}: {e}"
+            )
 
     def _clone_rootfs(self, src: Path, dest: Path) -> str:
         """
@@ -292,6 +355,7 @@ class BandSox:
         disk_size_mib: int = 4096,
         env_vars: dict = None,
         metadata: dict = None,
+        mcp: dict = None,
     ) -> MicroVM:
         """Creates and starts a new VM from a Docker image."""
         vm_id = str(uuid.uuid4())
@@ -305,6 +369,20 @@ class BandSox:
                 "from the current directory to this path before creating VMs."
             )
 
+        # Resolve MCP config early so we can merge its env vars and stage the file.
+        # Explicit caller env_vars beat MCP-derived ones; the new-dict spread
+        # (not .update()) is deliberate so we never mutate the caller's dict.
+        mcp_servers, mcp_env = resolve_mcp_config(mcp)
+        if mcp_env:
+            caller_env = env_vars or {}
+            collisions = set(caller_env) & set(mcp_env)
+            if collisions:
+                logger.warning(
+                    "MCP-derived env vars overridden by explicit env_vars: %s",
+                    sorted(collisions),
+                )
+            env_vars = {**mcp_env, **caller_env}
+
         # 1. Build Rootfs
         sanitized_name = docker_image.replace(":", "_").replace("/", "_")
         base_rootfs = self.images_dir / f"{sanitized_name}.ext4"
@@ -315,6 +393,12 @@ class BandSox:
         # Copy to instance specific path
         instance_rootfs = self.images_dir / f"{vm_id}.ext4"
         self._clone_rootfs(base_rootfs, instance_rootfs)
+
+        # Stage MCP config into this VM's private rootfs (per-VM, not the shared base image).
+        if mcp_servers:
+            write_mcp_config_to_rootfs(
+                str(instance_rootfs), {"mcpServers": mcp_servers}
+            )
 
         # Resize if needed
         # Check current size
@@ -399,7 +483,12 @@ class BandSox:
                 "created_at": time.time(),
                 "status": "running",
                 "pid": vm.process.pid,
-                "env_vars": env_vars,
+                # Persist env vars but strip known-secret names so MCP-derived
+                # credentials (API tokens, etc.) don't end up in metadata.json.
+                # Runtime env on vm.env_vars is unaffected.
+                "env_vars": _redact_secrets(env_vars),
+                # Same redaction for the mcp_servers blob (each server's `env`).
+                "mcp": _redact_mcp_servers(mcp_servers) if mcp_servers else None,
                 "metadata": metadata or {},
             },
         )
@@ -417,6 +506,7 @@ class BandSox:
         disk_size_mib: int = 4096,
         env_vars: dict = None,
         metadata: dict = None,
+        mcp: dict = None,
         **kwargs,
     ) -> MicroVM:
         """Creates a VM from a Dockerfile."""
@@ -440,6 +530,7 @@ class BandSox:
             disk_size_mib=disk_size_mib,
             env_vars=env_vars,
             metadata=metadata,
+            mcp=mcp,
             **kwargs,
         )
 
@@ -1348,6 +1439,7 @@ class RemoteBandSox:
         disk_size_mib: int = 4096,
         env_vars: dict = None,
         metadata: dict = None,
+        mcp: dict = None,
     ):
         payload = {
             "image": docker_image,
@@ -1359,6 +1451,7 @@ class RemoteBandSox:
             "disk_size_mib": disk_size_mib,
             "env_vars": env_vars,
             "metadata": metadata,
+            "mcp": mcp,
         }
         res = self._request("POST", "/api/vms", json=payload)
         return self._vm(res["id"])
@@ -1374,6 +1467,7 @@ class RemoteBandSox:
         env_vars: dict = None,
         metadata: dict = None,
         force_rebuild: bool = False,
+        mcp: dict = None,
         **kwargs,
     ):
         data = {
@@ -1390,6 +1484,8 @@ class RemoteBandSox:
             data["env_vars"] = json.dumps(env_vars)
         if metadata:
             data["metadata"] = json.dumps(metadata)
+        if mcp:
+            data["mcp"] = json.dumps(mcp)
 
         with open(dockerfile_path, "rb") as f:
             files = {"dockerfile": ("Dockerfile", f, "text/plain")}

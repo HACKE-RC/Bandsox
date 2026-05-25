@@ -226,12 +226,13 @@ class CreateVMRequest(BaseModel):
     disk_size_mib: int = 4096
     env_vars: dict = None
     metadata: dict = None
+    mcp: dict = None
 
 @app.post("/api/vms", dependencies=[Depends(require_auth)])
 def create_vm(req: CreateVMRequest):
     logger.info(f"Received create request for {req.image}")
     try:
-        vm = bs.create_vm(req.image, name=req.name, vcpu=req.vcpu, mem_mib=req.mem_mib, enable_networking=req.enable_networking, force_rebuild=req.force_rebuild, disk_size_mib=req.disk_size_mib, env_vars=req.env_vars, metadata=req.metadata)
+        vm = bs.create_vm(req.image, name=req.name, vcpu=req.vcpu, mem_mib=req.mem_mib, enable_networking=req.enable_networking, force_rebuild=req.force_rebuild, disk_size_mib=req.disk_size_mib, env_vars=req.env_vars, metadata=req.metadata, mcp=req.mcp)
         return {"id": vm.vm_id, "status": "created"}
     except Exception as e:
         logger.error(f"Failed to create VM: {e}")
@@ -248,6 +249,7 @@ async def create_vm_from_dockerfile(
     force_rebuild: bool = Form(False),
     env_vars: str = Form(None),
     metadata: str = Form(None),
+    mcp: str = Form(None),
 ):
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".Dockerfile") as tmp:
@@ -264,6 +266,7 @@ async def create_vm_from_dockerfile(
                 force_rebuild=force_rebuild,
                 env_vars=json.loads(env_vars) if env_vars else None,
                 metadata=json.loads(metadata) if metadata else None,
+                mcp=json.loads(mcp) if mcp else None,
             )
         finally:
             os.unlink(dockerfile_path)
