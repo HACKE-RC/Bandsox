@@ -434,39 +434,120 @@ class BandSox:
         socket_path = str(self.sockets_dir / f"{vm_id}.sock")
         vm = ManagedMicroVM(vm_id, socket_path, self)
 
-        # 3. Start Process & Configure
+        # 3. Pre-allocate resources and spawn detached runner
         disk_bw = int(os.environ.get("BANDSOX_DISK_BANDWIDTH_MBPS", "200"))
         disk_iops = int(os.environ.get("BANDSOX_DISK_IOPS", "5000"))
 
-        vm.start_process()
-        vm.configure(
-            kernel_path,
-            str(instance_rootfs),
-            vcpu,
-            mem_mib,
-            enable_networking=enable_networking,
-            enable_vsock=enable_vsock,
-            disk_bandwidth_mbps=disk_bw,
-            disk_iops=disk_iops,
-        )
+        # Pre-allocate network config
+        network_config = None
+        if enable_networking:
+            from .network import derive_host_mac
+
+            base_idx = int(vm_id[-2:], 16)
+            for i in range(50):
+                subnet_idx = (base_idx + i) % 253 + 1
+                network_config = {
+                    "host_ip": f"172.16.{subnet_idx}.1",
+                    "guest_ip": f"172.16.{subnet_idx}.2",
+                    "guest_mac": f"AA:FC:00:00:{subnet_idx:02x}:02",
+                    "host_mac": derive_host_mac(f"172.16.{subnet_idx}.1"),
+                    "tap_name": f"tap{vm_id[:8]}",
+                }
+                break
+
+        # Pre-allocate vsock CID/port
+        vsock_config = None
+        if enable_vsock:
+            cid = self._allocate_cid()
+            port = self._allocate_port()
+            vsock_uds_path = f"/tmp/bandsox/vsock_{vm_id}.sock"
+            vsock_config = {
+                "enabled": True,
+                "cid": cid,
+                "port": port,
+                "uds_path": vsock_uds_path,
+                "baked_uds_path": vsock_uds_path,
+                "host_uds_path": vsock_uds_path,
+            }
+
+        # Build runner config
+        runner_vm_config = {
+            "kernel_path": kernel_path,
+            "rootfs_path": str(instance_rootfs),
+            "vcpu": vcpu,
+            "mem_mib": mem_mib,
+            "disk_bandwidth_mbps": disk_bw,
+            "disk_iops": disk_iops,
+            "network_config": network_config,
+            "vsock_config": vsock_config,
+        }
 
         if env_vars:
             vm.env_vars = env_vars
 
-        vm.start()
+        # Spawn detached runner
+        import sys
+        import subprocess as _sp
 
+        log_dir = self.storage_dir / "logs"
+        log_dir.mkdir(exist_ok=True)
+        log_file = log_dir / f"{vm_id}.log"
+
+        runner_cmd = [
+            sys.executable,
+            "-m",
+            "bandsox.runner",
+            vm_id,
+            "--socket-path",
+            socket_path,
+            "--vm-config",
+            json.dumps(runner_vm_config),
+        ]
+
+        # Proactively clear stale socket
+        if os.path.exists(socket_path):
+            try:
+                os.unlink(socket_path)
+            except PermissionError:
+                pass
+
+        logger.info(f"Spawning detached runner for VM {vm_id}")
+        with open(log_file, "w") as f:
+            runner_process = _sp.Popen(
+                runner_cmd,
+                stdin=_sp.DEVNULL,
+                stdout=f,
+                stderr=_sp.STDOUT,
+            )
+
+        # Wait for API socket to appear
         import time
 
-        vsock_config = None
-        if enable_vsock and vm.vsock_enabled:
-            vsock_config = {
-                "enabled": True,
-                "cid": vm.vsock_cid,
-                "port": vm.vsock_port,
-                "uds_path": vm.vsock_baked_path or vm.vsock_socket_path,
-                "baked_uds_path": vm.vsock_baked_path or vm.vsock_socket_path,
-                "host_uds_path": vm.vsock_socket_path,
-            }
+        start_wait = time.time()
+        while True:
+            if os.path.exists(socket_path):
+                break
+            if runner_process.poll() is not None:
+                raise Exception(
+                    f"Runner exited with code {runner_process.returncode}. "
+                    f"See log at {log_file}"
+                )
+            if time.time() - start_wait > 20:
+                raise Exception(
+                    f"Timeout waiting for runner to start Firecracker. "
+                    f"See log at {log_file}"
+                )
+            time.sleep(0.1)
+
+        # Set VM attributes for metadata and reconnection
+        vm.rootfs_path = str(instance_rootfs)
+        vm.vsock_enabled = enable_vsock and vsock_config is not None
+        if vsock_config:
+            vm.vsock_cid = vsock_config["cid"]
+            vm.vsock_port = vsock_config["port"]
+            vm.vsock_socket_path = vsock_config["host_uds_path"]
+            vm.vsock_baked_path = vsock_config["baked_uds_path"]
+        vm.network_config = network_config
 
         self._save_metadata(
             vm_id,
@@ -478,21 +559,24 @@ class BandSox:
                 "mem_mib": mem_mib,
                 "disk_size_mib": disk_size_mib,
                 "rootfs_path": str(instance_rootfs),
-                "network_config": getattr(vm, "network_config", None),
+                "network_config": network_config,
                 "vsock_config": vsock_config,
                 "created_at": time.time(),
                 "status": "running",
-                "pid": vm.process.pid,
-                # Persist env vars but strip known-secret names so MCP-derived
-                # credentials (API tokens, etc.) don't end up in metadata.json.
-                # Runtime env on vm.env_vars is unaffected.
+                "pid": runner_process.pid,
                 "env_vars": _redact_secrets(env_vars),
-                # Same redaction for the mcp_servers blob (each server's `env`).
                 "mcp": _redact_mcp_servers(mcp_servers) if mcp_servers else None,
                 "metadata": metadata or {},
             },
         )
 
+        # Wait for the console socket to appear and connect
+        console_deadline = time.time() + 10
+        while time.time() < console_deadline:
+            if os.path.exists(vm.console_socket_path):
+                break
+            time.sleep(0.1)
+        vm.connect_to_console()
         self.active_vms[vm_id] = vm
         return vm
 

@@ -1086,7 +1086,7 @@ func handleVsockDownload(cmdID, path string, port int, appendMode bool) {
 // PTY exec
 // =============================================================================
 
-func handlePTYExec(cmdID, command string, cols, rows int, env map[string]string) {
+func handlePTYExec(cmdID, command string, cols, rows int, env map[string]string, useVsock bool) {
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "/bin/sh"
@@ -1112,6 +1112,94 @@ func handlePTYExec(cmdID, command string, cols, rows int, env map[string]string)
 
 	sendEvent("status", map[string]interface{}{"cmd_id": cmdID, "status": "started"})
 
+	if useVsock {
+		go handlePTYVsock(cmdID, cmd, ptmx)
+	} else {
+		go handlePTYSerial(cmdID, cmd, ptmx)
+	}
+}
+
+func handlePTYVsock(cmdID string, cmd *exec.Cmd, ptmx *os.File) {
+	port := getVsockPort()
+	conn, err := dialVsock(vsockCIDHost, port, 3*time.Second)
+	if err != nil {
+		// Fall back to serial path
+		handlePTYSerial(cmdID, cmd, ptmx)
+		return
+	}
+
+	// Send handshake
+	handshake := fmt.Sprintf("{\"type\":\"pty_session\",\"cmd_id\":\"%s\"}\n", cmdID)
+	if _, err := conn.Write([]byte(handshake)); err != nil {
+		conn.Close()
+		handlePTYSerial(cmdID, cmd, ptmx)
+		return
+	}
+
+	// Clear send/recv timeouts for long-lived session
+	fd := int(conn.Fd())
+	zero := syscall.Timeval{}
+	syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &zero)
+	syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &zero)
+
+	var wg sync.WaitGroup
+
+	// PTY output -> vsock (guest to host)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 32768)
+		for {
+			n, err := ptmx.Read(buf)
+			if n > 0 {
+				if _, werr := conn.Write(buf[:n]); werr != nil {
+					break
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
+
+	// Vsock input -> PTY (host to guest)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 32768)
+		for {
+			n, err := conn.Read(buf)
+			if n > 0 {
+				ptmx.Write(buf[:n])
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
+
+	// Wait for process exit
+	err = cmd.Wait()
+	ec := 0
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			ec = ee.ExitCode()
+		} else {
+			ec = 1
+		}
+	}
+
+	ptmx.Close()
+	conn.Close()
+	wg.Wait()
+
+	sessionsMu.Lock()
+	delete(sessions, cmdID)
+	sessionsMu.Unlock()
+	sendEvent("exit", map[string]interface{}{"cmd_id": cmdID, "exit_code": ec})
+}
+
+func handlePTYSerial(cmdID string, cmd *exec.Cmd, ptmx *os.File) {
 	// Read PTY output with base64 encoding for binary safety
 	go func() {
 		defer ptmx.Close()
@@ -1195,7 +1283,7 @@ func main() {
 			go handleExec(req.ID, req.Command, req.Bg, req.Env, req.UseVsockOutput, req.VsockPort)
 
 		case "pty_exec":
-			handlePTYExec(req.ID, req.Command, req.Cols, req.Rows, req.Env)
+			handlePTYExec(req.ID, req.Command, req.Cols, req.Rows, req.Env, req.UseVsock)
 
 		case "input":
 			handleInput(req.ID, req.Data, req.Encoding)

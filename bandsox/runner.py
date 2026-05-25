@@ -49,6 +49,12 @@ def main():
         default=None,
         help="JSON blob describing vsock configuration for a restored VM",
     )
+    parser.add_argument(
+        "--vm-config",
+        type=str,
+        default=None,
+        help="JSON blob with full VM config for fresh creation (kernel, rootfs, vcpu, etc.)",
+    )
     args = parser.parse_args()
 
     # Register signal handlers
@@ -88,6 +94,18 @@ def main():
 
     try:
         vm.start_process()
+
+        if args.vm_config:
+            try:
+                vm_config = json.loads(args.vm_config)
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid --vm-config JSON: {e}")
+                sys.exit(2)
+            logger.info(f"Configuring fresh VM from provided config")
+            vm.configure_prealloc(vm_config)
+            vm.start()
+            logger.info(f"Fresh VM {args.vm_id} configured and started")
+
         logger.info(f"VM {args.vm_id} started. Waiting for completion...")
         console_sock = vm.console_socket_path
         logger.info(f"Console multiplexer listening on {console_sock}")
