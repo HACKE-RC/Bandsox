@@ -16,30 +16,30 @@ pip install -e .
 bandsox init --rootfs-url ./bandsox-base.ext4
 
 # Start the server (auth is off unless auth.json exists)
-sudo python3 -m bandsox.cli serve --host 0.0.0.0 --port 8000
+bandsox serve --host 0.0.0.0 --port 8000
 
 # Enable auth (off by default, creates auth.json)
-sudo bandsox auth init --storage /var/lib/sandbox
+bandsox auth init --storage /var/lib/sandbox
 
 # Manage auth
-sudo bandsox auth set-password --storage /var/lib/sandbox
+bandsox auth set-password --storage /var/lib/sandbox
 bandsox auth create-key my-key
 bandsox auth list-keys
 bandsox auth revoke-key bsx_k_<id>
 
 # Create a VM
-sudo python3 -m bandsox.cli create ubuntu:latest --name my-vm
+bandsox create ubuntu:latest --name my-vm
 
 # Open terminal to a VM
-sudo python3 -m bandsox.cli terminal <vm_id>
+bandsox terminal <vm_id>
 
 # Unit tests
 uv run pytest
 
-# Smoke scripts (require sudo, boot real microVMs)
-sudo python3 tests/smoke_bandsox.py
-sudo python3 tests/smoke_go_agent.py
-sudo python3 tests/smoke_internet.py
+# Smoke scripts (boot real microVMs; may prompt for sudo during networking setup)
+python3 tests/smoke_bandsox.py
+python3 tests/smoke_go_agent.py
+python3 tests/smoke_internet.py
 ```
 
 ## Architecture
@@ -73,7 +73,7 @@ CLI credentials are stored at `~/.bandsox/credentials`.
 
 ### Host-guest communication
 
-The agent (`agent.py`) runs inside each VM and talks to the host over serial console (ttyS0) using a JSON protocol. Commands are sent as JSON messages with types like `exec`, `read_file`, `write_file`, and the agent responds with structured results.
+The Go guest agent (`bandsox-agent`, built from `agent/main.go`) runs inside each VM and talks to the host over serial console (ttyS0) using a JSON protocol, with vsock for bulk I/O and PTY data. Commands are sent as JSON messages with types like `exec`, `read_file`, `write_file`, and the agent responds with structured results.
 
 ### Networking
 
@@ -98,7 +98,7 @@ Large artifacts (vmlinux kernel, CNI binaries, rootfs images) are downloaded by 
 - Linux with KVM support
 - Firecracker binary at `/usr/bin/firecracker`
 - Python 3.8+
-- sudo access (required for TAP device setup)
+- sudo for TAP/NAT when networking is enabled (prompted as needed)
 - Docker (for building rootfs from images)
 
 ## Code style

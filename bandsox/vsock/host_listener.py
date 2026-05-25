@@ -16,6 +16,7 @@ import os
 import socket
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -30,6 +31,15 @@ from .protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PtySessionSlot:
+    """Tracks a pending or active PTY vsock session."""
+    on_output: Optional[Callable] = None
+    on_exit: Optional[Callable] = None
+    ready: threading.Event = field(default_factory=threading.Event)
+    conn: Optional[socket.socket] = None
 
 
 class VsockHostListener:
@@ -89,6 +99,9 @@ class VsockHostListener:
         # content here so the guest can download it via vsock.
         self._pending_downloads: dict[str, bytes] = {}
         self._pending_downloads_lock = threading.Lock()
+
+        self._pending_pty_sessions: dict[str, PtySessionSlot] = {}
+        self._pending_pty_sessions_lock = threading.Lock()
 
     def start(self):
         """Start listening for guest connections."""
@@ -254,6 +267,30 @@ class VsockHostListener:
         with self._pending_downloads_lock:
             return self._pending_downloads.get(cmd_id)
 
+    def register_pending_pty_session(self, cmd_id: str, on_output, on_exit) -> PtySessionSlot:
+        """Register a PTY session that the guest will connect to via vsock.
+
+        Returns a PtySessionSlot whose 'ready' Event is set once the guest
+        connects, and 'conn' holds the vsock socket for input writes.
+        """
+        slot = PtySessionSlot(on_output=on_output, on_exit=on_exit)
+        with self._pending_pty_sessions_lock:
+            self._pending_pty_sessions[cmd_id] = slot
+        return slot
+
+    def unregister_pending_pty_session(self, cmd_id: str):
+        with self._pending_pty_sessions_lock:
+            slot = self._pending_pty_sessions.pop(cmd_id, None)
+        if slot and slot.conn:
+            try:
+                slot.conn.close()
+            except Exception:
+                pass
+
+    def get_pending_pty_session(self, cmd_id: str) -> Optional[PtySessionSlot]:
+        with self._pending_pty_sessions_lock:
+            return self._pending_pty_sessions.get(cmd_id)
+
     def _accept_loop(self):
         """Accept incoming connections and spawn handler threads.
 
@@ -342,6 +379,11 @@ class VsockHostListener:
                 self._send_error(client, "unknown", f"Invalid JSON: {e}")
                 return
 
+            # Handle PTY session before parse_request (it's not a standard request type)
+            if data.get("type") == RequestType.PTY_SESSION.value:
+                self._handle_pty_session(client, data)
+                return
+
             request = parse_request(data)
             if request is None:
                 logger.error(f"Unknown request type: {data.get('type')}")
@@ -383,6 +425,54 @@ class VsockHostListener:
                 client.close()
             except Exception:
                 pass
+
+    def _handle_pty_session(self, client: socket.socket, data: dict):
+        """Handle a PTY session connection (long-lived bidirectional raw stream).
+
+        After the JSON handshake, raw bytes flow in both directions:
+        - guest -> host: PTY output (terminal content)
+        - host -> guest: keyboard input
+
+        The connection stays open until the PTY exits or the client disconnects.
+        """
+        cmd_id = data.get("cmd_id")
+        if not cmd_id:
+            self._send_error(client, "unknown", "pty_session missing cmd_id")
+            return
+
+        slot = self.get_pending_pty_session(cmd_id)
+        if slot is None:
+            for _ in range(20):
+                slot = self.get_pending_pty_session(cmd_id)
+                if slot is not None:
+                    break
+                time.sleep(0.01)
+        if slot is None:
+            self._send_error(client, cmd_id, "No pending PTY session for this cmd_id")
+            return
+
+        client.settimeout(None)
+        slot.conn = client
+        slot.ready.set()
+
+        try:
+            while True:
+                chunk = client.recv(65536)
+                if not chunk:
+                    break
+                if slot.on_output:
+                    slot.on_output(chunk)
+        except (OSError, ConnectionResetError):
+            pass
+        finally:
+            slot.conn = None
+            with self._pending_pty_sessions_lock:
+                self._pending_pty_sessions.pop(cmd_id, None)
+            if slot.on_exit:
+                try:
+                    slot.on_exit()
+                except Exception:
+                    pass
 
     def _handle_upload(
         self, client: socket.socket, request: UploadRequest, initial_data: bytes

@@ -343,10 +343,10 @@ All pages redirect to `/login` if not authenticated.
 
 ### 1. Root privileges and networking
 
-Networking (`enable_networking=True`) requires sudo.
+Networking (`enable_networking=True`) uses privileged host commands.
 
-- The library runs `sudo ip ...` and `sudo iptables ...` to configure TAP devices and NAT.
-- Run the script as root or have passwordless sudo for networking commands.
+- The library runs `sudo ip ...` and `sudo iptables ...` to configure TAP devices and NAT; you will be prompted for a password when needed.
+- Passwordless sudo for those commands avoids prompts in automation.
 - If you don't have sudo access, create VMs with `enable_networking=False`.
 
 ### 2. File operations and VM pausing

@@ -102,14 +102,14 @@ vm.stop()
 Start the server:
 
 ```bash
-sudo python3 -m bandsox.cli serve --host 0.0.0.0 --port 8000
+bandsox serve --host 0.0.0.0 --port 8000
 ```
 
 Visit `http://localhost:8000` to access the dashboard. Authentication is off by default -- see [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) to enable it.
 
 ### Authentication
 
-Auth is off by default. Turn it on with `sudo bandsox auth init --storage /var/lib/sandbox`. See [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) for the full setup, CLI commands, SDK examples, and endpoint reference.
+Auth is off by default. Turn it on with `bandsox auth init --storage /var/lib/sandbox`. See [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) for the full setup, CLI commands, SDK examples, and endpoint reference.
 
 ### CLI
 
@@ -117,13 +117,13 @@ BandSox includes a CLI tool `bandsox` (or `python -m bandsox.cli`).
 
 ```bash
 # Create a VM
-sudo python3 -m bandsox.cli create ubuntu:latest --name my-vm
+bandsox create ubuntu:latest --name my-vm
 
 # Open a terminal
-sudo python3 -m bandsox.cli terminal <vm_id>
+bandsox terminal <vm_id>
 
 # Start the server
-sudo python3 -m bandsox.cli serve --host 0.0.0.0 --port 8000
+bandsox serve --host 0.0.0.0 --port 8000
 ```
 
 ## Prerequisites
@@ -131,7 +131,7 @@ sudo python3 -m bandsox.cli serve --host 0.0.0.0 --port 8000
 - Linux with KVM support (bare metal or nested virtualization)
 - [Firecracker](https://firecracker-microvm.github.io/) installed at `/usr/bin/firecracker`
 - Python 3.8+
-- `sudo` access (required for TAP device networking)
+- `sudo` for TAP/NAT setup when networking is enabled (BandSox prompts as needed)
 - Vsock kernel module (`virtio-vsock`) in the guest kernel for fast file transfers (optional, falls back to serial)
 
 ## Installation
@@ -187,7 +187,7 @@ BandSox has four main modules:
 
 - `bandsox.core` -- manages VMs, snapshots, and CID/port allocation.
 - `bandsox.vm` -- wraps the Firecracker process; handles config, networking, vsock bridge, and guest interaction.
-- `bandsox.agent` -- a small Python agent injected into the VM that runs commands and transfers files (vsock or serial).
+- `bandsox/agent` -- Go guest agent (`bandsox-agent`) baked into VM images; runs commands and file I/O over serial and vsock.
 - `bandsox.server` -- FastAPI backend for the web dashboard and REST API, with built-in authentication.
 - `bandsox.auth` -- optional authentication. When `auth.json` exists, enforces API key and session auth. Stores hashed keys and a signing secret. Sessions are HMAC-signed tokens (no server-side state). Rate-limits login attempts.
 
@@ -240,15 +240,15 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mkdir -p /dev/pts
 mount -t devpts devpts /dev/pts
-P=$(command -v python3 || command -v python)
-[ -z "$P" ] && exec /usr/local/bin/agent.py
-exec "$P" /usr/local/bin/agent.py
+exec /usr/local/bin/bandsox-agent 2>&1
 EOF
 sudo chmod +x "$TMP/mnt/init"
 
+# Build the Go agent if needed (requires Go toolchain)
+(cd bandsox/agent && go build -ldflags='-s -w' -o agent .)
 sudo mkdir -p "$TMP/mnt/usr/local/bin"
-sudo cp bandsox/agent.py "$TMP/mnt/usr/local/bin/agent.py"
-sudo chmod 755 "$TMP/mnt/usr/local/bin/agent.py"
+sudo cp bandsox/agent/agent "$TMP/mnt/usr/local/bin/bandsox-agent"
+sudo chmod 755 "$TMP/mnt/usr/local/bin/bandsox-agent"
 
 sudo umount "$TMP/mnt"
 sudo e2fsck -fy "$OUT"

@@ -303,56 +303,119 @@ def handle_command(cmd_id, command, background=False, env=None):
         send_event("error", {"cmd_id": cmd_id, "error": str(e)})
 
 
-def handle_pty_command(cmd_id, command, cols=80, rows=24, env=None):
+def _pty_cleanup_and_exit(cmd_id, pid):
+    """Wait for PTY child process, clean up session state, and send exit event."""
+    _, status = os.waitpid(pid, 0)
+    exit_code = os.waitstatus_to_exitcode(status)
+    if cmd_id in sessions:
+        del sessions[cmd_id]
+    if cmd_id in pty_masters:
+        os.close(pty_masters[cmd_id])
+        del pty_masters[cmd_id]
+    send_event("exit", {"cmd_id": cmd_id, "exit_code": exit_code})
+
+
+def _start_serial_pty(master_fd, cmd_id, pid):
+    """Start serial PTY read + exit monitor threads."""
+    threading.Thread(
+        target=read_pty_master, args=(master_fd, cmd_id), daemon=True
+    ).start()
+    threading.Thread(
+        target=_pty_cleanup_and_exit, args=(cmd_id, pid), daemon=True
+    ).start()
+
+
+def handle_pty_command(cmd_id, command, cols=80, rows=24, env=None, use_vsock=False):
     try:
         pid, master_fd = pty.fork()
 
         if pid == 0:
-            # Child process
-            # Set window size
             winsize = struct.pack("HHHH", rows, cols, 0, 0)
             fcntl.ioctl(0, termios.TIOCSWINSZ, winsize)
-
-            # Prepare environment
             if env:
                 os.environ.update(env)
-
-            # Execute command
-            # Use shell to execute command string
             args = ["/bin/sh", "-c", command]
             os.execvp(args[0], args)
 
         else:
-            # Parent process
             pty_masters[cmd_id] = master_fd
-            sessions[cmd_id] = pid  # Store PID for PTY sessions
-
-            # Start thread to read from master_fd
-            t_read = threading.Thread(
-                target=read_pty_master, args=(master_fd, cmd_id), daemon=True
-            )
-            t_read.start()
-
-            # Monitor exit
-            def monitor_exit():
-                _, status = os.waitpid(pid, 0)
-                exit_code = os.waitstatus_to_exitcode(status)
-
-                if cmd_id in sessions:
-                    del sessions[cmd_id]
-                if cmd_id in pty_masters:
-                    os.close(pty_masters[cmd_id])
-                    del pty_masters[cmd_id]
-
-                send_event("exit", {"cmd_id": cmd_id, "exit_code": exit_code})
-
-            t_mon = threading.Thread(target=monitor_exit, daemon=True)
-            t_mon.start()
+            sessions[cmd_id] = pid
 
             send_event("status", {"cmd_id": cmd_id, "status": "started"})
 
+            if use_vsock:
+                threading.Thread(
+                    target=_pty_vsock_bridge, args=(master_fd, cmd_id, pid), daemon=True
+                ).start()
+            else:
+                _start_serial_pty(master_fd, cmd_id, pid)
+
     except Exception as e:
         send_event("error", {"cmd_id": cmd_id, "error": str(e)})
+
+
+def _pty_vsock_bridge(master_fd, cmd_id, pid):
+    """Bridge PTY I/O over vsock instead of serial."""
+    port = int(os.environ.get("BANDSOX_VSOCK_PORT", "9000"))
+    conn = vsock_create_connection(port, timeout=3.0)
+    if conn is None:
+        _start_serial_pty(master_fd, cmd_id, pid)
+        return
+
+    handshake = json.dumps({"type": "pty_session", "cmd_id": cmd_id}) + "\n"
+    try:
+        conn.sendall(handshake.encode())
+    except Exception:
+        conn.close()
+        _start_serial_pty(master_fd, cmd_id, pid)
+        return
+
+    conn.settimeout(None)
+
+    def output_loop():
+        try:
+            while True:
+                data = os.read(master_fd, 32768)
+                if not data:
+                    break
+                conn.sendall(data)
+        except OSError:
+            pass
+
+    def input_loop():
+        try:
+            while True:
+                data = conn.recv(32768)
+                if not data:
+                    break
+                os.write(master_fd, data)
+        except (OSError, ConnectionResetError):
+            pass
+
+    t_out = threading.Thread(target=output_loop, daemon=True)
+    t_in = threading.Thread(target=input_loop, daemon=True)
+    t_out.start()
+    t_in.start()
+
+    # Wait for process exit
+    _, status = os.waitpid(pid, 0)
+    exit_code = os.waitstatus_to_exitcode(status)
+
+    try:
+        os.close(master_fd)
+    except OSError:
+        pass
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+    if cmd_id in sessions:
+        del sessions[cmd_id]
+    if cmd_id in pty_masters:
+        del pty_masters[cmd_id]
+
+    send_event("exit", {"cmd_id": cmd_id, "exit_code": exit_code})
 
 
 def handle_input(cmd_id, data, encoding=None):
@@ -729,9 +792,10 @@ def main():
                     cols = req.get("cols", 80)
                     rows = req.get("rows", 24)
                     env = req.get("env")
+                    use_vsock = req.get("use_vsock", False)
                     t = threading.Thread(
                         target=handle_pty_command,
-                        args=(cmd_id, cmd, cols, rows, env),
+                        args=(cmd_id, cmd, cols, rows, env, use_vsock),
                         daemon=True,
                     )
                     t.start()

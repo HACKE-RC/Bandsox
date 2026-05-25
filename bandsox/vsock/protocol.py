@@ -31,6 +31,9 @@ class RequestType(str, Enum):
     DOWNLOAD = "download"  # Guest wants to receive file FROM host as JSON/base64 chunks
     DOWNLOAD_RAW = "download_raw"  # Guest wants raw bytes after a JSON header
 
+    # Terminal session (long-lived bidirectional raw stream)
+    PTY_SESSION = "pty_session"
+
     # Utility requests
     PING = "ping"  # Connection health check
 

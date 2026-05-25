@@ -1402,7 +1402,12 @@ class MicroVM:
     def start_pty_session(
         self, command: str, cols: int = 80, rows: int = 24, on_stdout=None, on_exit=None
     ):
-        """Starts a PTY session in the VM."""
+        """Starts a PTY session in the VM.
+
+        If vsock is available, the PTY data plane runs over a dedicated vsock
+        connection (raw bytes, no base64). Resize/kill still go over serial.
+        Falls back to serial if vsock is unavailable.
+        """
         if not self.agent_ready:
             if not self.process and not self.console_conn:
                 self.connect_to_console()
@@ -1410,11 +1415,19 @@ class MicroVM:
                 raise Exception("Agent not ready")
 
         session_id = str(uuid.uuid4())
+        use_vsock = self.vsock_enabled and self.vsock_listener is not None
+
+        vsock_slot = None
+        if use_vsock:
+            vsock_slot = self.vsock_listener.register_pending_pty_session(
+                session_id, on_output=on_stdout, on_exit=on_exit
+            )
 
         with self._event_callbacks_lock:
             self.event_callbacks[session_id] = {
-                "on_stdout": on_stdout,  # PTY only has stdout (merged)
-                "on_exit": on_exit,
+                "on_stdout": on_stdout if not use_vsock else None,
+                "on_exit": on_exit if not use_vsock else None,
+                "_vsock_slot": vsock_slot,
             }
 
         req = json.dumps(
@@ -1424,6 +1437,7 @@ class MicroVM:
                 "command": command,
                 "cols": cols,
                 "rows": rows,
+                "use_vsock": use_vsock,
             }
         )
         self._write_to_agent(req + "\n")
@@ -1431,10 +1445,27 @@ class MicroVM:
         return session_id
 
     def send_session_input(self, session_id: str, data: str, encoding: str = None):
-        """Sends input to a session's stdin."""
+        """Sends input to a session's stdin.
+
+        If the session is using vsock, writes raw bytes directly to the
+        vsock connection. Otherwise falls back to serial JSON.
+        """
         with self._event_callbacks_lock:
-            if session_id not in self.event_callbacks:
+            entry = self.event_callbacks.get(session_id)
+            if entry is None:
                 return
+
+        vsock_slot = entry.get("_vsock_slot") if entry else None
+        if vsock_slot and vsock_slot.conn:
+            if encoding == "base64":
+                raw = base64.b64decode(data)
+            else:
+                raw = data.encode("utf-8") if isinstance(data, str) else data
+            try:
+                vsock_slot.conn.sendall(raw)
+                return
+            except (OSError, BrokenPipeError):
+                pass
 
         payload = {"type": "input", "id": session_id, "data": data}
         if encoding:
@@ -1444,7 +1475,7 @@ class MicroVM:
         self._write_to_agent(req + "\n")
 
     def resize_session(self, session_id: str, cols: int, rows: int):
-        """Resizes a PTY session."""
+        """Resizes a PTY session (always via serial — small control message)."""
         with self._event_callbacks_lock:
             if session_id not in self.event_callbacks:
                 return
@@ -1459,6 +1490,12 @@ class MicroVM:
         with self._event_callbacks_lock:
             if session_id not in self.event_callbacks:
                 return
+
+        # Clean up vsock PTY session if active
+        entry = self.event_callbacks.get(session_id)
+        if entry and entry.get("_vsock_slot"):
+            if self.vsock_listener:
+                self.vsock_listener.unregister_pending_pty_session(session_id)
 
         req = json.dumps({"type": "kill", "id": session_id})
         self._write_to_agent(req + "\n")
@@ -1509,8 +1546,14 @@ class MicroVM:
         enable_vsock: bool = True,
         disk_bandwidth_mbps: int = 0,
         disk_iops: int = 0,
+        _prealloc_network: dict = None,
+        _prealloc_vsock: dict = None,
     ):
-        """Configures the VM resources."""
+        """Configures the VM resources.
+
+        When _prealloc_network / _prealloc_vsock are provided, those
+        pre-computed configs are applied directly (no allocation loop).
+        """
         self.rootfs_path = rootfs_path
 
         if not boot_args:
@@ -1526,16 +1569,14 @@ class MicroVM:
         )
 
         self.client.put_machine_config(vcpu, mem_mib)
-        # Attach virtio-rng for fresh VMs so getrandom() does not block in
-        # low-entropy guests (which can stall git/openssl on first use).
-        # Older Firecracker builds may not support /entropy; keep startup
-        # backwards-compatible in that case.
         try:
             self.client.put_entropy()
         except Exception as e:
             logger.warning(f"Failed to configure entropy device: {e}")
 
-        if enable_networking:
+        # --- Networking ---
+        network_config = _prealloc_network
+        if network_config is None and enable_networking:
             base_idx = int(self.vm_id[-2:], 16)
             for i in range(50):
                 subnet_idx = (base_idx + i) % 253 + 1
@@ -1546,39 +1587,75 @@ class MicroVM:
 
                 try:
                     setup_tap_device(self.tap_name, host_ip, host_mac=host_mac)
-                    self.network_config = {
+                    network_config = {
                         "host_ip": host_ip,
                         "guest_ip": guest_ip,
                         "guest_mac": guest_mac,
                         "host_mac": host_mac,
                         "tap_name": self.tap_name,
                     }
-                    self.network_setup = True
-                    logger.info(f"Allocated network {host_ip} for {self.vm_id}")
                     break
                 except Exception:
                     continue
             else:
                 raise Exception("Failed to allocate free network subnet after retries")
 
-            self.client.put_network_interface("eth0", self.tap_name, guest_mac)
+        if network_config:
+            host_ip = network_config["host_ip"]
+            guest_ip = network_config["guest_ip"]
+            guest_mac = network_config["guest_mac"]
+            host_mac = network_config.get("host_mac")
+            tap_name = network_config.get("tap_name", self.tap_name)
+
+            if _prealloc_network:
+                setup_tap_device(tap_name, host_ip, host_mac=host_mac)
+
+            self.network_config = network_config
+            self.network_setup = True
+            self.tap_name = tap_name
+            self.client.put_network_interface("eth0", tap_name, guest_mac)
 
             network_boot_args = (
                 f"ip={guest_ip}::{host_ip}:255.255.255.0::eth0:off:8.8.8.8"
             )
-            full_boot_args = f"{boot_args} {network_boot_args}"
+            boot_args = f"{boot_args} {network_boot_args}"
 
-            self.client.put_boot_source(kernel_path, full_boot_args)
-        else:
-            self.client.put_boot_source(kernel_path, boot_args)
+        self.client.put_boot_source(kernel_path, boot_args)
 
-        if enable_vsock:
+        # --- Vsock ---
+        if _prealloc_vsock and _prealloc_vsock.get("enabled"):
+            self._setup_vsock_bridge(
+                _prealloc_vsock["cid"], _prealloc_vsock["port"]
+            )
+        elif enable_vsock:
             from .core import BandSox
 
             bs = BandSox()
             cid = bs._allocate_cid()
             port = bs._allocate_port()
             self._setup_vsock_bridge(cid, port)
+
+    def configure_prealloc(self, config: dict):
+        """Configure VM from a pre-allocated config dict (used by runner).
+
+        Delegates to configure() with pre-computed network/vsock values so
+        that Firecracker API calls are not duplicated.
+        """
+        network_config = config.get("network_config")
+        vsock_config = config.get("vsock_config")
+
+        self.configure(
+            config["kernel_path"],
+            config["rootfs_path"],
+            config["vcpu"],
+            config["mem_mib"],
+            enable_networking=False,
+            enable_vsock=False,
+            disk_bandwidth_mbps=config.get("disk_bandwidth_mbps", 0),
+            disk_iops=config.get("disk_iops", 0),
+            _prealloc_network=network_config,
+            _prealloc_vsock=vsock_config,
+        )
 
     def update_drive(self, drive_id: str, path_on_host: str):
         """Updates a drive's backing file path."""
