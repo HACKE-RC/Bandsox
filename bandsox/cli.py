@@ -14,6 +14,7 @@ import struct
 import requests
 import tarfile
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -157,6 +158,73 @@ def _format_table(rows, headers, max_width=None):
     lines = [fmt_row(headers), divider]
     lines.extend(fmt_row(row) for row in rows)
     return "\n".join(lines)
+
+def _resolve_vm_identifier(identifier, host, port):
+    """Resolve a VM identifier (ID or name) to a VM ID.
+
+    If the identifier matches multiple VMs by name, prompt the user to select one.
+    Returns the resolved VM ID or None if resolution fails.
+    """
+    base = f"http://{host}:{port}/api/vms"
+    try:
+        resp = requests.get(base, headers=_auth_headers())
+        if resp.status_code != 200:
+            print(f"Failed to query VMs ({resp.status_code}): {resp.text}")
+            return None
+        vms = resp.json()
+    except Exception as e:
+        print(f"Failed to connect to server: {e}")
+        return None
+
+    # Exact ID match
+    for vm in vms:
+        if vm.get("id") == identifier:
+            return identifier
+
+    # Name match
+    matches = [vm for vm in vms if vm.get("name") == identifier]
+
+    if len(matches) == 0:
+        print(f"No VM found with ID or name '{identifier}'")
+        return None
+
+    if len(matches) == 1:
+        return matches[0]["id"]
+
+    # Multiple matches - prompt user to select
+    print(f"\nMultiple VMs found with name '{identifier}':\n")
+
+    rows = []
+    for i, vm in enumerate(matches, 1):
+        created = vm.get("created_at", 0)
+        created_str = datetime.fromtimestamp(created).strftime("%Y-%m-%d %H:%M:%S") if created else "unknown"
+        rows.append([
+            str(i),
+            vm.get("id", "?"),
+            vm.get("status", "unknown"),
+            vm.get("image", "n/a"),
+            created_str,
+        ])
+
+    term_cols = shutil.get_terminal_size(fallback=(120, 20)).columns
+    table = _format_table(
+        rows,
+        ["#", "ID", "Status", "Image", "Created"],
+        max_width=term_cols,
+    )
+    print(table)
+
+    while True:
+        try:
+            choice = input(f"\nSelect VM [1-{len(matches)}]: ").strip()
+            idx = int(choice) - 1
+            if 0 <= idx < len(matches):
+                return matches[idx]["id"]
+            print(f"Please enter a number between 1 and {len(matches)}")
+        except (ValueError, EOFError, KeyboardInterrupt):
+            print()
+            return None
+
 
 def terminal_client(vm_id, host, port):
     try:
@@ -386,7 +454,7 @@ def main():
     )
     
     term_parser = subparsers.add_parser("terminal", help="Open a terminal session in a VM")
-    term_parser.add_argument("vm_id", type=str, help="VM ID")
+    term_parser.add_argument("vm_id", type=str, help="VM ID or name")
     term_parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to connect to")
     term_parser.add_argument("--port", type=int, default=8000, help="Port to connect to")
 
@@ -519,7 +587,10 @@ def main():
             reload=args.reload,
         )
     elif args.command == "terminal":
-        terminal_client(args.vm_id, args.host, args.port)
+        vm_id = _resolve_vm_identifier(args.vm_id, args.host, args.port)
+        if vm_id is None:
+            return
+        terminal_client(vm_id, args.host, args.port)
     elif args.command == "create":
         try:
             url = f"http://{args.host}:{args.port}/api/vms"
