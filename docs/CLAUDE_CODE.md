@@ -1,8 +1,8 @@
 # Claude Code
 
-> Run Anthropic's Claude Code agentic coding CLI inside secure Bandsox Firecracker microVM sandboxes.
+> Run Anthropic's Claude Code CLI inside Bandsox Firecracker microVM sandboxes.
 
-Bandsox gives you kernel-level isolation for Claude Code sessions with millisecond boot times and instant snapshot/restore. This matches the "run Claude Code in a sandbox" pattern from E2B and others, while adding VM-level pause + snapshot for agentic workflows that can span hours or days.
+This is roughly the same shape as E2B's `claude-code` template: pull a prebuilt image, set `ANTHROPIC_API_KEY`, run `claude -p '...'`. The thing Bandsox adds is VM-level pause and snapshot, which lets you save a half-finished session and pick it up later on a different host.
 
 ## Prerequisites
 
@@ -94,35 +94,38 @@ mcp={"my-custom": {"spec": {"command": "uvx", "args": ["my-mcp"], "env": {"FOO":
 
 Unknown server names raise `ValueError` (typos do not silently no-op). MCP-derived credentials are kept out of persisted VM metadata.
 
-## Snapshot + resume (Bandsox superpower)
+For the full list of registered servers and instructions on adding new ones, see [MCP_REGISTRY.md](MCP_REGISTRY.md).
 
-Claude Code supports its own `--resume` / session continuation. Bandsox makes the entire environment (filesystem + any Claude Code state files) snapshot-restorable in milliseconds.
+## Snapshot and resume
+
+Claude Code has its own `--resume` flag for picking up a previous session. Bandsox snapshots the whole VM around it, so you can stop a long-running session, restore it later, and find the filesystem, any `.claude/` state, and open processes in the same shape they were when you paused.
 
 ```python
 # ... long running task inside the VM ...
 vm.pause()
 snap = vm.snapshot("/snapshots/claude-task-42")
 
-# hours or days later, on another machine or after reboot:
+# Hours or days later, on a different machine if you want:
 restored = bs.restore_vm(snap)
-# The Claude Code working tree, any .claude/ state, and open files are exactly as left.
 restored.exec_command("claude --dangerously-skip-permissions --resume 'Continue the previous task'")
 ```
 
-This is the key differentiator versus container-based sandboxes: true VM snapshots give you durable, forkable, auditable agent sessions with full kernel isolation.
+Why bother with VM snapshots instead of containers: container checkpoints don't capture kernel state, so anything that depends on PIDs, namespaces, or open network sockets tends to break across the restore boundary. Firecracker snapshots include the full kernel + memory + disk image, which is what makes the pause/resume actually round-trip.
 
 ### Snapshot RNG safety
 
-When two VMs are restored from the same snapshot, the kernel CRNG state is identical — without intervention, both copies would produce identical `/dev/urandom` bytes, identical TLS session keys, etc. Bandsox handles this by mixing a fresh per-restore host seed into both kernel pools at restore time. The mix uses only `coreutils` (`base64`, `printf`) so it works in any image, including the claude-code template which has no `python3`. If `python3` is also present, the kernel additionally credits the entropy via the `RNDADDENTROPY` ioctl.
+Two VMs restored from the same snapshot start with identical kernel CRNG state. Without intervention, both copies would produce the same `/dev/urandom` bytes, the same TLS session keys, and so on, until the kernel collects new interrupt entropy.
 
-You can verify the divergence by restoring the same snapshot twice and reading `head -c 32 /dev/urandom` from each: the outputs will differ.
+Bandsox handles that by mixing a fresh per-restore host seed into both `/dev/random` and `/dev/urandom` at restore time. The mix is a shell `printf | base64 -d` pipeline, so it works on any image, including the claude-code template which has no `python3`. When `python3` is present, the kernel additionally credits the entropy through the `RNDADDENTROPY` ioctl.
 
-## Notes
+To check that the divergence actually happened: restore the same snapshot twice and read `head -c 32 /dev/urandom` from each VM. The outputs will differ.
 
-- The default working directory inside these images is `/workspace`.
-- For unattended runs, `--dangerously-skip-permissions` is the documented flag (exactly as shown in E2B and Anthropic examples). Claude Code refuses this flag when running as `root`; set `IS_SANDBOX=1` in the VM env to acknowledge you're inside an isolated sandbox.
-- Network egress is enabled by default (`enable_networking=True`); pass `False` for fully air-gapped sessions.
-- The template installs `haveged`, and bandsox's `/init` shim auto-starts it so the kernel CRNG is unblocked before Claude Code's first TLS handshake. Without this, fresh microVMs running the 2021-era Firecracker quickstart kernel can hang on HTTPS for tens of seconds. Custom images that don't include `haveged` (or `rng-tools`) will see this stall.
-- All the usual Bandsox primitives (fast file read/write over vsock, exec streaming, PTY sessions) are available if you need to drive or observe the Claude Code process from the host.
+## Things to know
 
-See the main README and `bandsox --help` for more VM lifecycle commands.
+- The working directory inside the image is `/workspace`. The MCP config lands there as `.mcp.json` and Claude Code reads it from the cwd.
+- For unattended runs use `--dangerously-skip-permissions` (the flag E2B and the Anthropic docs both show). Claude Code refuses it when it sees uid 0, so either run as a non-root user inside the VM or set `IS_SANDBOX=1` in the env to acknowledge you're isolated.
+- Network egress is on by default (`enable_networking=True`). Pass `False` for an air-gapped run.
+- The template installs `haveged` and bandsox's `/init` shim starts it before the agent. Without that, the 2021 Firecracker quickstart kernel can leave `crng_init=0` for tens of seconds, and Claude Code's first TLS handshake just hangs. If you build your own image, install `haveged` (or `rng-tools`) or accept the stall.
+- Everything else BandSox exposes still works: file read/write over vsock, exec streaming, PTY sessions. Use them if you need to drive Claude Code from the host instead of `-p` one-shots.
+
+The main README and `bandsox --help` cover the rest of the VM lifecycle.

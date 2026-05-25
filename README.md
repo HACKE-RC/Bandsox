@@ -78,7 +78,7 @@ vm.exec_command(
 vm.stop()
 ```
 
-See [docs/CLAUDE_CODE.md](docs/CLAUDE_CODE.md) for headless prompts, repository workflows, MCP details, and the snapshot/resume pattern that lets you pause and later resume long-running Claude Code sessions.
+[docs/CLAUDE_CODE.md](docs/CLAUDE_CODE.md) covers headless prompts, working with a cloned repo inside the VM, and the pause/snapshot/resume pattern for long-running Claude Code sessions. [docs/MCP_REGISTRY.md](docs/MCP_REGISTRY.md) lists the built-in MCP servers and how to add new ones.
 
 ### Remote server usage
 
