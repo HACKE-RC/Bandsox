@@ -121,7 +121,7 @@ vm = manager.create_vm(
 )
 ```
 
-The `mcp=` dict is resolved against the [MCP server registry](MCP_REGISTRY.md), merged into the VM env vars (caller `env_vars` wins on key collisions), and staged as `/workspace/.mcp.json` inside the rootfs before boot. MCP-derived secrets are redacted in the persisted `metadata.json` but the live VM process sees the unredacted values. Unknown server names and malformed `spec` blocks raise `ValueError`. See the [Claude Code cookbook](CLAUDE_CODE.md) for the full end-to-end pattern.
+BandSox resolves each `mcp=` entry against the [MCP server registry](MCP_REGISTRY.md), merges the resulting env vars into the VM's environment (caller-supplied `env_vars` win on collisions), and stages `/workspace/.mcp.json` in the rootfs before the VM boots. MCP-derived secrets show as `<redacted>` in `metadata.json` on disk; the running VM gets the real values. Unknown server names and malformed `spec` blocks raise `ValueError` instead of silently no-opping. The [Claude Code cookbook](CLAUDE_CODE.md) walks through a full end-to-end use.
 
 ### Executing commands
 
@@ -268,8 +268,8 @@ When auth is enabled (`auth.json` exists), all `/api/` endpoints except auth log
 - `GET /api/vms` -- list VMs.
 - `POST /api/vms` -- create a VM from an image.
   - Body: `{ "image": "alpine:latest", "name": "...", "vcpu": 1, "mem_mib": 128, "enable_networking": true, "force_rebuild": false, "disk_size_mib": 4096, "env_vars": {"KEY": "value"}, "mcp": {"github": {"token": "ghp_..."}} }`
-  - `env_vars`: optional, exposed to every `exec_command` / session call inside the VM.
-  - `mcp`: optional, resolved against the [MCP registry](MCP_REGISTRY.md). MCP-derived env vars are merged into `env_vars`; secrets are redacted on disk. Returns 500 with a `ValueError` for unknown server names or malformed `spec` entries.
+  - `env_vars` is optional and gets forwarded into every `exec_command` and session call.
+  - `mcp` is optional. It's resolved against the [MCP registry](MCP_REGISTRY.md), its derived env vars are merged into `env_vars`, and secrets are redacted before write to disk. Unknown server names or malformed `spec` entries come back as a 500 carrying the `ValueError` message.
 - `POST /api/vms/from-dockerfile` -- build an image from an uploaded Dockerfile and create a VM. Multipart form with `dockerfile` file plus optional fields (`tag`, `name`, `vcpu`, `mem_mib`, `disk_size_mib`, `force_rebuild`, `env_vars` JSON, `metadata` JSON, `mcp` JSON).
 - `GET /api/vms/{vm_id}` -- get VM details.
 - `POST /api/vms/{vm_id}/stop|pause|resume` -- lifecycle operations.
@@ -368,12 +368,12 @@ VMs need a compatible Linux kernel binary (`vmlinux`).
 
 ### 4. Entropy and HTTPS on fresh boot
 
-The Firecracker quickstart kernel that ships with `bandsox init` does not have `RANDOM_TRUST_CPU=y`, so `crng_init` can take tens of seconds to complete on a fresh microVM. During that window all TLS handshakes block. Two coping mechanisms ship in this repo:
+The Firecracker quickstart kernel that `bandsox init` downloads doesn't have `RANDOM_TRUST_CPU=y` enabled, so on a fresh microVM `crng_init` can take tens of seconds to complete. While it's not done, every TLS handshake blocks. Two things help here:
 
-- `DEFAULT_BOOT_ARGS` includes `random.trust_cpu=on`, which is a no-op on the bundled kernel but works automatically once you update `vmlinux` to anything compiled with `RANDOM_TRUST_CPU=y`.
-- The `/init` shim auto-starts `haveged` (or `rng-tools`) if the image installs it. The published `templates/claude-code/Dockerfile` does this; custom images that need HTTPS on the first second of boot should `apt-get install -y haveged` (or equivalent).
+- `DEFAULT_BOOT_ARGS` passes `random.trust_cpu=on`. The bundled kernel ignores it, but it kicks in automatically the moment you swap `vmlinux` for any build with `RANDOM_TRUST_CPU=y`.
+- The `/init` shim runs `haveged` (or `rng-tools`) if the image has it installed. The `templates/claude-code/Dockerfile` does this. If you build your own image and need TLS in the first second of boot, `apt-get install -y haveged` (or equivalent for your distro).
 
-On snapshot restore, BandSox always mixes a fresh per-restore host seed into both `/dev/urandom` and `/dev/random` using `printf | base64 -d`, so two VMs restored from the same snapshot diverge their CRNG immediately even on images without `python3`. Images that also have `python3` additionally get the `RNDADDENTROPY` ioctl for proper entropy crediting.
+On snapshot restore, BandSox always mixes a per-restore host seed into `/dev/urandom` and `/dev/random` via `printf | base64 -d`. That diverges the CRNG of two VMs restored from the same snapshot immediately, even on images without `python3`. If `python3` is available too, the kernel also credits entropy through `RNDADDENTROPY`.
 
 ### 5. Image size
 
