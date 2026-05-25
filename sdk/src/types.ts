@@ -15,6 +15,7 @@ export interface CreateVmOptions {
   disk_size_mib?: number;
   env_vars?: Record<string, string> | null;
   metadata?: Record<string, unknown> | null;
+  mcp?: Record<string, Record<string, unknown>> | null;
 }
 
 export interface CreateVmFromDockerfileOptions {
@@ -26,6 +27,7 @@ export interface CreateVmFromDockerfileOptions {
   force_rebuild?: boolean;
   env_vars?: Record<string, string> | null;
   metadata?: Record<string, unknown> | null;
+  mcp?: Record<string, Record<string, unknown>> | null;
 }
 
 export interface RestoreVmOptions {

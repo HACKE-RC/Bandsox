@@ -129,6 +129,17 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mkdir -p /dev/pts
 mount -t devpts devpts /dev/pts
+# Best-effort entropy daemon. Fresh microVMs ship with crng_init=0 and the
+# 2021-era Firecracker quickstart kernel is built without RANDOM_TRUST_CPU,
+# which makes TLS handshakes (e.g. Claude Code -> api.anthropic.com) hang
+# until the kernel collects enough interrupt entropy. If the image bundles
+# haveged, start it now so HTTPS works on first boot. Silent no-op when
+# haveged is not installed. (rngd is intentionally not auto-started: modern
+# rng-tools refuses /dev/urandom as a source and there is no portable
+# auto-source flag worth defaulting to here.)
+if command -v haveged >/dev/null 2>&1; then
+    haveged -w 1024 >/dev/null 2>&1 || true
+fi
 # Disable serial-console TTY echo so JSON commands written to the agent's
 # stdin are not echoed back onto stdout where the host parser would see
 # them concatenated with real agent responses and silently drop events.

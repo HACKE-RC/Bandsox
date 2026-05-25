@@ -57,6 +57,29 @@ print(content)  # Hello World
 vm.stop()
 ```
 
+### Run Claude Code
+
+```python
+import os
+from bandsox.core import BandSox
+
+bs = BandSox()
+vm = bs.create_vm(
+    "ghcr.io/bandsox/claude-code:latest",
+    env_vars={"ANTHROPIC_API_KEY": os.environ["ANTHROPIC_API_KEY"]},
+    # Optional: wire MCP servers (resolved from built-in registry)
+    mcp={"github": {"token": os.environ.get("GITHUB_TOKEN", "")}},
+)
+
+vm.exec_command(
+    "claude --dangerously-skip-permissions -p 'Add a README section about performance'",
+    timeout=300,
+)
+vm.stop()
+```
+
+See [docs/CLAUDE_CODE.md](docs/CLAUDE_CODE.md) for headless prompts, repository workflows, MCP details, and the snapshot/resume pattern that lets you pause and later resume long-running Claude Code sessions.
+
 ### Remote server usage
 
 If the BandSox server is already running somewhere, point the Python client at it:
