@@ -1381,7 +1381,7 @@ class BandSox:
             for key in ("rootfs_path", "network_config", "env_vars"):
                 if key in meta:
                     setattr(vm, key, meta[key])
-            if meta.get("agent_ready"):
+            if meta.get("agent_ready") or meta.get("status") == "running":
                 vm.agent_ready = True
 
         return vm

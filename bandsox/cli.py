@@ -33,6 +33,47 @@ def _auth_headers():
     return {}
 
 
+def _try_decode_terminal_base64(data: str) -> bytes | None:
+    # Short alphanumeric terminal output is often literal text, not base64.
+    if not data or len(data) < 8 or len(data) % 4 != 0:
+        return None
+    try:
+        return base64.b64decode(data, validate=True)
+    except Exception:
+        return None
+
+
+def _decode_terminal_frame(message) -> bytes:
+    if isinstance(message, bytes):
+        message = message.decode("utf-8", errors="replace")
+
+    if not isinstance(message, str):
+        return str(message).encode("utf-8", errors="replace")
+
+    try:
+        parsed = json.loads(message)
+    except json.JSONDecodeError:
+        parsed = None
+
+    if isinstance(parsed, dict):
+        data = parsed.get("data")
+        if isinstance(data, str):
+            if parsed.get("encoding") == "base64":
+                try:
+                    return base64.b64decode(data, validate=True)
+                except Exception:
+                    return data.encode("utf-8", errors="replace")
+            return data.encode("utf-8", errors="replace")
+        msg = parsed.get("message")
+        if isinstance(msg, str):
+            return msg.encode("utf-8", errors="replace")
+
+    decoded = _try_decode_terminal_base64(message)
+    if decoded is not None:
+        return decoded
+    return message.encode("utf-8", errors="replace")
+
+
 def _real_home():
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
@@ -157,8 +198,7 @@ def terminal_client(vm_id, host, port):
                     while not stop_event.is_set():
                         try:
                             message = websocket.recv()
-                            # message is base64 encoded
-                            decoded = base64.b64decode(message)
+                            decoded = _decode_terminal_frame(message)
                             sys.stdout.buffer.write(decoded)
                             sys.stdout.buffer.flush()
                         except Exception:
@@ -339,6 +379,11 @@ def main():
         type=str,
         help="Path to storage directory (default: /var/lib/sandbox)",
     )
+    serve_parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Reload the API server on code changes (development only)",
+    )
     
     term_parser = subparsers.add_parser("terminal", help="Open a terminal session in a VM")
     term_parser.add_argument("vm_id", type=str, help="VM ID")
@@ -467,7 +512,12 @@ def main():
         os.environ["BANDSOX_STORAGE"] = storage_path
 
         print(f"Starting dashboard at http://{args.host}:{args.port}")
-        uvicorn.run("bandsox.server:app", host=args.host, port=args.port, reload=True)
+        uvicorn.run(
+            "bandsox.server:app",
+            host=args.host,
+            port=args.port,
+            reload=args.reload,
+        )
     elif args.command == "terminal":
         terminal_client(args.vm_id, args.host, args.port)
     elif args.command == "create":
