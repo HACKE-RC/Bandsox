@@ -366,7 +366,25 @@ VMs need a compatible Linux kernel binary (`vmlinux`).
 - By default it looks at `/var/lib/bandsox/vmlinux`.
 - Make sure this file exists, or pass `kernel_path` to `create_vm`.
 
-### 4. Entropy and HTTPS on fresh boot
+### 4. Boot latency
+
+A warm `create_vm` (rootfs already built) reaches agent-ready in ~150ms. Most
+of that speed comes from `DEFAULT_BOOT_ARGS`, which suppresses two things the
+microVM doesn't need:
+
+- `i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd` — stops the kernel probing
+  the emulated PS/2 keyboard controller. Without these the i8042 driver polls a
+  device that isn't there and stalls boot ~750ms.
+- `quiet loglevel=1` — silences the kernel's ~190-line printk stream. Those
+  lines otherwise trickle out over the emulated serial UART one byte at a time
+  while the host reads them, adding ~45ms. The agent still uses `console=ttyS0`
+  for its own I/O; only kernel chatter is suppressed.
+
+The first `create_vm` for a given image is much slower — it pulls the image and
+builds the ext4 rootfs (`build_rootfs`). That cost is paid once and cached; every
+subsequent VM from the same image hits the ~150ms warm path.
+
+### 5. Entropy and HTTPS on fresh boot
 
 The Firecracker quickstart kernel that `bandsox init` downloads doesn't have `RANDOM_TRUST_CPU=y` enabled, so on a fresh microVM `crng_init` can take tens of seconds to complete. While it's not done, every TLS handshake blocks. Two things help here:
 
@@ -375,17 +393,17 @@ The Firecracker quickstart kernel that `bandsox init` downloads doesn't have `RA
 
 On snapshot restore, BandSox always mixes a per-restore host seed into `/dev/urandom` and `/dev/random` via `printf | base64 -d`. That diverges the CRNG of two VMs restored from the same snapshot immediately, even on images without `python3`. If `python3` is available too, the kernel also credits entropy through `RNDADDENTROPY`.
 
-### 5. Image size
+### 6. Image size
 
 The rootfs size is fixed at build time (Docker export size + overhead). If you need more space, adjust the image generation logic in `image.py`.
 
-### 6. Snapshot compatibility
+### 7. Snapshot compatibility
 
 Restoring a snapshot requires the same kernel and a compatible network config.
 
 - If you move the storage directory, move metadata and snapshots together.
 - Snapshots are tied to the exact kernel binary used when they were created.
 
-### 7. Authentication
+### 8. Authentication
 
 See [AUTHENTICATION.md](AUTHENTICATION.md).
