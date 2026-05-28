@@ -47,7 +47,11 @@ class FirecrackerClient:
     def __init__(self, socket_path: str):
         self.socket_path = socket_path
 
-    def _request(self, method, endpoint, data=None, log_error=True):
+    def _request(self, method, endpoint, data=None, log_error=True, timeout=None):
+        # timeout defaults to None (block) to match the prior requests-based
+        # behaviour: snapshot create/load are synchronous and can run long for
+        # large guests, so a blanket short timeout would truncate them. Callers
+        # on the fast config path may pass one for hang-safety.
         headers = {"Accept": "application/json"}
         body = None
         if data is not None:
@@ -57,7 +61,7 @@ class FirecrackerClient:
         logger.debug(f"Firecracker API {method} {endpoint}")
         # ConnectionRefused/FileNotFound here means Firecracker isn't up yet;
         # let it propagate so callers can retry, matching the old behaviour.
-        conn = _UnixHTTPConnection(self.socket_path)
+        conn = _UnixHTTPConnection(self.socket_path, timeout=timeout)
         try:
             conn.request(method, endpoint, body=body, headers=headers)
             raw = conn.getresponse()

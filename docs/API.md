@@ -378,7 +378,9 @@ microVM doesn't need:
 - `quiet loglevel=1` — silences the kernel's ~190-line printk stream. Those
   lines otherwise trickle out over the emulated serial UART one byte at a time
   while the host reads them, adding ~45ms. The agent still uses `console=ttyS0`
-  for its own I/O; only kernel chatter is suppressed.
+  for its own I/O; only kernel chatter is suppressed. This also hides kernel
+  panic detail on boot failures — set `BANDSOX_VERBOSE_BOOT=1` to drop `quiet`
+  and get full kernel logs when debugging a boot regression.
 
 The first `create_vm` for a given image is much slower — it pulls the image and
 builds the ext4 rootfs (`build_rootfs`). That cost is paid once and cached; every

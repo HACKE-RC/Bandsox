@@ -53,6 +53,10 @@ def _chown_to_sudo_user(path) -> None:
     -> EPERM. Fresh boots run Firecracker as root and don't hit this, but the
     snapshot bakes this path, so it must be user-owned from creation for restore
     to work. No-op when not running as root or not under sudo.
+
+    Trust note: this hands the VM's backing disk to $SUDO_USER, who can then
+    mutate it on the host. That assumes the invoking user is trusted (the
+    single-tenant CLI model). Don't rely on root-only protection of the rootfs.
     """
     sudo_user = os.environ.get("SUDO_USER")
     if not (sudo_user and os.geteuid() == 0):
@@ -66,6 +70,11 @@ def _chown_to_sudo_user(path) -> None:
         logger.warning(
             f"SUDO_USER {sudo_user} not found; leaving rootfs ownership unchanged"
         )
+    except OSError as e:
+        # A chown failure (odd filesystem, race) shouldn't abort VM creation;
+        # a root-launched fresh boot can still open the file. Restore as the
+        # dropped-privilege user may then fail loudly later, which is fine.
+        logger.warning(f"Could not chown {path} to {sudo_user}: {e}")
 
 
 def _spawn_runner(vm_id: str, socket_path: str, log_file, extra_args: list = None):

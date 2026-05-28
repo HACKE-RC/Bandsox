@@ -142,7 +142,12 @@ DEFAULT_KERNEL_PATH = "/var/lib/bandsox/vmlinux"
 # trickles over the emulated serial UART (the host reads it byte-by-byte, adding
 # ~45ms of pure transmission time to every boot). The agent still uses
 # console=ttyS0 for its own I/O; only kernel chatter is suppressed.
-DEFAULT_BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd quiet loglevel=1"
+#
+# quiet also hides kernel panic/oops detail on boot failures. Set
+# BANDSOX_VERBOSE_BOOT=1 to drop it and get full kernel logs when debugging a
+# boot regression (costs the ~45ms back).
+_BASE_BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd"
+DEFAULT_BOOT_ARGS = _BASE_BOOT_ARGS if os.environ.get("BANDSOX_VERBOSE_BOOT") else f"{_BASE_BOOT_ARGS} quiet loglevel=1"
 
 
 class ConsoleMultiplexer:
