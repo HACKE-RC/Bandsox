@@ -8,7 +8,6 @@ license = {file = "LICENSE"}
 keywords = ["firecracker", "microvm", "sandbox", "fastapi", "cli"]
 dependencies = [
     "requests",
-    "requests-unixsocket",
     "fastapi",
     "python-multipart",
     "uvicorn",

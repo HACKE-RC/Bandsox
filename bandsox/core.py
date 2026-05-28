@@ -8,7 +8,6 @@ import json
 import base64
 import threading
 import time
-import requests
 from pathlib import Path
 from .vm import MicroVM, DEFAULT_KERNEL_PATH, kill_process_tree
 from .image import build_rootfs
@@ -25,9 +24,14 @@ logger = logging.getLogger(__name__)
 _REDACTED = "<redacted>"
 
 
-def _wait_for_path(path: str, timeout: float = 20, poll_interval: float = 0.1,
+def _wait_for_path(path: str, timeout: float = 20, poll_interval: float = 0.002,
                    process: subprocess.Popen = None, label: str = "path"):
-    """Poll until a filesystem path exists, raising on timeout or process crash."""
+    """Poll until a filesystem path exists, raising on timeout or process crash.
+
+    poll_interval is intentionally small (2ms): these sockets appear within
+    ~10-15ms of spawn, and a coarse interval adds that much dead time to every
+    VM boot.
+    """
     start = time.time()
     while True:
         if os.path.exists(path):
@@ -39,6 +43,38 @@ def _wait_for_path(path: str, timeout: float = 20, poll_interval: float = 0.1,
         if time.time() - start > timeout:
             raise Exception(f"Timeout ({timeout}s) waiting for {label}: {path}")
         time.sleep(poll_interval)
+
+
+def _chown_to_sudo_user(path) -> None:
+    """Give the rootfs to the invoking (non-root) user when running under sudo.
+
+    Restore launches Firecracker as ``sudo -u $SUDO_USER`` (for vsock isolation),
+    so a root-owned, mode-644 backing file can't be opened O_RDWR by that user
+    -> EPERM. Fresh boots run Firecracker as root and don't hit this, but the
+    snapshot bakes this path, so it must be user-owned from creation for restore
+    to work. No-op when not running as root or not under sudo.
+
+    Trust note: this hands the VM's backing disk to $SUDO_USER, who can then
+    mutate it on the host. That assumes the invoking user is trusted (the
+    single-tenant CLI model). Don't rely on root-only protection of the rootfs.
+    """
+    sudo_user = os.environ.get("SUDO_USER")
+    if not (sudo_user and os.geteuid() == 0):
+        return
+    import pwd
+
+    try:
+        info = pwd.getpwnam(sudo_user)
+        os.chown(path, info.pw_uid, info.pw_gid)
+    except KeyError:
+        logger.warning(
+            f"SUDO_USER {sudo_user} not found; leaving rootfs ownership unchanged"
+        )
+    except OSError as e:
+        # A chown failure (odd filesystem, race) shouldn't abort VM creation;
+        # a root-launched fresh boot can still open the file. Restore as the
+        # dropped-privilege user may then fail loudly later, which is fine.
+        logger.warning(f"Could not chown {path} to {sudo_user}: {e}")
 
 
 def _spawn_runner(vm_id: str, socket_path: str, log_file, extra_args: list = None):
@@ -442,6 +478,9 @@ class BandSox:
         # Copy to instance specific path
         instance_rootfs = self.images_dir / f"{vm_id}.ext4"
         self._clone_rootfs(base_rootfs, instance_rootfs)
+        # Own the rootfs as the invoking user so a later restore (which runs
+        # Firecracker as $SUDO_USER) can open this baked backing file O_RDWR.
+        _chown_to_sudo_user(instance_rootfs)
 
         # Stage MCP config into this VM's private rootfs (per-VM, not the shared base image).
         if mcp_servers:
@@ -855,17 +894,7 @@ class BandSox:
 
         if snap_rootfs and os.path.exists(snap_rootfs):
             self._clone_rootfs(snap_rootfs, instance_rootfs)
-            sudo_user = os.environ.get("SUDO_USER")
-            if sudo_user and os.geteuid() == 0:
-                import pwd
-
-                try:
-                    user_info = pwd.getpwnam(sudo_user)
-                    os.chown(instance_rootfs, user_info.pw_uid, user_info.pw_gid)
-                except KeyError:
-                    logger.warning(
-                        f"SUDO_USER {sudo_user} not found; leaving rootfs ownership unchanged"
-                    )
+            _chown_to_sudo_user(instance_rootfs)
 
         # Vsock socket path prepared above (symlink or isolation).
 
@@ -1433,6 +1462,8 @@ class RemoteBandSox:
         self.server_url = server_url.rstrip("/")
         self.headers = headers or {}
         self.timeout = timeout
+        import requests  # lazy: only the remote client needs it, not VM boot
+
         self.session = requests.Session()
         self.session.headers.update(self.headers)
 
