@@ -7,6 +7,7 @@ server imports stay lazy (inside methods), as in the original.
 import os
 import json
 import time
+import shutil
 import socket
 import logging
 
