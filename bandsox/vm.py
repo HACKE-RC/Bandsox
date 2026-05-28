@@ -13,7 +13,6 @@ import tempfile
 from pathlib import Path
 from .firecracker import FirecrackerClient
 from .network import setup_tap_device, cleanup_tap_device, derive_host_mac
-import requests
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +138,11 @@ def kill_process_tree(pid: int, timeout: float = 1.0):
 
 FIRECRACKER_BIN = "/usr/bin/firecracker"
 DEFAULT_KERNEL_PATH = "/var/lib/bandsox/vmlinux"
-DEFAULT_BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on"
+# quiet + loglevel=1 silences the ~190-line kernel printk stream that otherwise
+# trickles over the emulated serial UART (the host reads it byte-by-byte, adding
+# ~45ms of pure transmission time to every boot). The agent still uses
+# console=ttyS0 for its own I/O; only kernel chatter is suppressed.
+DEFAULT_BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd quiet loglevel=1"
 
 
 class ConsoleMultiplexer:
@@ -1533,6 +1536,8 @@ class MicroVM:
             path = "/" + path
 
         url = f"http://{ip}:{port}{path}"
+        import requests  # lazy: keeps requests off the VM-boot import path
+
         return requests.request(method, url, **kwargs)
 
     def configure(

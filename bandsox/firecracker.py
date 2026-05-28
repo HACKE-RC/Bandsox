@@ -1,5 +1,5 @@
-import requests
-import requests_unixsocket
+import http.client
+import socket
 import logging
 import json
 import time
@@ -7,48 +7,82 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# Monkey patch requests to support unix sockets
-requests_unixsocket.monkeypatch()
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """http.client connection that talks to a unix domain socket.
+
+    The Firecracker control plane is a plain HTTP/1.1 REST API exposed over
+    an AF_UNIX socket, so the stdlib client covers it without pulling in
+    requests + urllib3 (~77ms of import time on the VM-boot hot path).
+    """
+
+    def __init__(self, socket_path: str, timeout=None):
+        super().__init__("localhost", timeout=timeout)
+        self._socket_path = socket_path
+
+    def connect(self):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        if self.timeout is not None:
+            sock.settimeout(self.timeout)
+        sock.connect(self._socket_path)
+        self.sock = sock
+
+
+class _Response:
+    """Minimal stand-in for the bits of a requests.Response callers use."""
+
+    def __init__(self, status_code: int, body: bytes):
+        self.status_code = status_code
+        self._body = body
+
+    @property
+    def text(self) -> str:
+        return self._body.decode("utf-8", "replace")
+
+    def json(self):
+        return json.loads(self._body or b"null")
 
 
 class FirecrackerClient:
     def __init__(self, socket_path: str):
         self.socket_path = socket_path
-        # requests_unixsocket requires URL encoded socket path
-        # e.g. http+unix://%2Ftmp%2Ffirecracker.socket/
-        encoded_path = socket_path.replace("/", "%2F")
-        self.base_url = f"http+unix://{encoded_path}"
 
     def _request(self, method, endpoint, data=None, log_error=True):
-        url = f"{self.base_url}{endpoint}"
-        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        headers = {"Accept": "application/json"}
+        body = None
+        if data is not None:
+            body = json.dumps(data).encode("utf-8")
+            headers["Content-Type"] = "application/json"
 
         logger.debug(f"Firecracker API {method} {endpoint}")
+        # ConnectionRefused/FileNotFound here means Firecracker isn't up yet;
+        # let it propagate so callers can retry, matching the old behaviour.
+        conn = _UnixHTTPConnection(self.socket_path)
         try:
-            if data:
-                response = requests.request(method, url, headers=headers, json=data)
-            else:
-                response = requests.request(method, url, headers=headers)
+            conn.request(method, endpoint, body=body, headers=headers)
+            raw = conn.getresponse()
+            response = _Response(raw.status, raw.read())
+        finally:
+            conn.close()
 
-            # Firecracker returns 204 No Content for success often
-            if response.status_code not in [200, 204]:
-                # Some callers (e.g. snapshot load) intentionally retry after inspecting the error.
-                # Allow suppressing loud logs while still surfacing the exception.
-                log_fn = logger.error if log_error else logger.debug
-                log_fn(f"Firecracker API error {response.status_code}: {response.text}")
-                raise Exception(f"Firecracker API error: {response.text}")
+        # Firecracker returns 204 No Content for success often
+        if response.status_code not in [200, 204]:
+            # Some callers (e.g. snapshot load) intentionally retry after inspecting the error.
+            # Allow suppressing loud logs while still surfacing the exception.
+            log_fn = logger.error if log_error else logger.debug
+            log_fn(f"Firecracker API error {response.status_code}: {response.text}")
+            raise Exception(f"Firecracker API error: {response.text}")
 
-            return response
-        except requests.exceptions.ConnectionError:
-            # This happens if Firecracker isn't running yet or socket isn't ready
-            raise
+        return response
 
     def wait_for_socket(self, timeout=20):
+        # Firecracker creates the API socket within ~10-15ms. Poll tightly so
+        # we don't burn ~90ms sleeping past its arrival on the VM-boot hot path.
         start = time.time()
         while time.time() - start < timeout:
             if os.path.exists(self.socket_path):
                 return True
-            time.sleep(0.1)
+            time.sleep(0.001)
         return False
 
     def put_boot_source(self, kernel_image_path: str, boot_args: str):
