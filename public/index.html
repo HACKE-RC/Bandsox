@@ -128,9 +128,7 @@
       font-size: 11px; font-weight: 700; text-transform: uppercase;
       letter-spacing: 0.14em; color: var(--text-faint); margin-bottom: 22px;
     }
-    .section-header::before {
-      content: ""; width: 18px; height: 1px; background: var(--text-ghost);
-    }
+    .section-header::before { content: none; }
 
     /* ── Hero ──────────────────────────────────────── */
     .hero { padding: 100px 0 110px; text-align: left; }
@@ -332,6 +330,23 @@
     .footer-links { display: flex; gap: 18px; }
     .footer-links a:hover { color: var(--text-dim); }
 
+    /* ── Lang toggle tabs ────────────────────────── */
+    .lang-tabs {
+      margin-left: auto; display: flex; gap: 2px;
+    }
+    .lang-tab {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+      text-transform: uppercase; padding: 3px 9px; border-radius: 3px;
+      border: 1px solid transparent; background: transparent;
+      color: var(--text-faint); cursor: pointer; transition: all 0.15s;
+    }
+    .lang-tab:hover { color: var(--text-dim); background: rgba(255,255,255,0.05); }
+    .lang-tab.active {
+      color: var(--accent); background: var(--accent-dim);
+      border-color: var(--accent-border);
+    }
+
     /* ── Code inline ──────────────────────────────── */
     code.inline {
       background: rgba(255,255,255,0.05); border: 1px solid var(--border);
@@ -418,7 +433,7 @@
 
       <div class="stats-strip">
         <div class="stat">
-          <div class="stat-value">~125<span class="unit">ms</span></div>
+          <div class="stat-value">~150<span class="unit">ms</span></div>
           <div class="stat-label">Boot time</div>
         </div>
         <div class="stat">
@@ -451,7 +466,7 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
           </div>
           <div class="feature-title">Millisecond boot</div>
-          <div class="feature-desc">Cold-start a fresh sandbox in ~125ms. Fast enough to spin one up per request, per user, or per task.</div>
+          <div class="feature-desc">Cold-start a fresh sandbox in ~150ms. Fast enough to spin one up per request, per user, or per task.</div>
         </div>
 
         <div class="feature">
@@ -501,7 +516,7 @@
       <div class="section-header">Quickstart</div>
       <div class="two-col">
         <div>
-          <h2 class="title">Five lines from <span style="color:var(--accent);">pip install</span> to running code in a microVM.</h2>
+          <h2 class="title">Four lines from <span style="color:var(--accent);" id="qs-install-label">pip install</span> to running code in a microVM.</h2>
           <p class="title-lede">
             Install with pip, initialize the kernel and CNI artifacts, then create a VM from any Docker image.
             BandSox handles the rootfs, networking, and the in-guest agent.
@@ -519,9 +534,13 @@
             <span class="term-dot red"></span>
             <span class="term-dot yellow"></span>
             <span class="term-dot green"></span>
-            <span class="term-title">~/sandbox.py</span>
+            <span class="term-title" id="qs-filename">~/sandbox.py</span>
+            <div class="lang-tabs">
+              <button class="lang-tab active" onclick="qsLang('py')">Python</button>
+              <button class="lang-tab" onclick="qsLang('ts')">TypeScript</button>
+            </div>
           </div>
-          <div class="terminal-body"><span class="term-keyword">from</span> bandsox.core <span class="term-keyword">import</span> BandSox
+          <div class="terminal-body" id="qs-py"><span class="term-keyword">from</span> bandsox.core <span class="term-keyword">import</span> BandSox
 
 bs = <span class="term-func">BandSox</span>()
 vm = bs.<span class="term-func">create_vm</span>(<span class="term-string">"python:3-alpine"</span>, enable_networking=<span class="term-keyword">False</span>)
@@ -530,6 +549,15 @@ result = vm.<span class="term-func">exec_python_capture</span>(<span class="term
 <span class="term-func">print</span>(result[<span class="term-string">'stdout'</span>])  <span class="term-comment"># Hello from VM!</span>
 
 vm.<span class="term-func">stop</span>()</div>
+          <div class="terminal-body" id="qs-ts" style="display:none"><span class="term-keyword">import</span> { BandSox } <span class="term-keyword">from</span> <span class="term-string">"bandsox"</span>;
+
+<span class="term-keyword">const</span> bs = <span class="term-keyword">new</span> <span class="term-func">BandSox</span>({ baseUrl: <span class="term-string">"http://your-server:8000"</span> });
+<span class="term-keyword">const</span> vm = <span class="term-keyword">await</span> bs.<span class="term-func">createVm</span>({ image: <span class="term-string">"python:3-alpine"</span> });
+
+<span class="term-keyword">const</span> result = <span class="term-keyword">await</span> vm.<span class="term-func">execPython</span>({ code: <span class="term-string">"print('Hello from VM!')"</span> });
+console.<span class="term-func">log</span>(result.stdout);  <span class="term-comment">// Hello from VM!</span>
+
+<span class="term-keyword">await</span> vm.<span class="term-func">stop</span>();</div>
         </div>
       </div>
     </section>
@@ -549,7 +577,7 @@ vm.<span class="term-func">stop</span>()</div>
 <span class="term-mute">→ pulling ubuntu:latest</span>
 <span class="term-mute">→ building rootfs (412 MB)</span>
 <span class="term-mute">→ booting microVM …</span>
-<span style="color:var(--green);">✓</span> vm <span class="term-string">f3a1c8</span> ready   <span class="term-mute">125ms</span>
+<span style="color:var(--green);">✓</span> vm <span class="term-string">f3a1c8</span> ready   <span class="term-mute">146ms</span>
 
 <span class="term-prompt">$</span> bandsox <span class="term-keyword">terminal</span> f3a1c8
 <span class="term-mute"># interactive shell into the VM</span>
@@ -672,6 +700,19 @@ vm.<span class="term-func">stop</span>()</div>
       <a href="https://github.com/HACKE-RC/Bandsox/blob/main/docs/CLAUDE_CODE.md">Agents</a>
     </div>
   </footer>
+
+  <script>
+    function qsLang(lang) {
+      var isPy = lang === 'py';
+      document.getElementById('qs-py').style.display = isPy ? '' : 'none';
+      document.getElementById('qs-ts').style.display = isPy ? 'none' : '';
+      document.getElementById('qs-filename').textContent = isPy ? '~/sandbox.py' : '~/sandbox.ts';
+      document.getElementById('qs-install-label').textContent = isPy ? 'pip install' : 'npm install';
+      var tabs = document.querySelectorAll('.lang-tab');
+      tabs[0].classList.toggle('active', isPy);
+      tabs[1].classList.toggle('active', !isPy);
+    }
+  </script>
 
   <script>
     // Subtle matrix rain — muted greys with occasional amber highlights.
