@@ -1,4 +1,3 @@
-import http.client
 import socket
 import logging
 import json
@@ -7,25 +6,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-
-class _UnixHTTPConnection(http.client.HTTPConnection):
-    """http.client connection that talks to a unix domain socket.
-
-    The Firecracker control plane is a plain HTTP/1.1 REST API exposed over
-    an AF_UNIX socket, so the stdlib client covers it without pulling in
-    requests + urllib3 (~77ms of import time on the VM-boot hot path).
-    """
-
-    def __init__(self, socket_path: str, timeout=None):
-        super().__init__("localhost", timeout=timeout)
-        self._socket_path = socket_path
-
-    def connect(self):
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        if self.timeout is not None:
-            sock.settimeout(self.timeout)
-        sock.connect(self._socket_path)
-        self.sock = sock
+_HEADER_END = b"\r\n\r\n"
 
 
 class _Response:
@@ -41,6 +22,81 @@ class _Response:
 
     def json(self):
         return json.loads(self._body or b"null")
+
+
+def _parse_status(head: bytes) -> int:
+    # First line: b"HTTP/1.1 204 No Content"
+    return int(head.split(b"\r\n", 1)[0].split(b" ", 2)[1])
+
+
+def _parse_content_length(head: bytes):
+    for line in head.split(b"\r\n")[1:]:
+        name, sep, value = line.partition(b":")
+        if sep and name.strip().lower() == b"content-length":
+            try:
+                return int(value.strip())
+            except ValueError:
+                return None
+    return None
+
+
+def _request_over_unix(socket_path, method, endpoint, body=None, headers=None,
+                       timeout=None):
+    """Minimal HTTP/1.1 client over an AF_UNIX socket.
+
+    Firecracker's control plane is plain HTTP/1.1 with Content-Length-framed
+    responses (a 200 with a JSON body, or an empty 204), so we hand-roll the
+    request/parse instead of importing http.client -- which drags in email +
+    ssl (~13ms) for no benefit on plaintext localhost calls. Framing is by
+    Content-Length, with 204/304/1xx treated as bodyless per spec, so a
+    keep-alive peer can't make us block waiting for EOF.
+    """
+    lines = [f"{method} {endpoint} HTTP/1.1", "Host: localhost", "Connection: close"]
+    lines += [f"{k}: {v}" for k, v in (headers or {}).items()]
+    if body:
+        lines.append(f"Content-Length: {len(body)}")
+    raw = ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
+    if body:
+        raw += body
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    if timeout is not None:
+        sock.settimeout(timeout)
+    try:
+        sock.connect(socket_path)
+        sock.sendall(raw)
+
+        buf = bytearray()
+        while _HEADER_END not in buf:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        head, _, rest = buf.partition(_HEADER_END)
+
+        status_code = _parse_status(head)
+        if status_code in (204, 304) or 100 <= status_code < 200:
+            return _Response(status_code, b"")
+
+        body_bytes = bytearray(rest)
+        length = _parse_content_length(head)
+        if length is not None:
+            while len(body_bytes) < length:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                body_bytes += chunk
+            body_bytes = body_bytes[:length]
+        else:
+            # No Content-Length: read to EOF (Connection: close guarantees it).
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                body_bytes += chunk
+        return _Response(status_code, bytes(body_bytes))
+    finally:
+        sock.close()
 
 
 class FirecrackerClient:
@@ -61,13 +117,10 @@ class FirecrackerClient:
         logger.debug(f"Firecracker API {method} {endpoint}")
         # ConnectionRefused/FileNotFound here means Firecracker isn't up yet;
         # let it propagate so callers can retry, matching the old behaviour.
-        conn = _UnixHTTPConnection(self.socket_path, timeout=timeout)
-        try:
-            conn.request(method, endpoint, body=body, headers=headers)
-            raw = conn.getresponse()
-            response = _Response(raw.status, raw.read())
-        finally:
-            conn.close()
+        response = _request_over_unix(
+            self.socket_path, method, endpoint,
+            body=body, headers=headers, timeout=timeout,
+        )
 
         # Firecracker returns 204 No Content for success often
         if response.status_code not in [200, 204]:
