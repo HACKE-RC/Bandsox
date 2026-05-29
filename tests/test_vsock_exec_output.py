@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import bandsox.vm as vm_module
+import bandsox.vm_files as vm_files_module
 from bandsox.vm import MicroVM
 
 
@@ -145,7 +146,9 @@ def test_vsock_exec_logs_when_output_slot_wait_expires(tmp_path, monkeypatch, ca
         return 0
 
     monkeypatch.setattr(vm, "_send_request_with_id", fake_send_request_with_id)
-    caplog.set_level(logging.WARNING, logger="bandsox.vm")
+    # exec-output warnings are emitted from bandsox.vm_exec after the split;
+    # capture from the package root so the sibling logger inherits the level.
+    caplog.set_level(logging.WARNING, logger="bandsox")
 
     assert vm.exec_command("true") == 0
 
@@ -209,7 +212,9 @@ def test_vsock_exec_logs_buffer_upload_errors(tmp_path, monkeypatch, caplog):
         return 0
 
     monkeypatch.setattr(vm, "_send_request_with_id", fake_send_request_with_id)
-    caplog.set_level(logging.WARNING, logger="bandsox.vm")
+    # exec-output warnings are emitted from bandsox.vm_exec after the split;
+    # capture from the package root so the sibling logger inherits the level.
+    caplog.set_level(logging.WARNING, logger="bandsox")
 
     assert vm.exec_command("true") == 0
 
@@ -227,7 +232,9 @@ def test_send_request_logs_kill_failure_on_timeout(tmp_path, monkeypatch, caplog
             raise RuntimeError("broken pipe")
 
     monkeypatch.setattr(vm, "_write_to_agent", fake_write_to_agent)
-    caplog.set_level(logging.DEBUG, logger="bandsox.vm")
+    # _send_request_with_id lives in bandsox.vm_agent_transport after the split;
+    # capture from the package root so its child logger inherits the level.
+    caplog.set_level(logging.DEBUG, logger="bandsox")
 
     with pytest.raises(TimeoutError):
         vm._send_request_with_id("cmd-1", "exec", {"command": "sleep 10"}, timeout=0)
@@ -330,13 +337,15 @@ def test_debugfs_windowed_fallback_logs_full_file_formatting(tmp_path, monkeypat
     vm = MicroVM("vm-test", str(tmp_path / "fc.sock"))
     vm.agent_ready = False
     monkeypatch.setattr(vm, "_has_debugfs_rootfs", lambda: True)
-    monkeypatch.setattr(vm_module, "_DEBUGFS_FULL_FILE_FALLBACK_LOG_THRESHOLD", 16)
+    # get_file_contents reads this constant from the bandsox.vm_files namespace
+    # after the split, so patch it there (patching bandsox.vm has no effect).
+    monkeypatch.setattr(vm_files_module, "_DEBUGFS_FULL_FILE_FALLBACK_LOG_THRESHOLD", 16)
 
     def fake_debugfs_download(path, temp_path):
         Path(temp_path).write_bytes(b"line 1\nline 2\nline 3\n")
 
     monkeypatch.setattr(vm, "_debugfs_download_file", fake_debugfs_download)
-    caplog.set_level(logging.WARNING, logger="bandsox.vm")
+    caplog.set_level(logging.WARNING, logger="bandsox")
 
     content = vm.get_file_contents("/tmp/big.txt", offset=1, limit=1)
 
