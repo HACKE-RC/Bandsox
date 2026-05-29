@@ -18,6 +18,20 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+# (connect, read) timeouts so a dead or unreachable server surfaces an error
+# instead of hanging the CLI forever. The short connect budget catches a
+# down/wrong host fast; the read budget varies by how long the server
+# legitimately works before it responds:
+#   _API_TIMEOUT      - fast control-plane ops (list/stop/delete/rename/auth)
+#   _DOWNLOAD_TIMEOUT - streaming artifact pulls; read timeout is per-chunk
+#   _LONG_OP_TIMEOUT  - create / snapshot-save / restore are synchronous and
+#                       inline on the server (image build+boot, multi-GB
+#                       memory dump/load), so they need a much longer read
+#                       budget or a working op would be killed mid-flight.
+_API_TIMEOUT = (5, 30)
+_DOWNLOAD_TIMEOUT = (5, 60)
+_LONG_OP_TIMEOUT = (5, 600)
+
 
 def _load_credentials():
     cred_path = _real_home() / ".bandsox" / "credentials"
@@ -167,7 +181,7 @@ def _resolve_vm_identifier(identifier, host, port):
     """
     base = f"http://{host}:{port}/api/vms"
     try:
-        resp = requests.get(base, headers=_auth_headers())
+        resp = requests.get(base, headers=_auth_headers(), timeout=_API_TIMEOUT)
         if resp.status_code != 200:
             print(f"Failed to query VMs ({resp.status_code}): {resp.text}")
             return None
@@ -345,7 +359,7 @@ def _stream_download(url, output_path, label, force=False):
 
     print(f"Downloading {label} from {url} -> {output_path}")
     try:
-        response = requests.get(url, stream=True)
+        response = requests.get(url, stream=True, timeout=_DOWNLOAD_TIMEOUT)
         response.raise_for_status()
         total_size = int(response.headers.get("content-length", 0))
         block_size = 8192
@@ -601,7 +615,7 @@ def main():
             payload["mem_mib"] = args.mem
             payload["disk_size_mib"] = args.disk_size
             
-            resp = requests.post(url, json=payload, headers=_auth_headers())
+            resp = requests.post(url, json=payload, headers=_auth_headers(), timeout=_LONG_OP_TIMEOUT)
             if resp.status_code == 200:
                 print(f"VM created: {resp.json()['id']}")
             else:
@@ -615,7 +629,7 @@ def main():
         base = f"http://{args.host}:{args.port}/api/vms"
         if args.vm_command == "list":
             try:
-                resp = requests.get(base, headers=_auth_headers())
+                resp = requests.get(base, headers=_auth_headers(), timeout=_API_TIMEOUT)
                 if resp.status_code != 200:
                     print(f"Failed to list VMs ({resp.status_code}): {resp.text}")
                     return
@@ -644,7 +658,7 @@ def main():
         elif args.vm_command == "stop":
             url = f"{base}/{args.vm_id}/stop"
             try:
-                resp = requests.post(url, headers=_auth_headers())
+                resp = requests.post(url, headers=_auth_headers(), timeout=_API_TIMEOUT)
                 if resp.status_code == 200:
                     print(f"VM {args.vm_id} stopped.")
                 else:
@@ -654,7 +668,7 @@ def main():
         elif args.vm_command == "pause":
             url = f"{base}/{args.vm_id}/pause"
             try:
-                resp = requests.post(url, headers=_auth_headers())
+                resp = requests.post(url, headers=_auth_headers(), timeout=_API_TIMEOUT)
                 if resp.status_code == 200:
                     print(f"VM {args.vm_id} paused.")
                 else:
@@ -664,7 +678,7 @@ def main():
         elif args.vm_command == "resume":
             url = f"{base}/{args.vm_id}/resume"
             try:
-                resp = requests.post(url, headers=_auth_headers())
+                resp = requests.post(url, headers=_auth_headers(), timeout=_API_TIMEOUT)
                 if resp.status_code == 200:
                     print(f"VM {args.vm_id} resumed.")
                 else:
@@ -674,7 +688,7 @@ def main():
         elif args.vm_command == "delete":
             url = f"{base}/{args.vm_id}"
             try:
-                resp = requests.delete(url, headers=_auth_headers())
+                resp = requests.delete(url, headers=_auth_headers(), timeout=_API_TIMEOUT)
                 if resp.status_code == 200:
                     print(f"VM {args.vm_id} deleted.")
                 else:
@@ -684,7 +698,7 @@ def main():
         elif args.vm_command == "save":
             url = f"{base}/{args.vm_id}/snapshot"
             try:
-                resp = requests.post(url, json={"name": args.name}, headers=_auth_headers())
+                resp = requests.post(url, json={"name": args.name}, headers=_auth_headers(), timeout=_LONG_OP_TIMEOUT)
                 if resp.status_code == 200:
                     data = resp.json()
                     snap_id = data.get("snapshot_id", "<unknown>")
@@ -696,7 +710,7 @@ def main():
         elif args.vm_command == "rename":
             url = f"{base}/{args.vm_id}/name"
             try:
-                resp = requests.put(url, json={"name": args.name}, headers=_auth_headers())
+                resp = requests.put(url, json={"name": args.name}, headers=_auth_headers(), timeout=_API_TIMEOUT)
                 if resp.status_code == 200:
                     print(f"VM {args.vm_id} renamed to '{args.name}'")
                 else:
@@ -712,7 +726,7 @@ def main():
         base = f"http://{args.host}:{args.port}/api/snapshots"
         if args.snapshot_command == "list":
             try:
-                resp = requests.get(base, headers=_auth_headers())
+                resp = requests.get(base, headers=_auth_headers(), timeout=_API_TIMEOUT)
                 if resp.status_code != 200:
                     print(f"Failed to list snapshots ({resp.status_code}): {resp.text}")
                     return
@@ -740,7 +754,7 @@ def main():
         elif args.snapshot_command == "delete":
             url = f"{base}/{args.snapshot_id}"
             try:
-                resp = requests.delete(url, headers=_auth_headers())
+                resp = requests.delete(url, headers=_auth_headers(), timeout=_API_TIMEOUT)
                 if resp.status_code == 200:
                     print(f"Snapshot {args.snapshot_id} deleted.")
                 else:
@@ -751,7 +765,7 @@ def main():
             url = f"{base}/{args.snapshot_id}/restore"
             payload = {"name": args.name, "enable_networking": args.enable_networking}
             try:
-                resp = requests.post(url, json=payload, headers=_auth_headers())
+                resp = requests.post(url, json=payload, headers=_auth_headers(), timeout=_LONG_OP_TIMEOUT)
                 if resp.status_code == 200:
                     data = resp.json()
                     new_id = data.get("id", "<unknown>")
@@ -763,7 +777,7 @@ def main():
         elif args.snapshot_command == "rename":
             url = f"{base}/{args.snapshot_id}/name"
             try:
-                resp = requests.put(url, json={"name": args.name}, headers=_auth_headers())
+                resp = requests.put(url, json={"name": args.name}, headers=_auth_headers(), timeout=_API_TIMEOUT)
                 if resp.status_code == 200:
                     print(f"Snapshot {args.snapshot_id} renamed to '{args.name}'")
                 else:
@@ -828,6 +842,7 @@ def main():
                 f"{base}/api/auth/keys",
                 json={"name": args.name},
                 headers=_auth_headers(),
+                timeout=_API_TIMEOUT,
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -846,7 +861,7 @@ def main():
 
         elif args.auth_command == "list-keys":
             base = f"http://{args.host}:{args.port}"
-            resp = requests.get(f"{base}/api/auth/keys", headers=_auth_headers())
+            resp = requests.get(f"{base}/api/auth/keys", headers=_auth_headers(), timeout=_API_TIMEOUT)
             if resp.status_code == 200:
                 keys = resp.json()
                 if not keys:
@@ -866,6 +881,7 @@ def main():
             resp = requests.delete(
                 f"{base}/api/auth/keys/{args.key_id}",
                 headers=_auth_headers(),
+                timeout=_API_TIMEOUT,
             )
             if resp.status_code == 200:
                 print(f"Key {args.key_id} revoked.")
