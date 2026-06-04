@@ -208,3 +208,26 @@ def test_recording_manager_rejects_replay_cursor_mismatch_with_real_firecracker_
             )
     finally:
         bandsox.close()
+
+
+def test_firecracker_replay_api_rejects_unsupported_profile(tmp_path):
+    binary = os.environ.get("BANDSOX_FIRECRACKER_BIN")
+    if not binary:
+        pytest.skip("BANDSOX_FIRECRACKER_BIN is required for the live replay API test")
+    firecracker_binary = Path(binary)
+    if not firecracker_binary.exists():
+        pytest.skip(f"Firecracker binary not found: {firecracker_binary}")
+
+    firecracker = LiveFirecracker(firecracker_binary, tmp_path, "bad-profile")
+    try:
+        with pytest.raises(Exception, match="unsupported replay profile"):
+            firecracker.client.put_replay_config(
+                {
+                    "mode": "record",
+                    "log_path": str(tmp_path / "events.replaylog"),
+                    "profile": "not-a-real-replay-profile",
+                    "precision": "quantum",
+                }
+            )
+    finally:
+        firecracker.close()

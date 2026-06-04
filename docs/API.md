@@ -311,6 +311,15 @@ They are not just snapshot aliases: the recording manifest tracks checkpoints,
 branches, replay attempts, event hashes, runner-log offsets, and the intended
 Firecracker deterministic replay profile.
 
+Replay is intentionally split across two review surfaces:
+
+- The Firecracker fork owns deterministic replay primitives: `/replay/config`,
+  `/replay/status`, `/replay/flush`, trace cursors, profile validation, and
+  strict replay-log loading.
+- BandSox owns orchestration: manifests, checkpoint metadata, branch/replay
+  policy, timeline events, snapshot restore calls, and the replay verification
+  status it reports to users.
+
 - `GET /api/recordings` -- list recording manifests.
 - `GET /api/recordings/{recording_id}` -- fetch one recording manifest.
 - `POST /api/recordings/{recording_id}/checkpoints` -- checkpoint the
@@ -329,8 +338,22 @@ Firecracker deterministic replay profile.
   append-only recording timeline.
 
 Guarantee note: APIs only report `guarantee_class:
-unverified-deterministic` until a replay verifier compares the event log,
-guest-visible outputs, and artifact hashes and marks the replay passed.
+unverified-deterministic` until Firecracker reports a configured replay
+engine. Replay attempts also include:
+
+- `verification_status: "unverified"` when no Firecracker replay status was
+  available.
+- `verification_status: "trace_loaded"` when Firecracker accepted a replay log
+  but BandSox could not verify the checkpoint cursor. See
+  `verification_reasons` for the failed checks.
+- `verification_status: "verified"` when Firecracker loaded the replay log and
+  BandSox verified the checkpoint cursor: configured replay mode, optional
+  checkpoint id, trace event count, trace hash, and no reported replay
+  mismatch.
+
+This status verifies the replay cursor at restore time. Full end-to-end replay
+equivalence still requires comparing guest-visible outputs and artifact hashes
+after the restored VM runs.
 
 ### Static pages
 
