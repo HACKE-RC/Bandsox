@@ -204,9 +204,33 @@ def test_branch_and_replay_use_checkpoint_snapshot(tmp_path):
     assert bs.restored[-1][1]["replay_config"]["mode"] == "replay"
     assert bs.restored[-1][1]["replay_config"]["trace_start_seq"] == 3
     assert bs.restored[-1][1]["replay_config"]["trace_start_hash"] == "a" * 64
-    assert replay["verification_status"] == "trace_loaded"
+    assert replay["verification_status"] == "verified"
+    assert replay["verification_reasons"] == []
     assert replay["trace_hash"] == checkpoint["trace_hash"]
     assert replay["trace_events_replayed"] == 3
+
+
+def test_replay_reports_trace_loaded_when_checkpoint_cursor_does_not_verify(tmp_path):
+    bs = FakeBandSox(tmp_path)
+    manager = RecordingManager(bs)
+    vm = FakeVM()
+    recording = manager.start_recording(vm)
+    checkpoint = manager.checkpoint(recording["id"], vm)
+
+    manifest = manager._load_manifest(recording["id"])
+    manifest["checkpoints"][0]["trace_hash"] = "b" * 64
+    manager._save_manifest(manifest)
+
+    replay = manager.replay(
+        recording["id"],
+        checkpoint_id=checkpoint["id"],
+        name="replay-a",
+        strict_engine=True,
+    )
+
+    assert replay["verification_status"] == "trace_loaded"
+    assert replay["verification_checks"]["trace_hash"] is False
+    assert replay["verification_reasons"] == ["trace_hash_mismatch"]
 
 
 def test_strict_replay_requires_checkpoint_trace_cursor(tmp_path):

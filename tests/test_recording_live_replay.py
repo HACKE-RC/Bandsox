@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from bandsox.firecracker import FirecrackerClient
-from bandsox.recording import RecordingManager
+from bandsox.recording import RecordingError, RecordingManager
 
 
 EMPTY_TRACE_HASH = "0" * 64
@@ -158,7 +158,8 @@ def test_recording_manager_accepts_real_firecracker_replay_api(tmp_path):
         assert bandsox.restored[-1][1]["replay_config"]["trace_start_seq"] == 0
         assert bandsox.restored[-1][1]["replay_config"]["trace_start_hash"] == EMPTY_TRACE_HASH
         assert replay["engine_status"] == "configured"
-        assert replay["verification_status"] == "trace_loaded"
+        assert replay["verification_status"] == "verified"
+        assert replay["verification_reasons"] == []
         assert replay["trace_hash"] == checkpoint["trace_hash"]
         assert replay["trace_events_replayed"] == checkpoint["trace_events_recorded"]
 
@@ -168,5 +169,42 @@ def test_recording_manager_accepts_real_firecracker_replay_api(tmp_path):
             "checkpoint.created",
             "replay.started",
         ]
+    finally:
+        bandsox.close()
+
+
+def test_recording_manager_rejects_replay_cursor_mismatch_with_real_firecracker_api(tmp_path):
+    binary = os.environ.get("BANDSOX_FIRECRACKER_BIN")
+    if not binary:
+        pytest.skip("BANDSOX_FIRECRACKER_BIN is required for the live replay API test")
+    firecracker_binary = Path(binary)
+    if not firecracker_binary.exists():
+        pytest.skip(f"Firecracker binary not found: {firecracker_binary}")
+
+    bandsox = LiveReplayBandSox(tmp_path, firecracker_binary)
+    manager = RecordingManager(bandsox)
+    vm = bandsox.create_vm("record-vm")
+
+    try:
+        recording = manager.start_recording(
+            vm,
+            name="live-api-mismatch",
+            replay_profile="quantum",
+            precision="quantum",
+            strict_engine=True,
+        )
+        checkpoint = manager.checkpoint(recording["id"], vm, name="cursor")
+
+        manifest = manager._load_manifest(recording["id"])
+        manifest["checkpoints"][0]["trace_hash"] = "f" * 64
+        manager._save_manifest(manifest)
+
+        with pytest.raises(RecordingError, match="trace start hash mismatch"):
+            manager.replay(
+                recording["id"],
+                checkpoint_id=checkpoint["id"],
+                name="strict-replay-mismatch",
+                strict_engine=True,
+            )
     finally:
         bandsox.close()

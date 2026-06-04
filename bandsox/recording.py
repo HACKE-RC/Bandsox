@@ -116,6 +116,65 @@ class RecordingManager:
         except Exception:
             return None
 
+    def _replay_verification(
+        self, checkpoint: dict[str, Any], replay_status: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        checks = {
+            "configured": False,
+            "mode": False,
+            "checkpoint_id": False,
+            "trace_events_replayed": False,
+            "trace_hash": False,
+            "last_mismatch": False,
+        }
+        reasons = []
+
+        if not replay_status:
+            reasons.append("missing_firecracker_replay_status")
+            return {
+                "status": "unverified",
+                "checks": checks,
+                "reasons": reasons,
+            }
+
+        checks["configured"] = replay_status.get("configured") is True
+        if not checks["configured"]:
+            reasons.append("firecracker_replay_not_configured")
+
+        mode = replay_status.get("mode")
+        checks["mode"] = mode in (None, "replay")
+        if not checks["mode"]:
+            reasons.append(f"unexpected_replay_mode:{mode}")
+
+        status_checkpoint_id = replay_status.get("checkpoint_id")
+        checks["checkpoint_id"] = status_checkpoint_id in (None, checkpoint.get("id"))
+        if not checks["checkpoint_id"]:
+            reasons.append("checkpoint_id_mismatch")
+
+        checkpoint_events = checkpoint.get("trace_events_recorded")
+        replayed_events = replay_status.get("trace_events_replayed")
+        checks["trace_events_replayed"] = (
+            checkpoint_events is not None and replayed_events == checkpoint_events
+        )
+        if not checks["trace_events_replayed"]:
+            reasons.append("trace_events_replayed_mismatch")
+
+        checkpoint_hash = checkpoint.get("trace_hash")
+        replay_hash = replay_status.get("trace_hash")
+        checks["trace_hash"] = checkpoint_hash is not None and replay_hash == checkpoint_hash
+        if not checks["trace_hash"]:
+            reasons.append("trace_hash_mismatch")
+
+        checks["last_mismatch"] = not replay_status.get("last_mismatch")
+        if not checks["last_mismatch"]:
+            reasons.append("firecracker_reported_replay_mismatch")
+
+        return {
+            "status": "verified" if not reasons else "trace_loaded",
+            "checks": checks,
+            "reasons": reasons,
+        }
+
     def _base_manifest(
         self,
         vm_id: str,
@@ -431,6 +490,7 @@ class RecordingManager:
                 ) from exc
             raise
         replay_status = self._replay_status(vm)
+        verification = self._replay_verification(checkpoint, replay_status)
         engine_status = "configured" if strict_engine else "not_requested"
         engine_error = None
 
@@ -442,7 +502,9 @@ class RecordingManager:
             "created_at": _now(),
             "engine_status": engine_status,
             "engine_error": engine_error,
-            "verification_status": "trace_loaded" if replay_status else "unverified",
+            "verification_status": verification["status"],
+            "verification_checks": verification["checks"],
+            "verification_reasons": verification["reasons"],
             "guarantee_class": (replay_status or {}).get(
                 "guarantee_class", "unverified-deterministic"
             ),
