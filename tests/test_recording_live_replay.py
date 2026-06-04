@@ -233,3 +233,27 @@ def test_firecracker_replay_api_rejects_unsupported_profile(tmp_path):
             )
     finally:
         firecracker.close()
+
+
+def test_firecracker_replay_api_rejects_missing_strict_log(tmp_path):
+    binary = os.environ.get("BANDSOX_FIRECRACKER_BIN")
+    if not binary:
+        pytest.skip("BANDSOX_FIRECRACKER_BIN is required for the live replay API test")
+    firecracker_binary = Path(binary)
+    if not firecracker_binary.exists():
+        pytest.skip(f"Firecracker binary not found: {firecracker_binary}")
+
+    firecracker = LiveFirecracker(firecracker_binary, tmp_path, "missing-log")
+    try:
+        with pytest.raises(Exception, match="strict replay log is missing"):
+            firecracker.client.put_replay_config(
+                {
+                    "mode": "replay",
+                    "log_path": str(tmp_path / "missing.replaylog"),
+                    "profile": "quantum",
+                    "precision": "quantum",
+                    "strict": True,
+                }
+            )
+    finally:
+        firecracker.close()
