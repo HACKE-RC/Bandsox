@@ -47,6 +47,107 @@ export interface SnapshotOptions {
   metadata?: Record<string, unknown> | null;
 }
 
+export interface StartRecordingOptions {
+  name?: string | null;
+  metadata?: Record<string, unknown> | null;
+  replay_profile?: string;
+  precision?: string;
+  strict_engine?: boolean;
+}
+
+export interface RecordingCheckpointOptions {
+  name?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface ReplayRecordingOptions {
+  checkpoint_id?: string | null;
+  name?: string | null;
+  enable_networking?: boolean;
+  strict_engine?: boolean;
+}
+
+export interface BranchCheckpointOptions {
+  name?: string | null;
+  enable_networking?: boolean;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface RecordingCheckpointInfo {
+  id: string;
+  ordinal: number;
+  name: string;
+  snapshot_id: string;
+  snapshot_path: string;
+  recording_id: string;
+  vm_id: string;
+  created_at: number;
+  metadata: Record<string, unknown>;
+  artifact_offsets?: Record<string, unknown>;
+  trace_hash?: string | null;
+  trace_events_recorded?: number | null;
+  firecracker_replay_status?: Record<string, unknown> | null;
+  event_seq?: number;
+  event_hash?: string | null;
+}
+
+export interface RecordingInfo {
+  manifest_version: number;
+  id: string;
+  name: string | null;
+  source_vm_id: string;
+  current_vm_id: string;
+  status: string;
+  created_at: number;
+  updated_at: number;
+  metadata: Record<string, unknown>;
+  replay_profile: string;
+  precision: string;
+  guarantee_class: string;
+  verification_status: string;
+  engine_status: string;
+  engine_error?: string | null;
+  firecracker_replay?: Record<string, unknown>;
+  checkpoints: RecordingCheckpointInfo[];
+  branches: Record<string, unknown>[];
+  replays: Record<string, unknown>[];
+}
+
+export interface RecordingTimelineEvent {
+  seq: number;
+  ts: number;
+  type: string;
+  vm_id: string | null;
+  payload: Record<string, unknown>;
+  prev_hash?: string | null;
+  hash: string;
+}
+
+export interface RecordingReplayInfo {
+  id: string;
+  recording_id: string;
+  checkpoint_id: string;
+  vm_id: string;
+  created_at: number;
+  engine_status: string;
+  engine_error?: string | null;
+  verification_status: string;
+  guarantee_class: string;
+  trace_hash?: string | null;
+  trace_events_replayed?: number | null;
+  firecracker_replay_status?: Record<string, unknown> | null;
+}
+
+export interface RecordingBranchInfo {
+  id: string;
+  recording_id: string;
+  checkpoint_id: string;
+  vm_id: string;
+  created_at: number;
+  name?: string | null;
+  metadata: Record<string, unknown>;
+}
+
 export interface ExecResult {
   exit_code: number;
   stdout: string;

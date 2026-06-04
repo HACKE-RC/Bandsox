@@ -134,7 +134,7 @@ def kill_process_tree(pid: int, timeout: float = 1.0):
             logger.error(f"Permission denied sending SIGKILL to PID {target}")
 
 
-FIRECRACKER_BIN = "/usr/bin/firecracker"
+FIRECRACKER_BIN = os.environ.get("BANDSOX_FIRECRACKER_BIN", "/usr/bin/firecracker")
 DEFAULT_KERNEL_PATH = "/var/lib/bandsox/vmlinux"
 # quiet + loglevel=1 silences the ~190-line kernel printk stream that otherwise
 # trickles over the emulated serial UART (the host reads it byte-by-byte, adding

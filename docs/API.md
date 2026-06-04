@@ -276,6 +276,9 @@ When auth is enabled (`auth.json` exists), all `/api/` endpoints except auth log
 - `DELETE /api/vms/{vm_id}` -- delete a VM.
 - `POST /api/vms/{vm_id}/snapshot` -- snapshot a running VM.
   - Body: `{ "name": "snap-name" }`
+- `POST /api/vms/{vm_id}/recordings` -- start a flight recording for a running VM.
+  - Body: `{ "name": "optional-name", "metadata": {}, "replay_profile": "quantum", "precision": "quantum", "strict_engine": false }`
+  - `strict_engine=true` requires a Firecracker build with the BandSox replay fork API (`PUT /replay/config`, `PUT /replay/flush`, `GET /replay/status`).
 - `POST /api/vms/{vm_id}/exec` -- run a blocking command (may buffer output via vsock when available).
   - Body: `{ "command": "echo hello", "timeout": 30 }`
 - `WS /api/vms/{vm_id}/exec-stream` -- stream one command's stdout/stderr, then exit.
@@ -300,6 +303,34 @@ When auth is enabled (`auth.json` exists), all `/api/` endpoints except auth log
 - `DELETE /api/snapshots/{snapshot_id}` -- delete a snapshot.
 - `POST /api/snapshots/{snapshot_id}/restore` -- restore into a new VM.
   - Body: `{ "name": "optional-name", "enable_networking": true }`
+
+### Flight recordings
+
+Flight recordings add a production checkpoint/timeline layer around snapshots.
+They are not just snapshot aliases: the recording manifest tracks checkpoints,
+branches, replay attempts, event hashes, runner-log offsets, and the intended
+Firecracker deterministic replay profile.
+
+- `GET /api/recordings` -- list recording manifests.
+- `GET /api/recordings/{recording_id}` -- fetch one recording manifest.
+- `POST /api/recordings/{recording_id}/checkpoints` -- checkpoint the
+  recording's current VM.
+  - Body: `{ "name": "optional-name", "metadata": {} }`
+- `POST /api/recordings/{recording_id}/replay` -- restore a checkpoint in
+  replay mode.
+  - Body: `{ "checkpoint_id": "optional-checkpoint", "name": "optional-name", "enable_networking": false, "strict_engine": true }`
+  - With `strict_engine=true`, replay fails unless the Firecracker replay fork
+    accepts the pre-`LoadSnapshot` replay config. With `strict_engine=false`,
+    BandSox restores the VM and marks the attempt as unverified.
+- `POST /api/checkpoints/{checkpoint_id}/branch` -- restore a checkpoint as a
+  divergent branch.
+  - Body: `{ "name": "optional-name", "enable_networking": true, "metadata": {} }`
+- `GET /api/recordings/{recording_id}/timeline?limit=N` -- read the hashed
+  append-only recording timeline.
+
+Guarantee note: APIs only report `guarantee_class:
+unverified-deterministic` until a replay verifier compares the event log,
+guest-visible outputs, and artifact hashes and marks the replay passed.
 
 ### Static pages
 

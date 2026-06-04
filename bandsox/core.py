@@ -17,6 +17,7 @@ from .mcp_registry import (
     write_mcp_config_to_rootfs,
 )
 from .network import setup_tap_device, cleanup_tap_device
+from .recording import RecordingManager
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +180,7 @@ class BandSox:
         self.sockets_dir.mkdir(exist_ok=True)
         self.metadata_dir = self.storage_dir / "metadata"
         self.metadata_dir.mkdir(exist_ok=True)
+        self.recordings = RecordingManager(self)
         isolation_root = os.environ.get("BANDSOX_VSOCK_ISOLATION_DIR", "/tmp/bsx")
         self.vsock_isolation_dir = Path(isolation_root)
         self.vsock_isolation_dir.mkdir(parents=True, exist_ok=True)
@@ -662,6 +664,7 @@ class BandSox:
         detach: bool = True,
         env_vars: dict = None,
         metadata: dict = None,
+        replay_config: dict = None,
     ) -> MicroVM:
         """Restores a VM from a snapshot."""
         # Snapshot ID should point to a folder containing snapshot file and mem file
@@ -901,6 +904,9 @@ class BandSox:
         # Try to load snapshot
         created_symlink = None
 
+        if replay_config:
+            vm.client.put_replay_config(replay_config)
+
         try:
             vm.load_snapshot(
                 str(snapshot_path),
@@ -1108,6 +1114,77 @@ class BandSox:
 
         self.active_vms[new_vm_id] = vm
         return vm
+
+    def start_recording(
+        self,
+        vm: MicroVM,
+        name: str = None,
+        metadata: dict = None,
+        replay_profile: str = "quantum",
+        precision: str = "quantum",
+        strict_engine: bool = False,
+    ) -> dict:
+        return self.recordings.start_recording(
+            vm,
+            name=name,
+            metadata=metadata,
+            replay_profile=replay_profile,
+            precision=precision,
+            strict_engine=strict_engine,
+        )
+
+    def list_recordings(self):
+        return self.recordings.list_recordings()
+
+    def get_recording(self, recording_id: str):
+        return self.recordings.get_recording(recording_id)
+
+    def checkpoint_recording(
+        self,
+        recording_id: str,
+        vm: MicroVM,
+        name: str = None,
+        metadata: dict = None,
+    ):
+        return self.recordings.checkpoint(
+            recording_id, vm, name=name, metadata=metadata
+        )
+
+    def branch_checkpoint(
+        self,
+        checkpoint_id: str,
+        name: str = None,
+        enable_networking: bool = True,
+        metadata: dict = None,
+    ):
+        return self.recordings.branch_checkpoint(
+            checkpoint_id,
+            name=name,
+            enable_networking=enable_networking,
+            metadata=metadata,
+        )
+
+    def replay_recording(
+        self,
+        recording_id: str,
+        checkpoint_id: str = None,
+        name: str = None,
+        enable_networking: bool = False,
+        strict_engine: bool = True,
+    ):
+        return self.recordings.replay(
+            recording_id,
+            checkpoint_id=checkpoint_id,
+            name=name,
+            enable_networking=enable_networking,
+            strict_engine=strict_engine,
+        )
+
+    def get_recording_timeline(self, recording_id: str, limit: int = None):
+        return self.recordings.timeline(recording_id, limit=limit)
+
+    def record_event_for_vm(self, vm_id: str, event_type: str, payload: dict = None):
+        return self.recordings.append_event_for_vm(vm_id, event_type, payload)
 
     def snapshot_vm(
         self, vm: MicroVM, snapshot_name: str = None, metadata: dict = None
@@ -1572,12 +1649,14 @@ class RemoteBandSox:
         detach: bool = True,
         env_vars: dict = None,
         metadata: dict = None,
+        replay_config: dict = None,
     ):
         payload = {
             "name": name,
             "enable_networking": enable_networking,
             "env_vars": env_vars,
             "metadata": metadata,
+            "replay_config": replay_config,
         }
         res = self._request("POST", f"/api/snapshots/{snapshot_id}/restore", json=payload)
         return self._vm(res["id"])
@@ -1636,6 +1715,89 @@ class RemoteBandSox:
             "PUT", f"/api/snapshots/{snapshot_id}/name", json={"name": new_name}
         )
 
+    def start_recording(
+        self,
+        vm,
+        name: str = None,
+        metadata: dict = None,
+        replay_profile: str = "quantum",
+        precision: str = "quantum",
+        strict_engine: bool = False,
+    ):
+        vm_id = vm.vm_id if hasattr(vm, "vm_id") else str(vm)
+        return self._request(
+            "POST",
+            f"/api/vms/{vm_id}/recordings",
+            json={
+                "name": name,
+                "metadata": metadata,
+                "replay_profile": replay_profile,
+                "precision": precision,
+                "strict_engine": strict_engine,
+            },
+        )
+
+    def list_recordings(self):
+        return self._request("GET", "/api/recordings")
+
+    def get_recording(self, recording_id: str):
+        return self._request("GET", f"/api/recordings/{recording_id}")
+
+    def checkpoint_recording(
+        self,
+        recording_id: str,
+        vm=None,
+        name: str = None,
+        metadata: dict = None,
+    ):
+        return self._request(
+            "POST",
+            f"/api/recordings/{recording_id}/checkpoints",
+            json={"name": name, "metadata": metadata},
+        )
+
+    def replay_recording(
+        self,
+        recording_id: str,
+        checkpoint_id: str = None,
+        name: str = None,
+        enable_networking: bool = False,
+        strict_engine: bool = True,
+    ):
+        return self._request(
+            "POST",
+            f"/api/recordings/{recording_id}/replay",
+            json={
+                "checkpoint_id": checkpoint_id,
+                "name": name,
+                "enable_networking": enable_networking,
+                "strict_engine": strict_engine,
+            },
+        )
+
+    def branch_checkpoint(
+        self,
+        checkpoint_id: str,
+        name: str = None,
+        enable_networking: bool = True,
+        metadata: dict = None,
+    ):
+        return self._request(
+            "POST",
+            f"/api/checkpoints/{checkpoint_id}/branch",
+            json={
+                "name": name,
+                "enable_networking": enable_networking,
+                "metadata": metadata,
+            },
+        )
+
+    def get_recording_timeline(self, recording_id: str, limit: int = None):
+        params = {"limit": str(limit)} if limit is not None else None
+        return self._request(
+            "GET", f"/api/recordings/{recording_id}/timeline", params=params
+        )
+
 
 class RemoteMicroVM:
     """VM handle returned by RemoteBandSox."""
@@ -1663,6 +1825,23 @@ class RemoteMicroVM:
 
     def snapshot(self, name: str = None, metadata: dict = None):
         return self.bandsox.snapshot_vm(self, snapshot_name=name, metadata=metadata)
+
+    def start_recording(
+        self,
+        name: str = None,
+        metadata: dict = None,
+        replay_profile: str = "quantum",
+        precision: str = "quantum",
+        strict_engine: bool = False,
+    ):
+        return self.bandsox.start_recording(
+            self,
+            name=name,
+            metadata=metadata,
+            replay_profile=replay_profile,
+            precision=precision,
+            strict_engine=strict_engine,
+        )
 
     def wait_for_agent(self, timeout=30):
         start = time.time()
@@ -1883,6 +2062,21 @@ class ManagedMicroVM(MicroVM):
         """Override to intercept status events."""
         super()._handle_stdout_line(line)
 
+        try:
+            event = json.loads(line)
+            evt_type = event.get("type")
+            if evt_type:
+                self.bandsox.record_event_for_vm(
+                    self.vm_id,
+                    "agent.event",
+                    {
+                        "type": evt_type,
+                        "payload": event.get("payload"),
+                    },
+                )
+        except Exception:
+            pass
+
         # Check if we are ready
         # We can't rely just on super() setting self.agent_ready because that's in-memory only
         # and this instance might be ephemeral or the server might be looking at a different instance.
@@ -1908,6 +2102,33 @@ class ManagedMicroVM(MicroVM):
                 if not meta.get("agent_ready"):
                     meta["agent_ready"] = True
                     self.bandsox._save_metadata(self.vm_id, meta)
+
+    def exec_command(self, command: str, on_stdout=None, on_stderr=None, timeout=30):
+        self.bandsox.record_event_for_vm(
+            self.vm_id,
+            "exec.started",
+            {"command": command, "timeout": timeout},
+        )
+        try:
+            rc = super().exec_command(
+                command,
+                on_stdout=on_stdout,
+                on_stderr=on_stderr,
+                timeout=timeout,
+            )
+            self.bandsox.record_event_for_vm(
+                self.vm_id,
+                "exec.finished",
+                {"command": command, "exit_code": rc},
+            )
+            return rc
+        except Exception as exc:
+            self.bandsox.record_event_for_vm(
+                self.vm_id,
+                "exec.failed",
+                {"command": command, "error": str(exc)},
+            )
+            raise
 
     def pause(self):
         # Check if already paused

@@ -247,6 +247,22 @@ class FirecrackerClient:
         # Allow the caller to inspect/handle 4xx responses (e.g. missing backing file) without loud logs.
         return self._request("PUT", "/snapshot/load", data, log_error=False)
 
+    def put_replay_config(self, replay_config: dict):
+        """Configure the focused Firecracker replay fork.
+
+        Upstream Firecracker does not expose this endpoint. BandSox calls it
+        only when recording/replay is requested and treats 404/501 as "engine
+        unavailable" unless the caller explicitly requires deterministic mode.
+        """
+        return self._request("PUT", "/replay/config", replay_config, log_error=False)
+
+    def post_replay_flush(self):
+        """Flush the focused Firecracker replay log to stable storage."""
+        return self._request("PUT", "/replay/flush", log_error=False)
+
+    def get_replay_status(self):
+        return self._request("GET", "/replay/status", log_error=False).json()
+
     def resume_vm(self):
         data = {"state": "Resumed"}
         return self._request("PATCH", "/vm", data)

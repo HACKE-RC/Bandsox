@@ -399,6 +399,109 @@ describe("BandSox", () => {
     });
   });
 
+  // ── Flight recordings ──
+
+  describe("recordings", () => {
+    it("startRecording posts VM recording config", async () => {
+      fetchMock.mockResolvedValueOnce(
+        makeResponse({
+          id: "rec-1",
+          current_vm_id: "vm-1",
+          checkpoints: [],
+          metadata: { owner: "unit" },
+        })
+      );
+
+      const recording = await bs.startRecording("vm-1", {
+        name: "run-a",
+        metadata: { owner: "unit" },
+        replay_profile: "quantum",
+        precision: "quantum",
+      });
+
+      expect(recording.id).toBe("rec-1");
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("http://localhost:8000/api/vms/vm-1/recordings");
+      expect(init.method).toBe("POST");
+      const body = JSON.parse(init.body as string);
+      expect(body.name).toBe("run-a");
+      expect(body.metadata).toEqual({ owner: "unit" });
+      expect(body.replay_profile).toBe("quantum");
+    });
+
+    it("checkpointRecording posts checkpoint metadata", async () => {
+      fetchMock.mockResolvedValueOnce(
+        makeResponse({
+          id: "chk-1",
+          recording_id: "rec-1",
+          snapshot_id: "snap-1",
+          vm_id: "vm-1",
+        })
+      );
+
+      const checkpoint = await bs.checkpointRecording("rec-1", {
+        name: "after-build",
+        metadata: { phase: "build" },
+      });
+
+      expect(checkpoint.id).toBe("chk-1");
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("http://localhost:8000/api/recordings/rec-1/checkpoints");
+      const body = JSON.parse(init.body as string);
+      expect(body.metadata).toEqual({ phase: "build" });
+    });
+
+    it("replayRecording and branchCheckpoint use production endpoints", async () => {
+      fetchMock
+        .mockResolvedValueOnce(
+          makeResponse({
+            id: "replay-1",
+            recording_id: "rec-1",
+            checkpoint_id: "chk-1",
+            vm_id: "vm-replay",
+          })
+        )
+        .mockResolvedValueOnce(
+          makeResponse({
+            id: "branch-1",
+            recording_id: "rec-1",
+            checkpoint_id: "chk-1",
+            vm_id: "vm-branch",
+          })
+        );
+
+      await bs.replayRecording("rec-1", {
+        checkpoint_id: "chk-1",
+        name: "replay-a",
+        strict_engine: true,
+      });
+      await bs.branchCheckpoint("chk-1", {
+        name: "branch-a",
+        enable_networking: false,
+      });
+
+      expect((fetchMock.mock.calls[0] as string[])[0]).toBe(
+        "http://localhost:8000/api/recordings/rec-1/replay"
+      );
+      expect((fetchMock.mock.calls[1] as string[])[0]).toBe(
+        "http://localhost:8000/api/checkpoints/chk-1/branch"
+      );
+    });
+
+    it("getRecordingTimeline sends optional limit query", async () => {
+      fetchMock.mockResolvedValueOnce(
+        makeResponse([{ seq: 0, type: "recording.started", hash: "h" }])
+      );
+
+      const events = await bs.getRecordingTimeline("rec-1", 1);
+
+      expect(events[0].type).toBe("recording.started");
+      expect((fetchMock.mock.calls[0] as string[])[0]).toBe(
+        "http://localhost:8000/api/recordings/rec-1/timeline?limit=1"
+      );
+    });
+  });
+
   // ── Auth ──
 
   describe("auth", () => {

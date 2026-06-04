@@ -5,6 +5,7 @@ from pydantic import BaseModel
 import os
 from pathlib import Path
 from .core import BandSox
+from .recording import RecordingError
 from .auth import (
     load_auth_config, init_auth_config, auth_enabled,
     create_api_key, list_api_keys, revoke_api_key,
@@ -280,12 +281,20 @@ class RestoreVMRequest(BaseModel):
     enable_networking: bool = True
     env_vars: dict = None
     metadata: dict = None
+    replay_config: dict = None
 
 @app.post("/api/snapshots/{snapshot_id}/restore", dependencies=[Depends(require_auth)])
 def restore_snapshot(snapshot_id: str, req: RestoreVMRequest):
     logger.info(f"Received restore request for snapshot {snapshot_id}")
     try:
-        vm = bs.restore_vm(snapshot_id, name=req.name, enable_networking=req.enable_networking, env_vars=req.env_vars, metadata=req.metadata)
+        vm = bs.restore_vm(
+            snapshot_id,
+            name=req.name,
+            enable_networking=req.enable_networking,
+            env_vars=req.env_vars,
+            metadata=req.metadata,
+            replay_config=req.replay_config,
+        )
         return {"id": vm.vm_id, "status": "restored"}
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Snapshot not found")
@@ -381,6 +390,38 @@ class SnapshotRequest(BaseModel):
     name: str
     metadata: dict = None
 
+
+class StartRecordingRequest(BaseModel):
+    name: str = None
+    metadata: dict = None
+    replay_profile: str = "quantum"
+    precision: str = "quantum"
+    strict_engine: bool = False
+
+
+class RecordingCheckpointRequest(BaseModel):
+    name: str = None
+    metadata: dict = None
+
+
+class ReplayRecordingRequest(BaseModel):
+    checkpoint_id: str = None
+    name: str = None
+    enable_networking: bool = False
+    strict_engine: bool = True
+
+
+class BranchCheckpointRequest(BaseModel):
+    name: str = None
+    enable_networking: bool = True
+    metadata: dict = None
+
+
+def _recording_error_response(exc: Exception):
+    detail = str(exc)
+    status = 501 if "replay engine" in detail.lower() else 500
+    raise HTTPException(status_code=status, detail=detail)
+
 @app.delete("/api/vms/{vm_id}", dependencies=[Depends(require_auth)])
 def delete_vm(vm_id: str):
     logger.info(f"Received delete request for VM {vm_id}")
@@ -394,6 +435,104 @@ def snapshot_vm(vm_id: str, req: SnapshotRequest):
         raise HTTPException(status_code=404, detail="VM not found")
     snap_id = bs.snapshot_vm(vm, req.name, metadata=req.metadata)
     return {"snapshot_id": snap_id}
+
+
+@app.get("/api/recordings", dependencies=[Depends(require_auth)])
+def list_recordings():
+    return bs.list_recordings()
+
+
+@app.get("/api/recordings/{recording_id}", dependencies=[Depends(require_auth)])
+def get_recording(recording_id: str):
+    try:
+        return bs.get_recording(recording_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+
+@app.post("/api/vms/{vm_id}/recordings", dependencies=[Depends(require_auth)])
+def start_recording(vm_id: str, req: StartRecordingRequest):
+    vm = bs.get_vm(vm_id)
+    if not vm:
+        raise HTTPException(status_code=404, detail="VM not found or not running")
+    try:
+        return bs.start_recording(
+            vm,
+            name=req.name,
+            metadata=req.metadata,
+            replay_profile=req.replay_profile,
+            precision=req.precision,
+            strict_engine=req.strict_engine,
+        )
+    except RecordingError as e:
+        _recording_error_response(e)
+    except Exception as e:
+        logger.error(f"Failed to start recording for VM {vm_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/recordings/{recording_id}/checkpoints", dependencies=[Depends(require_auth)])
+def checkpoint_recording(recording_id: str, req: RecordingCheckpointRequest):
+    try:
+        recording = bs.get_recording(recording_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    vm = bs.get_vm(recording.get("current_vm_id"))
+    if not vm:
+        raise HTTPException(status_code=404, detail="Recording VM not found or not running")
+    try:
+        return bs.checkpoint_recording(
+            recording_id,
+            vm,
+            name=req.name,
+            metadata=req.metadata,
+        )
+    except Exception as e:
+        logger.error(f"Failed to checkpoint recording {recording_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/recordings/{recording_id}/replay", dependencies=[Depends(require_auth)])
+def replay_recording(recording_id: str, req: ReplayRecordingRequest):
+    try:
+        return bs.replay_recording(
+            recording_id,
+            checkpoint_id=req.checkpoint_id,
+            name=req.name,
+            enable_networking=req.enable_networking,
+            strict_engine=req.strict_engine,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RecordingError as e:
+        _recording_error_response(e)
+    except Exception as e:
+        logger.error(f"Failed to replay recording {recording_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/checkpoints/{checkpoint_id}/branch", dependencies=[Depends(require_auth)])
+def branch_checkpoint(checkpoint_id: str, req: BranchCheckpointRequest):
+    try:
+        return bs.branch_checkpoint(
+            checkpoint_id,
+            name=req.name,
+            enable_networking=req.enable_networking,
+            metadata=req.metadata,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to branch checkpoint {checkpoint_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/recordings/{recording_id}/timeline", dependencies=[Depends(require_auth)])
+def recording_timeline(recording_id: str, limit: int = None):
+    try:
+        return bs.get_recording_timeline(recording_id, limit=limit)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Recording not found")
 
 @app.get("/api/vms/{vm_id}", dependencies=[Depends(require_auth)])
 def get_vm_details(vm_id: str):

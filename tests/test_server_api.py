@@ -133,6 +133,33 @@ class FakeBandSox:
         self.deleted_snapshot = None
         self.deleted_vm = None
         self.last_status = None
+        self.recording = {
+            "id": "rec-1",
+            "current_vm_id": self.vm.vm_id,
+            "checkpoints": [],
+        }
+        self.checkpoint = {
+            "id": "chk-1",
+            "recording_id": "rec-1",
+            "snapshot_id": "snap-1",
+            "vm_id": self.vm.vm_id,
+        }
+        self.replay = {
+            "id": "replay-1",
+            "recording_id": "rec-1",
+            "checkpoint_id": "chk-1",
+            "vm_id": self.vm.vm_id,
+            "engine_status": "configured",
+            "verification_status": "unverified",
+            "guarantee_class": "unverified-deterministic",
+        }
+        self.branch = {
+            "id": "branch-1",
+            "recording_id": "rec-1",
+            "checkpoint_id": "chk-1",
+            "vm_id": self.vm.vm_id,
+        }
+        self.timeline = [{"seq": 0, "type": "recording.started"}]
 
     def list_vms(self, limit=None, metadata_equals=None):
         return self.vms
@@ -143,7 +170,15 @@ class FakeBandSox:
     def create_vm(self, *_, **__):
         return self.vm
 
-    def restore_vm(self, snapshot_id, name=None, enable_networking=True, env_vars=None, metadata=None):
+    def restore_vm(
+        self,
+        snapshot_id,
+        name=None,
+        enable_networking=True,
+        env_vars=None,
+        metadata=None,
+        replay_config=None,
+    ):
         if snapshot_id == "missing":
             raise FileNotFoundError("snapshot missing")
         return self.vm
@@ -167,6 +202,55 @@ class FakeBandSox:
 
     def get_vm_info(self, vm_id):
         return self.vm_info if vm_id == self.vm.vm_id else None
+
+    def list_recordings(self):
+        return [self.recording]
+
+    def get_recording(self, recording_id):
+        if recording_id != self.recording["id"]:
+            raise FileNotFoundError("recording missing")
+        return self.recording
+
+    def start_recording(self, vm, name=None, metadata=None, replay_profile="quantum", precision="quantum", strict_engine=False):
+        self.recording = {
+            **self.recording,
+            "name": name,
+            "metadata": metadata or {},
+            "replay_profile": replay_profile,
+            "precision": precision,
+            "engine_status": "unavailable" if not strict_engine else "configured",
+        }
+        return self.recording
+
+    def checkpoint_recording(self, recording_id, vm, name=None, metadata=None):
+        if recording_id != self.recording["id"]:
+            raise FileNotFoundError("recording missing")
+        self.checkpoint = {
+            **self.checkpoint,
+            "name": name,
+            "metadata": metadata or {},
+        }
+        self.recording["checkpoints"] = [self.checkpoint]
+        return self.checkpoint
+
+    def replay_recording(self, recording_id, checkpoint_id=None, name=None, enable_networking=False, strict_engine=True):
+        if recording_id != self.recording["id"]:
+            raise FileNotFoundError("recording missing")
+        return {
+            **self.replay,
+            "checkpoint_id": checkpoint_id or self.replay["checkpoint_id"],
+            "name": name,
+        }
+
+    def branch_checkpoint(self, checkpoint_id, name=None, enable_networking=True, metadata=None):
+        if checkpoint_id != self.checkpoint["id"]:
+            raise FileNotFoundError("checkpoint missing")
+        return {**self.branch, "name": name, "metadata": metadata or {}}
+
+    def get_recording_timeline(self, recording_id, limit=None):
+        if recording_id != self.recording["id"]:
+            raise FileNotFoundError("recording missing")
+        return self.timeline[-limit:] if limit is not None else self.timeline
 
 
 @pytest.fixture
@@ -322,6 +406,63 @@ def test_snapshot_vm_success(client, fake_bs):
 def test_snapshot_vm_not_found(client):
     resp = client.post("/api/vms/unknown/snapshot", json={"name": "snap-new"})
     assert resp.status_code == 404
+
+
+def test_recording_lifecycle_endpoints(client, fake_bs):
+    start_resp = client.post(
+        f"/api/vms/{fake_bs.vm.vm_id}/recordings",
+        json={
+            "name": "run-a",
+            "metadata": {"owner": "unit"},
+            "replay_profile": "quantum",
+            "precision": "quantum",
+        },
+    )
+    assert start_resp.status_code == 200
+    assert start_resp.json()["id"] == "rec-1"
+    assert start_resp.json()["metadata"] == {"owner": "unit"}
+
+    list_resp = client.get("/api/recordings")
+    assert list_resp.status_code == 200
+    assert list_resp.json()[0]["id"] == "rec-1"
+
+    get_resp = client.get("/api/recordings/rec-1")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["id"] == "rec-1"
+
+    checkpoint_resp = client.post(
+        "/api/recordings/rec-1/checkpoints",
+        json={"name": "after-build", "metadata": {"phase": "build"}},
+    )
+    assert checkpoint_resp.status_code == 200
+    assert checkpoint_resp.json()["id"] == "chk-1"
+    assert checkpoint_resp.json()["metadata"] == {"phase": "build"}
+
+    replay_resp = client.post(
+        "/api/recordings/rec-1/replay",
+        json={"checkpoint_id": "chk-1", "name": "replay-a"},
+    )
+    assert replay_resp.status_code == 200
+    assert replay_resp.json()["checkpoint_id"] == "chk-1"
+
+    branch_resp = client.post(
+        "/api/checkpoints/chk-1/branch",
+        json={"name": "branch-a", "enable_networking": False, "metadata": {"why": "test"}},
+    )
+    assert branch_resp.status_code == 200
+    assert branch_resp.json()["vm_id"] == fake_bs.vm.vm_id
+
+    timeline_resp = client.get("/api/recordings/rec-1/timeline", params={"limit": 1})
+    assert timeline_resp.status_code == 200
+    assert timeline_resp.json() == fake_bs.timeline
+
+
+def test_recording_not_found_endpoints(client):
+    assert client.get("/api/recordings/missing").status_code == 404
+    assert client.post("/api/recordings/missing/checkpoints", json={}).status_code == 404
+    assert client.post("/api/recordings/missing/replay", json={}).status_code == 404
+    assert client.post("/api/checkpoints/missing/branch", json={}).status_code == 404
+    assert client.get("/api/recordings/missing/timeline").status_code == 404
 
 
 def test_get_vm_details_success(client, fake_bs):

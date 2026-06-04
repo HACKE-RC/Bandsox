@@ -10,6 +10,8 @@ import type {
   HttpProxyResult,
   UploadFolderFiles,
   SnapshotOptions,
+  StartRecordingOptions,
+  RecordingInfo,
 } from "./types";
 import { BandSox } from "./client";
 import { TerminalSession } from "./terminal";
@@ -47,6 +49,12 @@ export class MicroVM {
 
   async snapshot(options: SnapshotOptions): Promise<string> {
     return this.bandsox.snapshotVm(this.vmId, options);
+  }
+
+  async startRecording(
+    options: StartRecordingOptions = {}
+  ): Promise<RecordingInfo> {
+    return this.bandsox.startRecording(this.vmId, options);
   }
 
   // ─── Info ───

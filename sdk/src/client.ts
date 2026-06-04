@@ -7,6 +7,15 @@ import type {
   SnapshotOptions,
   VmInfo,
   SnapshotInfo,
+  StartRecordingOptions,
+  RecordingCheckpointOptions,
+  ReplayRecordingOptions,
+  BranchCheckpointOptions,
+  RecordingInfo,
+  RecordingCheckpointInfo,
+  RecordingTimelineEvent,
+  RecordingReplayInfo,
+  RecordingBranchInfo,
   AuthCheckResult,
   AuthKeysResult,
   CreateApiKeyResult,
@@ -356,6 +365,97 @@ export class BandSox {
     await this.request("PUT", `/api/snapshots/${snapshotId}/name`, {
       json: { name: newName },
     });
+  }
+
+  // ─── Flight recordings ───
+
+  async startRecording(
+    vmId: string,
+    options: StartRecordingOptions = {}
+  ): Promise<RecordingInfo> {
+    const payload = {
+      name: options.name ?? null,
+      metadata: options.metadata ?? null,
+      replay_profile: options.replay_profile ?? null,
+      precision: options.precision ?? null,
+      strict_engine: options.strict_engine ?? null,
+    };
+    return this.request<RecordingInfo>(
+      "POST",
+      `/api/vms/${vmId}/recordings`,
+      { json: payload }
+    );
+  }
+
+  async listRecordings(): Promise<RecordingInfo[]> {
+    return this.request<RecordingInfo[]>("GET", "/api/recordings");
+  }
+
+  async getRecording(recordingId: string): Promise<RecordingInfo> {
+    return this.request<RecordingInfo>("GET", `/api/recordings/${recordingId}`);
+  }
+
+  async checkpointRecording(
+    recordingId: string,
+    options: RecordingCheckpointOptions = {}
+  ): Promise<RecordingCheckpointInfo> {
+    return this.request<RecordingCheckpointInfo>(
+      "POST",
+      `/api/recordings/${recordingId}/checkpoints`,
+      {
+        json: {
+          name: options.name ?? null,
+          metadata: options.metadata ?? null,
+        },
+      }
+    );
+  }
+
+  async replayRecording(
+    recordingId: string,
+    options: ReplayRecordingOptions = {}
+  ): Promise<RecordingReplayInfo> {
+    return this.request<RecordingReplayInfo>(
+      "POST",
+      `/api/recordings/${recordingId}/replay`,
+      {
+        json: {
+          checkpoint_id: options.checkpoint_id ?? null,
+          name: options.name ?? null,
+          enable_networking: options.enable_networking ?? null,
+          strict_engine: options.strict_engine ?? null,
+        },
+      }
+    );
+  }
+
+  async branchCheckpoint(
+    checkpointId: string,
+    options: BranchCheckpointOptions = {}
+  ): Promise<RecordingBranchInfo> {
+    return this.request<RecordingBranchInfo>(
+      "POST",
+      `/api/checkpoints/${checkpointId}/branch`,
+      {
+        json: {
+          name: options.name ?? null,
+          enable_networking: options.enable_networking ?? null,
+          metadata: options.metadata ?? null,
+        },
+      }
+    );
+  }
+
+  async getRecordingTimeline(
+    recordingId: string,
+    limit?: number
+  ): Promise<RecordingTimelineEvent[]> {
+    const params = limit == null ? undefined : { limit: String(limit) };
+    return this.request<RecordingTimelineEvent[]>(
+      "GET",
+      `/api/recordings/${recordingId}/timeline`,
+      { params }
+    );
   }
 
   // ─── Auth ───
