@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import time
 import uuid
@@ -62,6 +63,10 @@ def _safe_slug(value: str) -> str:
 def _event_hash(event: dict[str, Any]) -> str:
     payload = json.dumps(event, sort_keys=True, separators=(",", ":"), default=_json_default)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _text_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 class RecordingManager:
@@ -174,6 +179,195 @@ class RecordingManager:
             "checks": checks,
             "reasons": reasons,
         }
+
+    def _run_probe_command(
+        self, vm, command: str, timeout: int | float | None = None
+    ) -> dict[str, Any]:
+        stdout = []
+        stderr = []
+        exit_code = vm.exec_command(
+            command,
+            on_stdout=lambda chunk: stdout.append(str(chunk)),
+            on_stderr=lambda chunk: stderr.append(str(chunk)),
+            timeout=timeout or 30,
+        )
+        stdout_text = "".join(stdout)
+        stderr_text = "".join(stderr)
+        return {
+            "exit_code": exit_code,
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "stdout_sha256": _text_hash(stdout_text),
+            "stderr_sha256": _text_hash(stderr_text),
+        }
+
+    def _capture_output_probe(self, vm, probe: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(probe, dict):
+            raise RecordingError("Verification probe must be an object")
+        probe_type = str(probe.get("type") or "command")
+        name = str(probe.get("name") or probe.get("path") or probe.get("command") or probe_type)
+
+        if probe_type == "command":
+            command = probe.get("command")
+            if not command:
+                raise RecordingError(f"Command probe {name!r} is missing command")
+            result = self._run_probe_command(vm, str(command), probe.get("timeout"))
+            return {
+                "type": "command",
+                "name": name,
+                "command": str(command),
+                "timeout": probe.get("timeout"),
+                "result": result,
+            }
+
+        if probe_type == "file_sha256":
+            path = probe.get("path")
+            if not path:
+                raise RecordingError(f"File probe {name!r} is missing path")
+            path = str(path)
+            try:
+                content = vm.get_file_contents(path)
+                content = str(content)
+                result = {
+                    "exists": True,
+                    "size_bytes": len(content.encode("utf-8")),
+                    "sha256": _text_hash(content),
+                    "error": None,
+                }
+            except Exception as exc:
+                result = {
+                    "exists": False,
+                    "size_bytes": None,
+                    "sha256": None,
+                    "error": str(exc),
+                }
+            return {
+                "type": "file_sha256",
+                "name": name,
+                "path": path,
+                "result": result,
+            }
+
+        if probe_type == "guest_file_sha256":
+            path = probe.get("path")
+            if not path:
+                raise RecordingError(f"Guest file probe {name!r} is missing path")
+            path = str(path)
+            quoted = shlex.quote(path)
+            command = (
+                f"if [ -e {quoted} ]; then "
+                f"printf 'present\\n'; wc -c < {quoted}; sha256sum {quoted} | awk '{{print $1}}'; "
+                "else printf 'missing\\n'; fi"
+            )
+            command_result = self._run_probe_command(vm, command, probe.get("timeout"))
+            lines = [line.strip() for line in command_result["stdout"].splitlines()]
+            exists = bool(lines and lines[0] == "present")
+            result = {
+                "exists": exists,
+                "size_bytes": int(lines[1]) if exists and len(lines) > 1 else None,
+                "sha256": lines[2] if exists and len(lines) > 2 else None,
+                "exit_code": command_result["exit_code"],
+                "stderr": command_result["stderr"],
+            }
+            return {
+                "type": "guest_file_sha256",
+                "name": name,
+                "path": path,
+                "result": result,
+            }
+
+        raise RecordingError(f"Unsupported verification probe type: {probe_type}")
+
+    def _capture_output_equivalence(
+        self, vm, verification_probes: list[dict[str, Any]] | None
+    ) -> dict[str, Any]:
+        if not verification_probes:
+            return {"status": "not_configured", "probes": []}
+        captures = []
+        for probe in verification_probes:
+            captures.append(self._capture_output_probe(vm, probe))
+        return {
+            "status": "captured",
+            "captured_at": _now(),
+            "probes": captures,
+        }
+
+    def _compare_output_probe(
+        self, expected: dict[str, Any], actual: dict[str, Any]
+    ) -> dict[str, Any]:
+        reasons = []
+        probe_type = expected.get("type")
+        expected_result = expected.get("result") or {}
+        actual_result = actual.get("result") or {}
+
+        if expected.get("type") != actual.get("type"):
+            reasons.append("probe_type_mismatch")
+        if expected.get("name") != actual.get("name"):
+            reasons.append("probe_name_mismatch")
+
+        if probe_type == "command":
+            for field in ("exit_code", "stdout_sha256", "stderr_sha256", "stdout", "stderr"):
+                if expected_result.get(field) != actual_result.get(field):
+                    reasons.append(f"{field}_mismatch")
+        elif probe_type in ("file_sha256", "guest_file_sha256"):
+            for field in ("exists", "size_bytes", "sha256"):
+                if expected_result.get(field) != actual_result.get(field):
+                    reasons.append(f"{field}_mismatch")
+        else:
+            reasons.append(f"unsupported_probe_type:{probe_type}")
+
+        return {
+            "type": probe_type,
+            "name": expected.get("name"),
+            "passed": not reasons,
+            "reasons": reasons,
+            "expected": expected_result,
+            "actual": actual_result,
+        }
+
+    def _verify_output_equivalence(
+        self, vm, expected_equivalence: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        expected_probes = (expected_equivalence or {}).get("probes") or []
+        if not expected_probes:
+            return {"status": "not_configured", "checks": []}
+
+        actual_probes = []
+        checks = []
+        for expected in expected_probes:
+            actual = self._capture_output_probe(vm, expected)
+            actual_probes.append(actual)
+            checks.append(self._compare_output_probe(expected, actual))
+
+        failed = [check for check in checks if not check["passed"]]
+        return {
+            "status": "failed" if failed else "passed",
+            "checked_at": _now(),
+            "passed": len(checks) - len(failed),
+            "failed": len(failed),
+            "checks": checks,
+            "actual_probes": actual_probes,
+        }
+
+    def _merge_output_verification(
+        self, verification: dict[str, Any], output_equivalence: dict[str, Any]
+    ) -> dict[str, Any]:
+        verification = {
+            "status": verification["status"],
+            "checks": dict(verification["checks"]),
+            "reasons": list(verification["reasons"]),
+        }
+        status = output_equivalence.get("status")
+        if status == "not_configured":
+            verification["checks"]["output_equivalence"] = None
+        elif status == "passed":
+            verification["checks"]["output_equivalence"] = True
+        else:
+            verification["checks"]["output_equivalence"] = False
+            verification["reasons"].append("output_equivalence_failed")
+            if verification["status"] == "verified":
+                verification["status"] = "output_mismatch"
+        return verification
 
     def _base_manifest(
         self,
@@ -339,11 +533,14 @@ class RecordingManager:
         vm,
         name: str | None = None,
         metadata: dict[str, Any] | None = None,
+        verification_probes: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         manifest = self._load_manifest(recording_id)
         ordinal = len(manifest.get("checkpoints", []))
         checkpoint_id = f"{recording_id[:12]}-{ordinal:06d}"
         snapshot_name = _safe_slug(name or f"recording-{checkpoint_id}")
+
+        output_equivalence = self._capture_output_equivalence(vm, verification_probes)
 
         try:
             vm.client.post_replay_flush()
@@ -379,6 +576,7 @@ class RecordingManager:
             "trace_hash": (replay_status or {}).get("trace_hash"),
             "trace_events_recorded": (replay_status or {}).get("trace_events_recorded"),
             "firecracker_replay_status": replay_status,
+            "output_equivalence": output_equivalence,
             "event_seq": manifest.get("next_event_seq", 0),
             "event_hash": manifest.get("last_event_hash"),
         }
@@ -490,7 +688,13 @@ class RecordingManager:
                 ) from exc
             raise
         replay_status = self._replay_status(vm)
-        verification = self._replay_verification(checkpoint, replay_status)
+        output_equivalence = self._verify_output_equivalence(
+            vm, checkpoint.get("output_equivalence")
+        )
+        verification = self._merge_output_verification(
+            self._replay_verification(checkpoint, replay_status),
+            output_equivalence,
+        )
         engine_status = "configured" if strict_engine else "not_requested"
         engine_error = None
 
@@ -511,6 +715,7 @@ class RecordingManager:
             "trace_hash": (replay_status or {}).get("trace_hash"),
             "trace_events_replayed": (replay_status or {}).get("trace_events_replayed"),
             "firecracker_replay_status": replay_status,
+            "output_equivalence": output_equivalence,
         }
         manifest.setdefault("replays", []).append(replay)
         self._save_manifest(manifest)

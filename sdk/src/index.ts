@@ -15,6 +15,7 @@ export type {
   ListVmsOptions,
   SnapshotOptions,
   StartRecordingOptions,
+  RecordingVerificationProbe,
   RecordingCheckpointOptions,
   ReplayRecordingOptions,
   BranchCheckpointOptions,

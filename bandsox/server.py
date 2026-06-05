@@ -402,6 +402,7 @@ class StartRecordingRequest(BaseModel):
 class RecordingCheckpointRequest(BaseModel):
     name: str = None
     metadata: dict = None
+    verification_probes: list[dict] = None
 
 
 class ReplayRecordingRequest(BaseModel):
@@ -486,6 +487,7 @@ def checkpoint_recording(recording_id: str, req: RecordingCheckpointRequest):
             vm,
             name=req.name,
             metadata=req.metadata,
+            verification_probes=req.verification_probes,
         )
     except Exception as e:
         logger.error(f"Failed to checkpoint recording {recording_id}: {e}")

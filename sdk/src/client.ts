@@ -406,6 +406,7 @@ export class BandSox {
         json: {
           name: options.name ?? null,
           metadata: options.metadata ?? null,
+          verification_probes: options.verification_probes ?? null,
         },
       }
     );

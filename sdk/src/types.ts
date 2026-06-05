@@ -55,9 +55,24 @@ export interface StartRecordingOptions {
   strict_engine?: boolean;
 }
 
+export type RecordingVerificationProbe =
+  | {
+      type?: "command";
+      name?: string | null;
+      command: string;
+      timeout?: number | null;
+    }
+  | {
+      type: "file_sha256" | "guest_file_sha256";
+      name?: string | null;
+      path: string;
+      timeout?: number | null;
+    };
+
 export interface RecordingCheckpointOptions {
   name?: string | null;
   metadata?: Record<string, unknown> | null;
+  verification_probes?: RecordingVerificationProbe[] | null;
 }
 
 export interface ReplayRecordingOptions {
@@ -87,6 +102,7 @@ export interface RecordingCheckpointInfo {
   trace_hash?: string | null;
   trace_events_recorded?: number | null;
   firecracker_replay_status?: Record<string, unknown> | null;
+  output_equivalence?: Record<string, unknown> | null;
   event_seq?: number;
   event_hash?: string | null;
 }
@@ -136,6 +152,7 @@ export interface RecordingReplayInfo {
   trace_hash?: string | null;
   trace_events_replayed?: number | null;
   firecracker_replay_status?: Record<string, unknown> | null;
+  output_equivalence?: Record<string, unknown> | null;
 }
 
 export interface RecordingBranchInfo {

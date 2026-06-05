@@ -222,13 +222,19 @@ class FakeBandSox:
         }
         return self.recording
 
-    def checkpoint_recording(self, recording_id, vm, name=None, metadata=None):
+    def checkpoint_recording(
+        self, recording_id, vm, name=None, metadata=None, verification_probes=None
+    ):
         if recording_id != self.recording["id"]:
             raise FileNotFoundError("recording missing")
         self.checkpoint = {
             **self.checkpoint,
             "name": name,
             "metadata": metadata or {},
+            "output_equivalence": {
+                "status": "captured" if verification_probes else "not_configured",
+                "probes": verification_probes or [],
+            },
         }
         self.recording["checkpoints"] = [self.checkpoint]
         return self.checkpoint
@@ -432,11 +438,18 @@ def test_recording_lifecycle_endpoints(client, fake_bs):
 
     checkpoint_resp = client.post(
         "/api/recordings/rec-1/checkpoints",
-        json={"name": "after-build", "metadata": {"phase": "build"}},
+        json={
+            "name": "after-build",
+            "metadata": {"phase": "build"},
+            "verification_probes": [
+                {"type": "command", "name": "result", "command": "cat /tmp/result"}
+            ],
+        },
     )
     assert checkpoint_resp.status_code == 200
     assert checkpoint_resp.json()["id"] == "chk-1"
     assert checkpoint_resp.json()["metadata"] == {"phase": "build"}
+    assert checkpoint_resp.json()["output_equivalence"]["status"] == "captured"
 
     replay_resp = client.post(
         "/api/recordings/rec-1/replay",

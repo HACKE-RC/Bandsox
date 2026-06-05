@@ -442,6 +442,10 @@ describe("BandSox", () => {
       const checkpoint = await bs.checkpointRecording("rec-1", {
         name: "after-build",
         metadata: { phase: "build" },
+        verification_probes: [
+          { type: "command", name: "result", command: "cat /tmp/result" },
+          { type: "file_sha256", name: "artifact", path: "/tmp/result" },
+        ],
       });
 
       expect(checkpoint.id).toBe("chk-1");
@@ -449,6 +453,10 @@ describe("BandSox", () => {
       expect(url).toBe("http://localhost:8000/api/recordings/rec-1/checkpoints");
       const body = JSON.parse(init.body as string);
       expect(body.metadata).toEqual({ phase: "build" });
+      expect(body.verification_probes).toEqual([
+        { type: "command", name: "result", command: "cat /tmp/result" },
+        { type: "file_sha256", name: "artifact", path: "/tmp/result" },
+      ]);
     });
 
     it("replayRecording and branchCheckpoint use production endpoints", async () => {

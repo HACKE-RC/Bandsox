@@ -1145,9 +1145,14 @@ class BandSox:
         vm: MicroVM,
         name: str = None,
         metadata: dict = None,
+        verification_probes: list[dict] = None,
     ):
         return self.recordings.checkpoint(
-            recording_id, vm, name=name, metadata=metadata
+            recording_id,
+            vm,
+            name=name,
+            metadata=metadata,
+            verification_probes=verification_probes,
         )
 
     def branch_checkpoint(
@@ -1749,11 +1754,16 @@ class RemoteBandSox:
         vm=None,
         name: str = None,
         metadata: dict = None,
+        verification_probes: list[dict] = None,
     ):
         return self._request(
             "POST",
             f"/api/recordings/{recording_id}/checkpoints",
-            json={"name": name, "metadata": metadata},
+            json={
+                "name": name,
+                "metadata": metadata,
+                "verification_probes": verification_probes,
+            },
         )
 
     def replay_recording(

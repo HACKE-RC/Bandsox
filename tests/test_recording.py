@@ -45,12 +45,34 @@ class FakeFirecrackerClient:
 
 
 class FakeVM:
-    def __init__(self, vm_id="vm-1", fail_replay_config=False, replay_status=None):
+    def __init__(
+        self,
+        vm_id="vm-1",
+        fail_replay_config=False,
+        replay_status=None,
+        command_outputs=None,
+        files=None,
+    ):
         self.vm_id = vm_id
         self.client = FakeFirecrackerClient(
             fail_replay_config=fail_replay_config,
             replay_status=replay_status,
         )
+        self.command_outputs = command_outputs or {}
+        self.files = files or {}
+
+    def exec_command(self, command, on_stdout=None, on_stderr=None, timeout=30):
+        exit_code, stdout, stderr = self.command_outputs.get(command, (0, "", ""))
+        if on_stdout and stdout:
+            on_stdout(stdout)
+        if on_stderr and stderr:
+            on_stderr(stderr)
+        return exit_code
+
+    def get_file_contents(self, path):
+        if path not in self.files:
+            raise FileNotFoundError(path)
+        return self.files[path]
 
 
 class FakeBandSox:
@@ -71,6 +93,8 @@ class FakeBandSox:
         }
         self.snapshots = []
         self.restored = []
+        self.replay_command_outputs = {}
+        self.replay_files = {}
 
     def get_vm_info(self, vm_id):
         return self.metadata.get(vm_id)
@@ -97,6 +121,8 @@ class FakeBandSox:
         }
         return FakeVM(
             vm_id,
+            command_outputs=self.replay_command_outputs,
+            files=self.replay_files,
             replay_status={
                 "configured": True,
                 "guarantee_class": "virtio-rng-inputs",
@@ -210,6 +236,87 @@ def test_branch_and_replay_use_checkpoint_snapshot(tmp_path):
     assert replay["verification_reasons"] == []
     assert replay["trace_hash"] == checkpoint["trace_hash"]
     assert replay["trace_events_replayed"] == 3
+    assert replay["output_equivalence"]["status"] == "not_configured"
+
+
+def test_replay_verifies_command_output_and_file_hash_equivalence(tmp_path):
+    bs = FakeBandSox(tmp_path)
+    bs.replay_command_outputs = {"cat /workspace/result.txt": (0, "answer=42\n", "")}
+    bs.replay_files = {"/workspace/result.txt": "answer=42\n"}
+    manager = RecordingManager(bs)
+    vm = FakeVM(
+        command_outputs={"cat /workspace/result.txt": (0, "answer=42\n", "")},
+        files={"/workspace/result.txt": "answer=42\n"},
+    )
+    recording = manager.start_recording(vm)
+    checkpoint = manager.checkpoint(
+        recording["id"],
+        vm,
+        verification_probes=[
+            {
+                "type": "command",
+                "name": "result-command",
+                "command": "cat /workspace/result.txt",
+            },
+            {
+                "type": "file_sha256",
+                "name": "result-file",
+                "path": "/workspace/result.txt",
+            },
+        ],
+    )
+
+    assert checkpoint["output_equivalence"]["status"] == "captured"
+    assert len(checkpoint["output_equivalence"]["probes"]) == 2
+
+    replay = manager.replay(recording["id"], checkpoint_id=checkpoint["id"])
+
+    assert replay["verification_status"] == "verified"
+    assert replay["verification_checks"]["output_equivalence"] is True
+    assert replay["output_equivalence"]["status"] == "passed"
+    assert replay["output_equivalence"]["failed"] == 0
+
+
+def test_replay_reports_output_mismatch_when_probe_output_changes(tmp_path):
+    bs = FakeBandSox(tmp_path)
+    bs.replay_command_outputs = {"cat /workspace/result.txt": (0, "answer=43\n", "")}
+    bs.replay_files = {"/workspace/result.txt": "answer=43\n"}
+    manager = RecordingManager(bs)
+    vm = FakeVM(
+        command_outputs={"cat /workspace/result.txt": (0, "answer=42\n", "")},
+        files={"/workspace/result.txt": "answer=42\n"},
+    )
+    recording = manager.start_recording(vm)
+    checkpoint = manager.checkpoint(
+        recording["id"],
+        vm,
+        verification_probes=[
+            {
+                "type": "command",
+                "name": "result-command",
+                "command": "cat /workspace/result.txt",
+            },
+            {
+                "type": "file_sha256",
+                "name": "result-file",
+                "path": "/workspace/result.txt",
+            },
+        ],
+    )
+
+    replay = manager.replay(recording["id"], checkpoint_id=checkpoint["id"])
+
+    assert replay["verification_status"] == "output_mismatch"
+    assert replay["verification_checks"]["output_equivalence"] is False
+    assert "output_equivalence_failed" in replay["verification_reasons"]
+    assert replay["output_equivalence"]["status"] == "failed"
+    reasons = {
+        reason
+        for check in replay["output_equivalence"]["checks"]
+        for reason in check["reasons"]
+    }
+    assert "stdout_sha256_mismatch" in reasons
+    assert "sha256_mismatch" in reasons
 
 
 def test_replay_reports_trace_loaded_when_checkpoint_cursor_does_not_verify(tmp_path):

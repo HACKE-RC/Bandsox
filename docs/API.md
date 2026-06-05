@@ -324,7 +324,12 @@ Replay is intentionally split across two review surfaces:
 - `GET /api/recordings/{recording_id}` -- fetch one recording manifest.
 - `POST /api/recordings/{recording_id}/checkpoints` -- checkpoint the
   recording's current VM.
-  - Body: `{ "name": "optional-name", "metadata": {} }`
+  - Body: `{ "name": "optional-name", "metadata": {}, "verification_probes": [] }`
+  - `verification_probes` are optional read-only guest-visible checks captured
+    before the snapshot. Supported probe types:
+    - `{ "type": "command", "name": "python-version", "command": "python3 --version", "timeout": 10 }`
+    - `{ "type": "file_sha256", "name": "app-config", "path": "/workspace/config.json" }`
+    - `{ "type": "guest_file_sha256", "name": "large-artifact", "path": "/workspace/model.bin" }`
 - `POST /api/recordings/{recording_id}/replay` -- restore a checkpoint in
   replay mode.
   - Body: `{ "checkpoint_id": "optional-checkpoint", "name": "optional-name", "enable_networking": false, "strict_engine": true }`
@@ -346,14 +351,15 @@ engine. Replay attempts also include:
 - `verification_status: "trace_loaded"` when Firecracker accepted a replay log
   but BandSox could not verify the checkpoint cursor. See
   `verification_reasons` for the failed checks.
+- `verification_status: "output_mismatch"` when the checkpoint cursor verified
+  but one or more configured output-equivalence probes failed after replay.
 - `verification_status: "verified"` when Firecracker loaded the replay log and
-  BandSox verified the checkpoint cursor: configured replay mode, optional
-  checkpoint id, trace event count, trace hash, and no reported replay
-  mismatch.
+  BandSox verified the checkpoint cursor and every configured output probe.
 
-This status verifies the replay cursor at restore time. Full end-to-end replay
-equivalence still requires comparing guest-visible outputs and artifact hashes
-after the restored VM runs.
+Replay attempts include `output_equivalence`. When probes were configured on
+the checkpoint, BandSox reruns them on the restored VM and compares exact
+command exit/stdout/stderr hashes plus file existence, size, and SHA-256
+hashes.
 
 ### Static pages
 
